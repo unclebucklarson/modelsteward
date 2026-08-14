@@ -66,9 +66,29 @@ llm_forge harvest map: `src/gguf.rs` (header parser), `src/library.rs`
 (scan + Ollama store), `src/serve.rs`/`launcher.rs` (server guard),
 `src/atomic.rs`.
 
-## Spike 2 — fit behavior: DEFERRED (needs free GPU)
+## Spike 2 — fit behavior: CONFIRMED (run after GPU freed, same day)
 
-Blocked on VRAM during this run. Questions to answer when the GPU is free:
-per-model `--fit-target`/`--fit-ctx` in preset sections; what `n_ctx` a
-27B Q5 settles at on 24GB with q8_0 KV; load/swap wall-clock for real models;
-tool-call round-trip through the router from OpenCode.
+Real-model run: Qwen3.6-27B quants on the 24GB RTX 3090 Ti, via the router.
+
+- **Load: 13s** for the 19GB UD-Q5_K_XL (cold-ish). **Full swap
+  (unload + load other quant): 12s.** Model switching is fast enough to feel
+  Ollama-like.
+- **`--fit` settles context automatically and reports it.** UD-Q5_K_XL with
+  `q8_0` KV cache: **n_ctx 72,960** (vs 262,144 train). Q5_K_M with default
+  f16 KV: **n_ctx 36,096**. Same-size models, KV quantization ≈ doubled usable
+  context — north-star exhibit A, and exactly the kind of default the app
+  should set.
+- VRAM after fit: ~22.5GB of 24.5GB both times — the default 1024 MiB
+  `--fit-target` margin is honored.
+- **The settled `n_ctx` is available live** at
+  `/props?model=X` → `default_generation_settings.n_ctx`. This is the number
+  to write into opencode.json `limit.context` (NOT `n_ctx_train`). Caveat:
+  instances default to 4 parallel slots with unified KV, so n_ctx is shared
+  across concurrent requests; OpenCode as sole client effectively gets all
+  of it. Consider `-np 1` in generated presets for single-user coding.
+- **Tool calling through the router works** (OpenAI-style `tools`,
+  `finish_reason: "tool_calls"`, well-formed arguments). Note Qwen3.6
+  reasons before calling tools — a small `max_tokens` truncates the call
+  mid-arguments; don't cap output tightly in agent use.
+- Load status polling behaved as documented (async load/unload, `loading` →
+  `loaded`; unloaded instance freed VRAM before the next load completed).

@@ -120,10 +120,12 @@ src/
 
 ## Spikes first (verify before building on them)
 
-> **Status 2026-08-14:** spikes 1, 3, 4 run and confirmed — see
-> [docs/spikes.md](docs/spikes.md) for findings (router mode + hot reload
-> work; Ollama store is at `/usr/share/ollama/.ollama` here; JSONC editing
-> harvested). Spike 2 deferred until the GPU is free.
+> **Status 2026-08-14: all four spikes run and confirmed** — see
+> [docs/spikes.md](docs/spikes.md). Highlights: router mode + hot reload work;
+> 27B swap in ~12s; `--fit` settles 27B-Q5 at 72,960 ctx with q8_0 KV (vs
+> 36,096 with f16 KV) and `/props` reports it live; tool calls work through
+> the router; Ollama store here is `/usr/share/ollama/.ollama`; JSONC editing
+> harvested from prior tool. Architecture is validated — proceed to M1.
 
 1. **Router mode reality check** (highest risk): with the real b10216 binary and
    a Qwen3.6 GGUF — exact preset-INI schema, what `/v1/models` reports per model,
