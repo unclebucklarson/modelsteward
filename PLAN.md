@@ -120,6 +120,11 @@ src/
 
 ## Spikes first (verify before building on them)
 
+> **Status 2026-08-14:** spikes 1, 3, 4 run and confirmed — see
+> [docs/spikes.md](docs/spikes.md) for findings (router mode + hot reload
+> work; Ollama store is at `/usr/share/ollama/.ollama` here; JSONC editing
+> harvested). Spike 2 deferred until the GPU is free.
+
 1. **Router mode reality check** (highest risk): with the real b10216 binary and
    a Qwen3.6 GGUF — exact preset-INI schema, what `/v1/models` reports per model,
    load/unload endpoints and swap latency, how `--models-max` interacts with a
