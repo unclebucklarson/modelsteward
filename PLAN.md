@@ -6,6 +6,27 @@ mode** (one long-lived, multi-model, hot-swapping server), and keeps
 `~/.config/opencode/opencode.json` correct and in sync with what is actually
 servable.
 
+## North star
+
+**Squeeze maximum performance out of local models for AI coding, without the
+user needing to be a llama.cpp or OpenCode expert.** The app encodes the
+expertise. Four consequences:
+
+1. **Opinionated coding-agent defaults.** Agentic coding is prefill-heavy:
+   OpenCode resends large, mostly-identical prompts every turn. So defaults
+   optimize prompt-processing speed and cache reuse — generous `--cache-ram`,
+   context checkpoints, KV cache quantization (`-ctk/-ctv q8_0`) to buy
+   context headroom — not just raw generation speed.
+2. **Measured, not guessed.** The bundled `llama-bench` binary turns config
+   choices into numbers. Recommendations ship with measured pp/tg tok/s on
+   *this* machine ("q8_0 KV: +6k ctx, −2% tg speed"), and any tweak can be
+   A/B-benchmarked before it becomes the default.
+3. **Expert levers, one click.** Advanced wins like speculative decoding
+   (`--spec-draft-model` with a small draft model) become a "try this →
+   measured verdict → keep or discard" flow instead of a research project.
+4. **Teach while doing.** Every recommendation shows the exact flag it sets and
+   a one-line why, so expertise transfers instead of staying locked in the tool.
+
 ## Decisions (2026-08-14)
 
 | Decision | Choice |
@@ -151,6 +172,10 @@ correct:
 - **M6 — Build Advisor.** Probe + rules engine first (useful standalone:
   "rebuild recommended" banner in settings), then the `Advisor` AI layer with
   the local server as default backend.
+- **M7 — Performance lab.** llama-bench integration: baseline pp/tg per model,
+  A/B a config change, one-click speculative-decoding trial with measured
+  verdict; benchmark results stored per model+config and shown next to
+  recommendations.
 
 Each milestone leaves something runnable; M1–M3 are usable from the CLI before
 the GUI exists.
