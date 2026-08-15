@@ -1,0 +1,249 @@
+//! Discovery: which llama.cpp installations exist on this machine, and which
+//! compute devices the chosen one can see.
+//!
+//! An "install" is a `llama-server` binary. We probe candidates from the
+//! user's PATH, a set of conventional build locations, and any manually
+//! configured paths, then interrogate each with `--version`. Devices come
+//! from `--list-devices` — asked of the *binary*, not the OS, because what
+//! matters is what that build can actually use (a CUDA card is invisible to
+//! a CPU-only build). GPU state is always a `Vec`; see CLAUDE.md.
+
+use serde::Serialize;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LlamaInstall {
+    /// Absolute path to the `llama-server` binary.
+    pub server_path: PathBuf,
+    /// Build number from `--version` (e.g. 10216). `None` if the binary
+    /// didn't answer — still listed, so a broken install is visible.
+    pub build: Option<u64>,
+    /// Commit hash from `--version` (e.g. "876a43211").
+    pub commit: Option<String>,
+    /// The full "built with …" line, verbatim (compiler, target, vendor
+    /// annotations like unsloth's).
+    pub built_with: Option<String>,
+    /// Backend libraries sitting next to the binary (cuda, vulkan, cpu, …).
+    /// Empty for static builds — absence of evidence only.
+    pub backends: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Device {
+    /// Backend-qualified id as llama.cpp names it: "CUDA0", "Vulkan1", …
+    pub id: String,
+    pub name: String,
+    pub total_mib: u64,
+    pub free_mib: u64,
+}
+
+/// Conventional places a self-built or vendored llama-server lives, relative
+/// to $HOME. Checked in addition to PATH and manual paths.
+const HOME_CANDIDATES: &[&str] = &[
+    "src/llama.cpp/build/bin/llama-server",
+    "llama.cpp/build/bin/llama-server",
+    ".unsloth/llama.cpp/llama-server",
+];
+
+/// Find llama-server binaries: manual paths first (they outrank guesses),
+/// then PATH, then conventional build locations. Deduplicated by canonical
+/// path; a path that isn't an executable file is skipped, but a binary that
+/// fails `--version` is kept with `build: None`.
+pub fn find_installs(manual: &[PathBuf]) -> Vec<LlamaInstall> {
+    let mut candidates: Vec<PathBuf> = manual.to_vec();
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            candidates.push(dir.join("llama-server"));
+        }
+    }
+    if let Some(home) = std::env::home_dir() {
+        for rel in HOME_CANDIDATES {
+            candidates.push(home.join(rel));
+        }
+    }
+
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for c in candidates {
+        let Ok(real) = c.canonicalize() else { continue };
+        if !real.is_file() || !seen.insert(real.clone()) {
+            continue;
+        }
+        out.push(probe_install(&real));
+    }
+    out
+}
+
+fn probe_install(server: &Path) -> LlamaInstall {
+    let version_output = Command::new(server)
+        .arg("--version")
+        .output()
+        .ok()
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+        .unwrap_or_default();
+    let (build, commit, built_with) = parse_version_output(&version_output);
+    LlamaInstall {
+        backends: sibling_backends(server),
+        server_path: server.to_path_buf(),
+        build,
+        commit,
+        built_with,
+    }
+}
+
+/// Parse `llama-server --version` output:
+/// ```text
+/// version: 10216 (876a43211)
+/// built with GNU 15.2.0 for Linux x86_64
+/// ```
+fn parse_version_output(out: &str) -> (Option<u64>, Option<String>, Option<String>) {
+    let mut build = None;
+    let mut commit = None;
+    let mut built_with = None;
+    for line in out.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("version:") {
+            let rest = rest.trim();
+            let mut parts = rest.splitn(2, ' ');
+            build = parts.next().and_then(|n| n.parse().ok());
+            commit = parts
+                .next()
+                .map(|h| h.trim().trim_start_matches('(').trim_end_matches(')').to_string());
+        } else if let Some(rest) = line.strip_prefix("built with") {
+            built_with = Some(rest.trim().to_string());
+        }
+    }
+    (build, commit, built_with)
+}
+
+/// Backend names from `libggml-<backend>.so*` files next to the binary.
+/// "base" is plumbing, not a backend, and is excluded.
+fn sibling_backends(server: &Path) -> Vec<String> {
+    let Some(dir) = server.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut backends: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let rest = name.strip_prefix("libggml-")?;
+            let backend = rest.split(".so").next()?;
+            (!backend.is_empty() && backend != "base").then(|| backend.to_string())
+        })
+        .collect();
+    backends.sort();
+    backends.dedup();
+    backends
+}
+
+/// Ask an install what devices it can see. Errors (bad binary, no devices)
+/// yield an empty list — callers render that as "CPU only / unknown".
+pub fn list_devices(server: &Path) -> Vec<Device> {
+    let Some(output) = Command::new(server)
+        .arg("--list-devices")
+        .output()
+        .ok()
+        .map(|o| {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            s
+        })
+    else {
+        return Vec::new();
+    };
+    parse_device_list(&output)
+}
+
+/// Parse `--list-devices` output:
+/// ```text
+/// Available devices:
+///   CUDA0: NVIDIA GeForce RTX 3090 Ti (24111 MiB, 23328 MiB free)
+///   Vulkan1: Intel(R) UHD Graphics 770 (ADL-S GT1) (48012 MiB, 43210 MiB free)
+/// ```
+/// The name itself may contain parentheses, so the memory figures are taken
+/// from the *last* parenthesised group.
+fn parse_device_list(out: &str) -> Vec<Device> {
+    out.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let (id, rest) = line.split_once(": ")?;
+            if id.contains(' ') || id.is_empty() {
+                return None; // prose line, not a device id
+            }
+            let open = rest.rfind('(')?;
+            let mem = rest[open + 1..].trim_end_matches(')');
+            let name = rest[..open].trim();
+            let (total, free) = mem.split_once(',')?;
+            let total_mib = total.trim().strip_suffix(" MiB")?.parse().ok()?;
+            let free_mib = free
+                .trim()
+                .strip_suffix(" MiB free")?
+                .parse()
+                .ok()?;
+            Some(Device {
+                id: id.to_string(),
+                name: name.to_string(),
+                total_mib,
+                free_mib,
+            })
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_version_output() {
+        let out = "version: 10216 (876a43211)\nbuilt with GNU 15.2.0 for Linux x86_64\n";
+        let (build, commit, built_with) = parse_version_output(out);
+        assert_eq!(build, Some(10216));
+        assert_eq!(commit.as_deref(), Some("876a43211"));
+        assert_eq!(built_with.as_deref(), Some("GNU 15.2.0 for Linux x86_64"));
+    }
+
+    #[test]
+    fn parses_vendored_version_output() {
+        let out = "version: 10360 (90e6a9131)\nbuilt with GNU 11.4.0 for Linux x86_64 (Compiled by the Unsloth team)\n";
+        let (build, _, built_with) = parse_version_output(out);
+        assert_eq!(build, Some(10360));
+        assert!(built_with.unwrap().contains("Unsloth"));
+    }
+
+    #[test]
+    fn version_garbage_yields_nones_not_panic() {
+        let (build, commit, built_with) = parse_version_output("segfault lol");
+        assert_eq!((build, commit, built_with), (None, None, None));
+    }
+
+    #[test]
+    fn parses_device_list_including_parenthesised_names() {
+        let out = "\
+Available devices:
+  CUDA0: NVIDIA GeForce RTX 3090 Ti (24111 MiB, 23328 MiB free)
+  Vulkan0: NVIDIA GeForce RTX 3090 Ti (24564 MiB, 23328 MiB free)
+  Vulkan1: Intel(R) UHD Graphics 770 (ADL-S GT1) (48012 MiB, 43210 MiB free)
+";
+        let devices = parse_device_list(out);
+        assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].id, "CUDA0");
+        assert_eq!(devices[0].total_mib, 24111);
+        assert_eq!(devices[2].id, "Vulkan1");
+        assert_eq!(devices[2].name, "Intel(R) UHD Graphics 770 (ADL-S GT1)");
+        assert_eq!(devices[2].free_mib, 43210);
+    }
+
+    #[test]
+    fn device_prose_lines_are_ignored() {
+        assert!(parse_device_list("Available devices:\nno devices found\n").is_empty());
+    }
+}
