@@ -5,6 +5,8 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+eframe = "0.36.1"
+env_logger = "0.11.11"
 jsonc-parser = { version = "0.26", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }

@@ -351,7 +351,16 @@ pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("no n_ctx in /props for {model}"))
 }
 
-fn unload(port: u16, model: &str) -> Result<()> {
+/// Request a load (async server-side; poll `status` to watch it land).
+pub fn load_model(port: u16, model: &str) -> Result<()> {
+    ureq::post(&format!("http://127.0.0.1:{port}/models/load"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send_json(serde_json::json!({ "model": model }))
+        .with_context(|| format!("loading {model}"))?;
+    Ok(())
+}
+
+pub fn unload_model(port: u16, model: &str) -> Result<()> {
     ureq::post(&format!("http://127.0.0.1:{port}/models/unload"))
         .timeout(std::time::Duration::from_secs(30))
         .send_json(serde_json::json!({ "model": model }))
@@ -397,7 +406,7 @@ pub fn calibrate(
             }
             Err(e) => eprintln!("  {}: measurement failed: {e:#}", m.id),
         }
-        let _ = unload(port, &m.id);
+        let _ = unload_model(port, &m.id);
     }
     Ok(out)
 }
