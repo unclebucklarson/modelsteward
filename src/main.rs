@@ -7,8 +7,12 @@
 //!   llamacppcodeconf --status [port]     router + per-model status as JSON
 //!   llamacppcodeconf --reload [port]     ask the router to re-read the preset
 //!   llamacppcodeconf --stop              stop the router we started
+//!   llamacppcodeconf --calibrate [port]  measure each preset model's settled
+//!                                        context (loads each once — slow)
+//!   llamacppcodeconf --sync [port]       write measured models into
+//!                                        opencode.json (backs up first)
 
-use llamacppcodeconf::core::{discover, library, router};
+use llamacppcodeconf::core::{discover, library, opencode, router};
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -45,9 +49,11 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&models).unwrap());
         }),
         Some("--stop") => router::stop(&router::state_dir()),
+        Some("--calibrate") => calibrate(port_from(&args[1..])),
+        Some("--sync") => sync(port_from(&args[1..])),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf --scan|--preset [dir ...] | --start|--status|--reload [port] | --stop"
+                "usage: llamacppcodeconf --scan|--preset [dir ...] | --start|--status|--reload|--calibrate|--sync [port] | --stop"
             );
             std::process::exit(2);
         }
@@ -145,6 +151,63 @@ fn write_preset(extra_dirs: Vec<PathBuf>) -> anyhow::Result<()> {
         preset_path().display(),
         entries.len()
     );
+    Ok(())
+}
+
+fn calibrate(port: u16) -> anyhow::Result<()> {
+    let dir = router::state_dir();
+    let cfg = router_config(port);
+    match router::status(&dir, &cfg) {
+        router::RouterState::Ours { .. } => {}
+        other => anyhow::bail!(
+            "calibration needs our router running on port {port}; state is {other:?}. \
+             Try --start first."
+        ),
+    }
+    let results = router::calibrate(&dir, port, &mut |id, i, n| {
+        eprintln!("[{i}/{n}] measuring {id} (loads the model — be patient)…");
+    })?;
+    for (id, m) in &results {
+        println!("{id}: settled context {}", m.n_ctx);
+    }
+    println!("stored in {}", dir.join("measurements.json").display());
+    Ok(())
+}
+
+fn sync(port: u16) -> anyhow::Result<()> {
+    let measurements = router::read_measurements(&router::state_dir());
+    if measurements.is_empty() {
+        anyhow::bail!("no measurements yet — run --calibrate first (measured, not guessed)");
+    }
+    let desired: Vec<opencode::DesiredModel> = measurements
+        .iter()
+        .map(|(id, m)| opencode::DesiredModel {
+            id: id.clone(),
+            display_name: format!("{id} (llama.cpp)"),
+            context: m.n_ctx,
+        })
+        .collect();
+    let path = opencode::default_config_path();
+    let base_url = format!("http://127.0.0.1:{port}/v1");
+    let report = opencode::sync_file(&path, &base_url, &desired)?;
+    println!(
+        "synced {}: {} added, {} updated",
+        path.display(),
+        report.added.len(),
+        report.updated.len()
+    );
+    for id in &report.added {
+        println!("  + {id}");
+    }
+    for id in &report.updated {
+        println!("  ~ {id} (context refreshed)");
+    }
+    if !report.orphans.is_empty() {
+        println!("orphans (in config, not measured — left untouched):");
+        for id in &report.orphans {
+            println!("  ? {id}");
+        }
+    }
     Ok(())
 }
 

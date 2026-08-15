@@ -168,6 +168,9 @@ pub struct RouterModel {
     /// "loaded" | "loading" | "unloaded" | "sleeping"; failed loads become
     /// "failed(<exit>)" so the UI never mistakes them for merely-unloaded.
     pub status: String,
+    /// Where the router got this model: "preset" (ours) or "cache"
+    /// (LLAMA_CACHE downloads the router discovered on its own).
+    pub source: Option<String>,
 }
 
 /// Parse the router's `GET /models` response (verified shape: spike 1).
@@ -185,7 +188,8 @@ pub fn parse_models_response(body: &serde_json::Value) -> Vec<RouterModel> {
                         let code = st.get("exit_code").and_then(|c| c.as_i64()).unwrap_or(-1);
                         status = format!("failed({code})");
                     }
-                    Some(RouterModel { id, status })
+                    let source = m.get("source").and_then(|s| s.as_str()).map(String::from);
+                    Some(RouterModel { id, status, source })
                 })
                 .collect()
         })
@@ -291,6 +295,111 @@ pub fn stop(dir: &Path) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     bail!("router (pid {}) did not exit within 5s; not escalating automatically", m.pid)
+}
+
+// ─── calibration ─────────────────────────────────────────────────────────────
+//
+// The context a model *actually* gets is decided by `--fit` at load time and
+// is only knowable by loading the model (spike 2: 27B-Q5 settled at 72,960
+// with q8_0 KV where the GGUF header says 262,144). Calibration loads each
+// preset model once, records the settled n_ctx, and unloads it. Results are
+// keyed by alias and kept in the state dir; opencode sync refuses to guess
+// and only writes measured numbers.
+
+/// One measured result. `n_ctx` is what `--fit` settled on for this machine,
+/// with the preset's flags, at measurement time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Measurement {
+    pub n_ctx: u64,
+}
+
+pub type Measurements = std::collections::BTreeMap<String, Measurement>;
+
+fn measurements_path(dir: &Path) -> PathBuf {
+    dir.join("measurements.json")
+}
+
+pub fn read_measurements(dir: &Path) -> Measurements {
+    std::fs::read_to_string(measurements_path(dir))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(measurements_path(dir), serde_json::to_string_pretty(m)?)
+        .with_context(|| format!("writing {}", measurements_path(dir).display()))
+}
+
+/// Settled context for one model: `GET /props?model=X` autoloads it (may
+/// take ~15s for a 20GB model, hence the long timeout) and reports the
+/// instance's real `n_ctx`.
+pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
+    let url = format!(
+        "http://127.0.0.1:{port}/props?model={}",
+        urlencode(model)
+    );
+    let body: serde_json::Value = ureq::get(&url)
+        .timeout(std::time::Duration::from_secs(180))
+        .call()
+        .with_context(|| format!("/props for {model}"))?
+        .into_json()?;
+    body.get("default_generation_settings")
+        .and_then(|g| g.get("n_ctx"))
+        .and_then(|n| n.as_u64())
+        .ok_or_else(|| anyhow::anyhow!("no n_ctx in /props for {model}"))
+}
+
+fn unload(port: u16, model: &str) -> Result<()> {
+    ureq::post(&format!("http://127.0.0.1:{port}/models/unload"))
+        .timeout(std::time::Duration::from_secs(30))
+        .send_json(serde_json::json!({ "model": model }))
+        .with_context(|| format!("unloading {model}"))?;
+    Ok(())
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            other => format!("%{other:02X}"),
+        })
+        .collect()
+}
+
+/// Measure every preset model the router lists, one at a time (load →
+/// read settled ctx → unload), updating the stored measurements as it goes.
+/// `progress` is called before each model so a caller can narrate.
+pub fn calibrate(
+    dir: &Path,
+    port: u16,
+    progress: &mut dyn FnMut(&str, usize, usize),
+) -> Result<Measurements> {
+    let models: Vec<_> = fetch_models(port)?
+        .into_iter()
+        .filter(|m| m.source.as_deref() == Some("preset"))
+        .collect();
+    if models.is_empty() {
+        bail!("router lists no preset models to calibrate");
+    }
+    let mut out = read_measurements(dir);
+    let total = models.len();
+    for (i, m) in models.iter().enumerate() {
+        progress(&m.id, i + 1, total);
+        match fetch_settled_ctx(port, &m.id) {
+            Ok(n_ctx) => {
+                out.insert(m.id.clone(), Measurement { n_ctx });
+                write_measurements(dir, &out)?; // persist per model — a
+                // mid-run failure keeps everything measured so far
+            }
+            Err(e) => eprintln!("  {}: measurement failed: {e:#}", m.id),
+        }
+        let _ = unload(port, &m.id);
+    }
+    Ok(out)
 }
 
 /// Ask a running router to re-read its model sources (`/models?reload=1`,

@@ -5,8 +5,10 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+jsonc-parser = { version = "0.26", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "2"
 ureq = { version = "2", default-features = false, features = ["json"] }
 
 [dev-dependencies]

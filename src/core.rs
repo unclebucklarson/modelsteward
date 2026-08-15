@@ -3,5 +3,7 @@
 
 pub mod discover;
 pub mod gguf;
+pub mod jsonc;
 pub mod library;
+pub mod opencode;
 pub mod router;

@@ -1,0 +1,39 @@
+{
+  // Opencode configuration — tuned by hand for local Ollama models.
+  // This file is used as a fixture for comment-preserving round-trip tests.
+  "$schema": "https://opencode.ai/config.json",
+
+  "provider": {
+    /*
+     * llama.cpp block — hand-configured, must remain untouched by the tool
+     * because V1 only knows about Ollama.
+     */
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp",
+      "options": {
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "qwen3.6-27b": {
+          "name": "Qwen3.6-27B (local)"  // hand-tuned display name
+        }
+      }
+    },
+
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama",
+      "options": {
+        "baseURL": "http://127.0.0.1:11434/v1"
+      },
+      "models": {
+        // Pre-existing entry with minimal metadata — the "Update" flow
+        // should be able to enrich this with capabilities + limits.
+        "ornith:35b": {
+          "name": "ornith:35b (ollama)"
+        }
+      }
+    }
+  }
+}
