@@ -4,3 +4,4 @@
 pub mod discover;
 pub mod gguf;
 pub mod library;
+pub mod router;
