@@ -128,11 +128,12 @@ pub fn hf_hub_models(hub: &Path) -> Vec<ModelFile> {
             };
             for f in files.flatten() {
                 let path = f.path();
-                // mmproj-*.gguf are vision projectors that ride along with a
+                // *mmproj*.gguf are vision projectors that ride along with a
                 // main model — companions, not servable models themselves.
+                // (Naming varies: "mmproj-F16.gguf", "<model>-mmproj.gguf".)
                 let is_mmproj = path
                     .file_stem()
-                    .is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("mmproj"));
+                    .is_some_and(|s| s.to_string_lossy().to_lowercase().contains("mmproj"));
                 if !is_mmproj
                     && path
                         .extension()

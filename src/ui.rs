@@ -655,8 +655,14 @@ impl App {
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
 
                         // "In OpenCode" checkbox — the whole make-it-usable flow.
+                        // Adding needs the router to actually offer this id;
+                        // removing only needs the config file.
                         let mut checked = r.in_opencode;
-                        let can_act = router_up && r.router_id.is_some();
+                        let can_act = if r.in_opencode {
+                            r.router_id.is_some()
+                        } else {
+                            router_up && r.router_id.is_some() && r.server_status.is_some()
+                        };
                         let cb = ui.add_enabled(can_act, egui::Checkbox::without_text(&mut checked));
                         let cb = cb.on_hover_text(
                             "Checked = in opencode.json. Checking an unmeasured model loads it \

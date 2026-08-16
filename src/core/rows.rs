@@ -164,43 +164,66 @@ pub fn assemble(
     opencode_ids: &[String],
     hw: Hardware,
 ) -> Vec<Row> {
-    let mut used_router_ids = std::collections::HashSet::new();
+    // A router entry belongs to exactly ONE row — two quants of the same
+    // repo must never share an identity (a Q4 file falling back onto the
+    // repo's only listed variant, the Q5, made both rows load/measure as
+    // one model). Exact id matches claim first; the unique-repo fallback
+    // runs ONLY for files whose tag we couldn't predict at all, and only
+    // onto still-unclaimed entries.
+    let mut used_router_ids: std::collections::HashSet<String> = models
+        .iter()
+        .filter_map(|m| {
+            let id = predicted_router_id(m)?;
+            router_models.iter().any(|rm| rm.id == id).then_some(id)
+        })
+        .collect();
     let mut rows: Vec<Row> = Vec::new();
 
     for m in models {
         let mut router_id = predicted_router_id(m);
-        // Exact match against the live router list; failing that, a
-        // unique-repo match rescues cache ids whose tag we can't predict
-        // (e.g. "...-gguf:IT").
         let mut server_status = None;
-        if let Some(id) = &router_id
-            && let Some(rm) = router_models.iter().find(|rm| &rm.id == id)
-        {
-            server_status = Some(rm.status.clone());
+        if let Some(id) = &router_id {
+            if let Some(rm) = router_models.iter().find(|rm| &rm.id == id) {
+                server_status = Some(rm.status.clone());
+            }
+            // Predicted-but-unoffered: keep the id for display, no status —
+            // the router doesn't serve this exact variant right now.
         } else if let Source::HfHub { repo } = &m.source {
             let of_repo: Vec<&RouterModel> = router_models
                 .iter()
-                .filter(|rm| rm.id.starts_with(&format!("{repo}:")))
+                .filter(|rm| {
+                    rm.id.starts_with(&format!("{repo}:")) && !used_router_ids.contains(&rm.id)
+                })
                 .collect();
             if of_repo.len() == 1 {
                 router_id = Some(of_repo[0].id.clone());
                 server_status = Some(of_repo[0].status.clone());
+                used_router_ids.insert(of_repo[0].id.clone());
             }
-        }
-        if let Some(id) = &router_id {
-            used_router_ids.insert(id.clone());
         }
 
         let measurement = router_id.as_ref().and_then(|id| measurements.get(id));
         let measured_ctx = measurement.and_then(|mm| mm.n_ctx);
         let failure = measurement.and_then(|mm| mm.error.clone());
-        let (advice_level, advice) = advice_for(
-            m.meta.as_ref(),
-            m.file_size,
-            measured_ctx,
-            failure.as_deref(),
-            hw,
-        );
+        let (advice_level, advice) = if !router_models.is_empty()
+            && router_id.is_some()
+            && server_status.is_none()
+            && measured_ctx.is_none()
+            && failure.is_none()
+        {
+            (
+                AdviceLevel::Unknown,
+                "on disk, but the router doesn't currently offer this variant".into(),
+            )
+        } else {
+            advice_for(
+                m.meta.as_ref(),
+                m.file_size,
+                measured_ctx,
+                failure.as_deref(),
+                hw,
+            )
+        };
         rows.push(Row {
             display: m.display_name(),
             in_opencode: router_id
@@ -354,15 +377,15 @@ mod tests {
 
     #[test]
     fn unique_repo_match_rescues_unpredictable_cache_tags() {
+        // No quant token in the filename → tag not derivable → fallback OK.
         let models = vec![file(
-            "gemma-4-31B-it-qat-q4_0.gguf",
+            "gemma-4-31B-instruct.gguf",
             Source::HfHub {
                 repo: "google/gemma-4-31B-it-qat-q4_0-gguf".into(),
             },
             17,
             true,
         )];
-        // Router tag ":IT" is not derivable from the filename.
         let routers = vec![rm("google/gemma-4-31B-it-qat-q4_0-gguf:IT", "unloaded", "cache")];
         let rows = assemble(&models, &routers, &Measurements::new(), &[], HW);
         assert_eq!(rows.len(), 1, "must join, not duplicate");
@@ -370,6 +393,47 @@ mod tests {
             rows[0].router_id.as_deref(),
             Some("google/gemma-4-31B-it-qat-q4_0-gguf:IT")
         );
+    }
+
+    #[test]
+    fn two_quants_of_one_repo_never_share_an_identity() {
+        // The user's real bug: Q4 and Q5 files of the same repo, router
+        // offers only the Q5 → the Q4 must NOT glue itself onto it.
+        let models = vec![
+            file(
+                "Qwen3.8-27B-UD-Q4_K_XL.gguf",
+                Source::HfHub {
+                    repo: "unsloth/Qwen3.8-27B-GGUF".into(),
+                },
+                18,
+                true,
+            ),
+            file(
+                "Qwen3.8-27B-UD-Q5_K_XL.gguf",
+                Source::HfHub {
+                    repo: "unsloth/Qwen3.8-27B-GGUF".into(),
+                },
+                20,
+                true,
+            ),
+        ];
+        let routers = vec![rm("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL", "loaded", "cache")];
+        let rows = assemble(&models, &routers, &Measurements::new(), &[], HW);
+        assert_eq!(rows.len(), 2);
+        let q4 = rows.iter().find(|r| r.display.contains("Q4_K_XL")).unwrap();
+        let q5 = rows.iter().find(|r| r.display.contains("Q5_K_XL")).unwrap();
+        assert_eq!(
+            q5.router_id.as_deref(),
+            Some("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL")
+        );
+        assert_eq!(q5.server_status.as_deref(), Some("loaded"));
+        assert_eq!(
+            q4.router_id.as_deref(),
+            Some("unsloth/Qwen3.8-27B-GGUF:Q4_K_XL"),
+            "keeps its own (unoffered) identity"
+        );
+        assert!(q4.server_status.is_none(), "not offered ≠ offered");
+        assert!(q4.advice.contains("doesn't currently offer"), "{}", q4.advice);
     }
 
     #[test]
