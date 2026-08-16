@@ -92,12 +92,17 @@ struct App {
     override_editor: Option<OverrideEditor>,
 }
 
-/// Edit buffers for one model's preset overrides.
+/// Edit buffers for one model's preset overrides. Fields show EFFECTIVE
+/// values (override if set, else the optimized default); on save, anything
+/// equal to optimized is stored as "no override" so it keeps auto-adapting.
 struct OverrideEditor {
     id: String,
     ctx_text: String,
     kv_text: String,
     extra_text: String,
+    /// The optimized context baseline: what --fit measured on this machine
+    /// (None = not measured yet → auto).
+    optimized_ctx: Option<u64>,
 }
 
 impl App {
@@ -463,16 +468,28 @@ impl App {
             }
             RowAction::EditOverrides(id) => {
                 let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
+                let optimized_ctx = self.measurements.get(&id).and_then(|m| m.n_ctx);
+                // Show effective values: the override where set, else the
+                // optimized default — the dialog always tells the truth
+                // about what the model will get.
                 self.override_editor = Some(OverrideEditor {
                     id,
-                    ctx_text: ov.ctx.map(|c| c.to_string()).unwrap_or_default(),
-                    kv_text: ov.cache_type_kv.clone().unwrap_or_default(),
+                    ctx_text: ov
+                        .ctx
+                        .or(optimized_ctx)
+                        .map(|c| c.to_string())
+                        .unwrap_or_default(),
+                    kv_text: ov
+                        .cache_type_kv
+                        .clone()
+                        .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string()),
                     extra_text: ov
                         .extra
                         .iter()
                         .map(|(k, v)| format!("{k} = {v}"))
                         .collect::<Vec<_>>()
                         .join("\n"),
+                    optimized_ctx,
                 });
             }
             RowAction::Archive(path) => {
@@ -1225,7 +1242,6 @@ impl App {
             return;
         };
         let mut save = false;
-        let mut clear = false;
         let mut cancel = false;
         let mut open = true;
         egui::Window::new(format!("Overrides — {}", ed.id))
@@ -1233,14 +1249,28 @@ impl App {
             .resizable(false)
             .open(&mut open)
             .show(ctx, |ui| {
+                ui.small(
+                    "Showing the values this model will actually use. Anything you leave \
+                     equal to the optimized default isn't pinned — it keeps auto-adapting.",
+                );
+                ui.add_space(4.0);
                 egui::Grid::new("override-fields").num_columns(2).show(ui, |ui| {
-                    ui.label("Context (empty = --fit decides)");
-                    ui.text_edit_singleline(&mut ed.ctx_text);
+                    ui.label("Context");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut ed.ctx_text);
+                        ui.small(match ed.optimized_ctx {
+                            Some(c) => format!("optimized: {c} (measured by --fit)"),
+                            None => "optimized: auto (--fit; not measured yet)".into(),
+                        });
+                    });
                     ui.end_row();
-                    ui.label("KV cache type (empty = q8_0 default)");
+                    ui.label("KV cache type");
                     ui.horizontal(|ui| {
                         ui.text_edit_singleline(&mut ed.kv_text);
-                        ui.small("f16 | q8_0 | q4_0");
+                        ui.small(format!(
+                            "optimized: {} — f16 | q8_0 | q4_0",
+                            router::DEFAULT_KV_TYPE
+                        ));
                     });
                     ui.end_row();
                 });
@@ -1257,8 +1287,20 @@ impl App {
                     if ui.button("Save").clicked() {
                         save = true;
                     }
-                    if ui.button("Clear overrides").clicked() {
-                        clear = true;
+                    if ui
+                        .button("Reset to optimized")
+                        .on_hover_text(
+                            "Puts every field back to the measured/default values — the \
+                             escape hatch when tuning went sideways. Save afterwards to apply.",
+                        )
+                        .clicked()
+                    {
+                        ed.ctx_text = ed
+                            .optimized_ctx
+                            .map(|c| c.to_string())
+                            .unwrap_or_default();
+                        ed.kv_text = router::DEFAULT_KV_TYPE.to_string();
+                        ed.extra_text.clear();
                     }
                     if ui.button("Cancel").clicked() {
                         cancel = true;
@@ -1269,43 +1311,44 @@ impl App {
             self.override_editor = None;
             return;
         }
-        if !(save || clear) {
+        if !save {
             return;
         }
         let ed = self.override_editor.take().expect("checked above");
         let result: Result<(), String> = (|| {
-            if clear {
+            let ctx_val = match ed.ctx_text.trim() {
+                "" => None,
+                t => Some(t.parse::<u64>().map_err(|_| format!("invalid context: {t:?}"))?),
+            };
+            // Delta semantics: values equal to the optimized baseline are
+            // stored as "no override" so they keep following auto-fit and
+            // the global default rather than freezing today's numbers.
+            let ctx_val = ctx_val.filter(|v| Some(*v) != ed.optimized_ctx);
+            let kv = match ed.kv_text.trim() {
+                "" => None,
+                t if t.eq_ignore_ascii_case(router::DEFAULT_KV_TYPE) => None,
+                t => Some(t.to_string()),
+            };
+            let mut extra = Vec::new();
+            for line in ed.extra_text.lines() {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let (k, v) = line
+                    .split_once('=')
+                    .ok_or_else(|| format!("not `key = value`: {line:?}"))?;
+                extra.push((k.trim().to_string(), v.trim().to_string()));
+            }
+            let ov = router::ModelOverrides {
+                cache_type_kv: kv,
+                ctx: ctx_val,
+                extra,
+            };
+            if ov == router::ModelOverrides::default() {
                 self.cfg.overrides.remove(&ed.id);
             } else {
-                let ctx_val = match ed.ctx_text.trim() {
-                    "" => None,
-                    t => Some(t.parse::<u64>().map_err(|_| format!("invalid context: {t:?}"))?),
-                };
-                let kv = match ed.kv_text.trim() {
-                    "" => None,
-                    t => Some(t.to_string()),
-                };
-                let mut extra = Vec::new();
-                for line in ed.extra_text.lines() {
-                    let line = line.trim();
-                    if line.is_empty() {
-                        continue;
-                    }
-                    let (k, v) = line
-                        .split_once('=')
-                        .ok_or_else(|| format!("not `key = value`: {line:?}"))?;
-                    extra.push((k.trim().to_string(), v.trim().to_string()));
-                }
-                let ov = router::ModelOverrides {
-                    cache_type_kv: kv,
-                    ctx: ctx_val,
-                    extra,
-                };
-                if ov == router::ModelOverrides::default() {
-                    self.cfg.overrides.remove(&ed.id);
-                } else {
-                    self.cfg.overrides.insert(ed.id.clone(), ov);
-                }
+                self.cfg.overrides.insert(ed.id.clone(), ov);
             }
             self.cfg
                 .save(&system::config_file())

@@ -38,6 +38,11 @@ pub struct ModelOverrides {
     pub extra: Vec<(String, String)>,
 }
 
+/// The KV cache type the generated preset's `[*]` section applies to every
+/// model — the measured-on-this-hardware good default (≈2x usable context
+/// vs f16). The override dialog treats this as the "optimized" baseline.
+pub const DEFAULT_KV_TYPE: &str = "q8_0";
+
 /// Render the router preset INI. Pure — writing it and telling the server to
 /// reload are separate steps.
 ///
