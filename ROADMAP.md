@@ -112,6 +112,10 @@ results shown next to every recommendation.
 
 ## Parked / ideas
 
+- **Serve unoffered HF-hub variants**: a hub file whose variant the router's
+  cache index doesn't list (e.g. a second quant of the same repo) currently
+  shows "not offered". It could be made servable by writing a preset entry
+  pointing at its snapshot path — needs care to keep one identity per file.
 - **Model archival / "not at the mercy of Ollama or HF"** (user idea):
   unify by *reference* (the Library already is that view), not by mass
   relocation — moving blobs would double disk and break Ollama's
