@@ -19,10 +19,14 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
 
 - Build: `cargo build`
 - Test: `cargo test` (single test: `cargo test <name>`)
-- Run GUI: `cargo run`
-- Headless debug (no GUI): `cargo run -- --scan` prints the unified model
-  table as JSON; other CLI debug flags start/stop the router server (see M1/M2
-  in PLAN.md)
+- Run GUI: `cargo run` (no args)
+- CLI: `--setup` (one-shot start+measure+sync), `--scan`, `--preset`,
+  `--start/--status/--reload/--stop`, `--calibrate [port] [force]`
+  (incremental; skips fingerprint-fresh measurements), `--sync`,
+  `--install-service`. App config lives at
+  `~/.config/llamacppcodeconf/config.json` (see core/settings.rs);
+  measurements at `~/.local/state/llamacppcodeconf/measurements.json`.
+- Track work in [ROADMAP.md](ROADMAP.md); update it when milestones land.
 
 ## Architecture (big picture)
 

@@ -1,12 +1,11 @@
 //! Assembly of the core modules into the operations the CLI and GUI share:
 //! scan the system, pick a server, generate the preset, build router config.
+//! Everything flows from the persisted [`settings::AppConfig`].
 
-use crate::core::{discover, library, router};
+use crate::core::{discover, library, router, settings};
 use anyhow::Result;
 use serde::Serialize;
 use std::path::PathBuf;
-
-pub const DEFAULT_PORT: u16 = 8080;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
@@ -31,13 +30,29 @@ pub fn config_dir() -> PathBuf {
         .join("llamacppcodeconf")
 }
 
+pub fn config_file() -> PathBuf {
+    config_dir().join("config.json")
+}
+
+pub fn load_config() -> settings::AppConfig {
+    settings::AppConfig::load(&config_file())
+}
+
 pub fn preset_path() -> PathBuf {
     config_dir().join("router.ini")
 }
 
-/// The llama-server to run: newest install that can actually see devices,
-/// else the newest install at all.
-pub fn pick_server() -> Result<PathBuf> {
+/// The llama-server to run: the configured override if set, else the newest
+/// install that can actually see devices, else the newest install at all.
+pub fn pick_server(cfg: &settings::AppConfig) -> Result<PathBuf> {
+    if let Some(explicit) = &cfg.server_bin {
+        anyhow::ensure!(
+            explicit.is_file(),
+            "configured llama-server does not exist: {}",
+            explicit.display()
+        );
+        return Ok(explicit.clone());
+    }
     let installs = discover::find_installs(&[]);
     let mut by_build: Vec<_> = installs.iter().collect();
     by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
@@ -46,27 +61,25 @@ pub fn pick_server() -> Result<PathBuf> {
         .find(|i| !discover::list_devices(&i.server_path).is_empty())
         .or(by_build.first())
         .map(|i| i.server_path.clone())
-        .ok_or_else(|| anyhow::anyhow!("no llama-server found; point me at one"))
+        .ok_or_else(|| anyhow::anyhow!("no llama-server found; set one in Settings"))
 }
 
-pub fn router_config(port: u16) -> router::RouterConfig {
+pub fn router_config(cfg: &settings::AppConfig) -> router::RouterConfig {
     router::RouterConfig {
-        server_bin: pick_server().unwrap_or_else(|_| PathBuf::from("llama-server")),
-        port,
+        server_bin: pick_server(cfg).unwrap_or_else(|_| PathBuf::from("llama-server")),
+        port: cfg.port,
         preset_path: preset_path(),
         models_max: 1,
     }
 }
 
-pub fn scan_models(extra_dirs: &[PathBuf]) -> Vec<library::ModelFile> {
-    let mut scan_dirs = extra_dirs.to_vec();
-    if let Some(home) = std::env::home_dir() {
-        scan_dirs.push(home.join("models"));
-    }
+pub fn scan_models(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> Vec<library::ModelFile> {
+    let mut scan_dirs = cfg.scan_dirs.clone();
+    scan_dirs.extend(extra_dirs.iter().cloned());
     library::scan(&scan_dirs, &library::default_ollama_stores())
 }
 
-pub fn scan_report(extra_dirs: &[PathBuf]) -> ScanReport {
+pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanReport {
     let installs = discover::find_installs(&[]);
     let mut by_build: Vec<_> = installs.iter().collect();
     by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
@@ -82,8 +95,31 @@ pub fn scan_report(extra_dirs: &[PathBuf]) -> ScanReport {
         installs,
         devices,
         devices_from,
-        models: scan_models(extra_dirs),
+        models: scan_models(cfg, extra_dirs),
     }
+}
+
+/// Environment half of a measurement fingerprint: which build measured, on
+/// which devices. Pure over an existing scan so the GUI can compare without
+/// re-probing.
+pub fn env_fingerprint(report: &ScanReport) -> String {
+    let build = report
+        .devices_from
+        .as_ref()
+        .and_then(|from| {
+            report
+                .installs
+                .iter()
+                .find(|i| &i.server_path == from)
+                .and_then(|i| i.build)
+        })
+        .unwrap_or(0);
+    let devices: Vec<String> = report
+        .devices
+        .iter()
+        .map(|d| format!("{}:{}", d.id, d.total_mib))
+        .collect();
+    router::fnv(&format!("b{build}|{}", devices.join(",")))
 }
 
 /// Text of a systemd *user* unit that runs the router at login. The unit
@@ -110,23 +146,26 @@ pub fn systemd_unit_text(cfg: &router::RouterConfig) -> String {
 /// Write the user unit file. Enabling/starting is left to the user (one
 /// visible command) so systemd never surprises them:
 ///   systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router
-pub fn install_systemd_unit(port: u16) -> Result<PathBuf> {
-    let cfg = router_config(port);
-    if !cfg.preset_path.exists() {
-        write_preset(&[])?;
+pub fn install_systemd_unit(cfg: &settings::AppConfig) -> Result<PathBuf> {
+    let rcfg = router_config(cfg);
+    if !rcfg.preset_path.exists() {
+        write_preset(cfg, &[])?;
     }
     let dir = std::env::home_dir()
         .ok_or_else(|| anyhow::anyhow!("no home directory"))?
         .join(".config/systemd/user");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join("llamacpp-router.service");
-    std::fs::write(&path, systemd_unit_text(&cfg))?;
+    std::fs::write(&path, systemd_unit_text(&rcfg))?;
     Ok(path)
 }
 
 /// (Re)generate the preset from a scan; returns (path, model count).
-pub fn write_preset(extra_dirs: &[PathBuf]) -> Result<(PathBuf, usize)> {
-    let models = scan_models(extra_dirs);
+pub fn write_preset(
+    cfg: &settings::AppConfig,
+    extra_dirs: &[PathBuf],
+) -> Result<(PathBuf, usize)> {
+    let models = scan_models(cfg, extra_dirs);
     let entries = router::default_entries(&models);
     let ini = router::render_preset(&entries);
     std::fs::create_dir_all(config_dir())?;
@@ -153,5 +192,31 @@ mod tests {
         // The preset path in ExecStart is exactly what find_preset_process
         // matches on — this is the ownership handshake with the router module.
         assert!(unit.contains("WantedBy=default.target"));
+    }
+
+    #[test]
+    fn env_fingerprint_changes_with_build_and_devices() {
+        use crate::core::discover::{Device, LlamaInstall};
+        let mk = |build, mib| ScanReport {
+            installs: vec![LlamaInstall {
+                server_path: PathBuf::from("/s"),
+                build: Some(build),
+                commit: None,
+                built_with: None,
+                backends: vec![],
+            }],
+            devices: vec![Device {
+                id: "CUDA0".into(),
+                name: "GPU".into(),
+                total_mib: mib,
+                free_mib: 0,
+            }],
+            devices_from: Some(PathBuf::from("/s")),
+            models: vec![],
+        };
+        let a = env_fingerprint(&mk(10216, 24111));
+        assert_eq!(a, env_fingerprint(&mk(10216, 24111)), "stable");
+        assert_ne!(a, env_fingerprint(&mk(10360, 24111)), "build matters");
+        assert_ne!(a, env_fingerprint(&mk(10216, 48000)), "devices matter");
     }
 }

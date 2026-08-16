@@ -20,18 +20,24 @@ without requiring expertise — measured, not guessed.**
 - **M5** — Ollama peer awareness + VRAM contention warning, orphan
   comment-out UI, systemd user unit with preset-based ownership, README.
 
-## M5.5 — Usability pass (in progress)
+## M5.5 — Usability pass (DONE)
 
-1. **Settings pane + persisted config** (`config.json`): scan dirs, router
-   port, llama-server binary override, Ollama port. Manual pointing was in
-   the original brief; give it UI.
-2. **Incremental + stale-aware calibration**: fingerprint each measurement
-   (server build + device set + effective model args); measure only new or
-   stale models; `force` re-measures all.
-3. **Remember failed loads**: persist the failure per model, badge it in
-   the Library ("needs newer llama.cpp"), stop re-failing every calibration.
-4. **One-click setup**: start router → measure missing → sync, narrated in
-   the activity log. Menu item + button; CLI `--setup`.
+1. ✔ **Settings pane + persisted config** (`config.json`): scan dirs, router
+   port, llama-server binary override, Ollama port.
+2. ✔ **Incremental + stale-aware calibration**: measurements fingerprinted
+   by env (build + devices) and effective child args (volatile `--port`
+   excluded); fresh ones skipped; `force` re-measures.
+3. ✔ **Remember failed loads**: failures persisted with reason, shown in a
+   Library "Health" column with a hover tooltip; excluded from sync.
+4. ✔ **One-click setup**: File → Set Up Everything (also on the Server and
+   OpenCode panes; CLI `--setup`): start if down → measure stale/missing →
+   sync, fully narrated.
+
+Found and fixed during this pass: calibration loads now go through explicit
+`POST /models/load` + status polling instead of a long-blocking `/props`
+autoload (cold-cache 20GB loads take minutes and tripped HTTP timeouts /
+router kill paths), and each measurement waits for the previous model's
+teardown before loading.
 
 ## M5.6 — Test, refine, then deepen
 
@@ -47,6 +53,10 @@ without requiring expertise — measured, not guessed.**
 ## Smaller items (fold in opportunistically)
 
 - Numbered backups (cap ~5) or "Undo last config change" (.bak swap).
+- **Measured-ctx variance policy**: settled ctx varies a few percent with
+  desktop VRAM at load time (observed 83k–94k across runs for the same
+  model). llama-server's own 1GiB fit margin absorbs moderate drift; decide
+  whether sync should apply an additional haircut (e.g. round down 5%).
 - Status-bar VRAM refreshed on the poll cycle, not scan-time.
 - Contention warning names the remedy (`ollama stop <model>`).
 - `limit.output` exposed in the override editor (crude ctx/2 cap today).

@@ -8,4 +8,5 @@ pub mod library;
 pub mod ollama;
 pub mod opencode;
 pub mod router;
+pub mod settings;
 pub mod system;

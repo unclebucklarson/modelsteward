@@ -1,21 +1,28 @@
 //! Entry point. No arguments → the GUI. With arguments → the headless CLI
 //! (same core, scriptable):
 //!
+//!   llamacppcodeconf --setup             one shot: start router if needed,
+//!                                        measure anything unmeasured, sync
 //!   llamacppcodeconf --scan [dir ...]    system report as JSON
 //!   llamacppcodeconf --preset [dir ...]  (re)generate the router preset INI
-//!   llamacppcodeconf --start [port]      start the router (default port 8080)
+//!   llamacppcodeconf --start [port]      start the router
 //!   llamacppcodeconf --status [port]     router + per-model status as JSON
 //!   llamacppcodeconf --reload [port]     ask the router to re-read the preset
 //!   llamacppcodeconf --stop              stop the router we started
-//!   llamacppcodeconf --calibrate [port]  measure each preset model's settled
-//!                                        context (loads each once — slow)
+//!   llamacppcodeconf --calibrate [port] [force]
+//!                                        measure settled contexts (skips
+//!                                        fresh measurements unless `force`)
 //!   llamacppcodeconf --sync [port]       write measured models into
 //!                                        opencode.json (backs up first)
+//!   llamacppcodeconf --install-service   write the systemd user unit
+//!
+//! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
 
-use llamacppcodeconf::core::{opencode, router, system};
+use llamacppcodeconf::core::{opencode, router, settings, system};
 use std::path::PathBuf;
 
 fn main() {
+    let cfg = system::load_config();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         None => {
@@ -25,38 +32,40 @@ fn main() {
             }
             Ok(())
         }
+        Some("--setup") => setup(&cfg),
         Some("--scan") => {
-            let report = system::scan_report(&paths_from(&args[1..]));
+            let report = system::scan_report(&cfg, &paths_from(&args[1..]));
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             Ok(())
         }
-        Some("--preset") => system::write_preset(&paths_from(&args[1..])).map(|(path, n)| {
+        Some("--preset") => system::write_preset(&cfg, &paths_from(&args[1..])).map(|(path, n)| {
             println!("wrote {} with {n} models", path.display());
         }),
-        Some("--start") => start(port_from(&args[1..])),
+        Some("--start") => start(&with_port(&cfg, &args[1..])),
         Some("--status") => {
-            let state = router::status(
-                &router::state_dir(),
-                &system::router_config(port_from(&args[1..])),
-            );
+            let cfg = with_port(&cfg, &args[1..]);
+            let state = router::status(&router::state_dir(), &system::router_config(&cfg));
             println!("{}", serde_json::to_string_pretty(&state).unwrap());
             Ok(())
         }
-        Some("--reload") => router::reload(port_from(&args[1..])).map(|models| {
+        Some("--reload") => router::reload(with_port(&cfg, &args[1..]).port).map(|models| {
             println!("{}", serde_json::to_string_pretty(&models).unwrap());
         }),
         Some("--stop") => router::stop(&router::state_dir(), &system::preset_path()),
-        Some("--install-service") => {
-            system::install_systemd_unit(port_from(&args[1..])).map(|path| {
-                println!("unit written: {}", path.display());
-                println!("activate: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router");
-            })
+        Some("--calibrate") => {
+            let force = args[1..].iter().any(|a| a == "force");
+            calibrate(&with_port(&cfg, &args[1..]), force)
         }
-        Some("--calibrate") => calibrate(port_from(&args[1..])),
-        Some("--sync") => sync(port_from(&args[1..])),
+        Some("--sync") => sync(&with_port(&cfg, &args[1..])),
+        Some("--install-service") => system::install_systemd_unit(&cfg).map(|path| {
+            println!("unit written: {}", path.display());
+            println!(
+                "activate: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router"
+            );
+        }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --scan|--preset [dir ...] | --start|--status|--reload|--calibrate|--sync|--install-service [port] | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --install-service | --stop"
             );
             std::process::exit(2);
         }
@@ -71,62 +80,76 @@ fn paths_from(rest: &[String]) -> Vec<PathBuf> {
     rest.iter().map(PathBuf::from).collect()
 }
 
-fn port_from(rest: &[String]) -> u16 {
-    rest.first()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(system::DEFAULT_PORT)
+/// A positional port argument overrides the configured one for this run.
+fn with_port(cfg: &settings::AppConfig, rest: &[String]) -> settings::AppConfig {
+    let mut cfg = cfg.clone();
+    if let Some(p) = rest.first().and_then(|p| p.parse().ok()) {
+        cfg.port = p;
+    }
+    cfg
 }
 
-fn start(port: u16) -> anyhow::Result<()> {
+fn start(cfg: &settings::AppConfig) -> anyhow::Result<()> {
     if !system::preset_path().exists() {
-        let (path, n) = system::write_preset(&[])?;
+        let (path, n) = system::write_preset(cfg, &[])?;
         println!("wrote {} with {n} models", path.display());
     }
-    let cfg = system::router_config(port);
-    let pid = router::start(&router::state_dir(), &cfg)?;
+    let rcfg = system::router_config(cfg);
+    let pid = router::start(&router::state_dir(), &rcfg)?;
     println!(
-        "router started: pid {pid}, port {port}, preset {}, log {}",
-        cfg.preset_path.display(),
+        "router started: pid {pid}, port {}, preset {}, log {}",
+        cfg.port,
+        rcfg.preset_path.display(),
         router::state_dir().join("router.log").display()
     );
     Ok(())
 }
 
-fn calibrate(port: u16) -> anyhow::Result<()> {
+fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     let dir = router::state_dir();
-    let cfg = system::router_config(port);
-    match router::status(&dir, &cfg) {
+    match router::status(&dir, &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
         other => anyhow::bail!(
-            "calibration needs our router running on port {port}; state is {other:?}. \
-             Try --start first."
+            "calibration needs our router running on port {}; state is {other:?}. \
+             Try --start first.",
+            cfg.port
         ),
     }
-    let results = router::calibrate(&dir, port, &mut |id, i, n| {
-        eprintln!("[{i}/{n}] measuring {id} (loads the model — be patient)…");
+    let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let results = router::calibrate(&dir, cfg.port, &env_fp, force, &mut |line| {
+        eprintln!("{line}");
     })?;
     for (id, m) in &results {
-        println!("{id}: settled context {}", m.n_ctx);
+        match (&m.n_ctx, &m.error) {
+            (Some(ctx), _) => println!("{id}: settled context {ctx}"),
+            (None, Some(e)) => println!("{id}: FAILED — {e}"),
+            _ => println!("{id}: unmeasured"),
+        }
     }
     println!("stored in {}", dir.join("measurements.json").display());
     Ok(())
 }
 
-fn sync(port: u16) -> anyhow::Result<()> {
-    let measurements = router::read_measurements(&router::state_dir());
-    if measurements.is_empty() {
-        anyhow::bail!("no measurements yet — run --calibrate first (measured, not guessed)");
-    }
-    let desired: Vec<opencode::DesiredModel> = measurements
-        .iter()
-        .map(|(id, m)| opencode::DesiredModel {
-            id: id.clone(),
-            display_name: format!("{id} (llama.cpp)"),
-            context: m.n_ctx,
+fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredModel> {
+    m.iter()
+        .filter_map(|(id, m)| {
+            m.n_ctx.map(|ctx| opencode::DesiredModel {
+                id: id.clone(),
+                display_name: format!("{id} (llama.cpp)"),
+                context: ctx,
+            })
         })
-        .collect();
+        .collect()
+}
+
+fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    let measurements = router::read_measurements(&router::state_dir());
+    let desired = desired_from_measurements(&measurements);
+    if desired.is_empty() {
+        anyhow::bail!("no successful measurements yet — run --calibrate first (measured, not guessed)");
+    }
     let path = opencode::default_config_path();
-    let base_url = format!("http://127.0.0.1:{port}/v1");
+    let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let report = opencode::sync_file(&path, &base_url, &desired)?;
     println!(
         "synced {}: {} added, {} updated",
@@ -147,4 +170,37 @@ fn sync(port: u16) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// The one-shot: preset if missing → start if down → wait healthy →
+/// incremental calibrate → sync. Everything narrated; nothing guessed.
+fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    let dir = router::state_dir();
+    let rcfg = system::router_config(cfg);
+    match router::status(&dir, &rcfg) {
+        router::RouterState::Ours { .. } => println!("router already running — good"),
+        router::RouterState::Down => {
+            start(cfg)?;
+            print!("waiting for router");
+            let mut up = false;
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if matches!(
+                    router::status(&dir, &rcfg),
+                    router::RouterState::Ours { .. }
+                ) {
+                    up = true;
+                    break;
+                }
+                print!(".");
+                use std::io::Write;
+                std::io::stdout().flush().ok();
+            }
+            println!();
+            anyhow::ensure!(up, "router did not come up within 30s — see router.log");
+        }
+        other => anyhow::bail!("port {} is not ours to set up: {other:?}", cfg.port),
+    }
+    calibrate(cfg, false)?;
+    sync(cfg)
 }

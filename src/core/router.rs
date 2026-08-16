@@ -193,6 +193,42 @@ pub struct RouterModel {
     /// Where the router got this model: "preset" (ours) or "cache"
     /// (LLAMA_CACHE downloads the router discovered on its own).
     pub source: Option<String>,
+    /// Fingerprint of the effective child args the router would launch this
+    /// model with — the "did its config change?" half of measurement
+    /// staleness (the other half is the environment fingerprint).
+    pub args_fp: Option<String>,
+}
+
+/// Drop volatile flag pairs from a child-args list before fingerprinting:
+/// the router stamps `--port 0` on unloaded entries but the *actual*
+/// ephemeral port after a load, so including it would mark every model
+/// stale the moment it had ever been loaded.
+fn stable_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(args.len());
+    let mut skip_value = false;
+    for a in args {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if *a == "--port" {
+            skip_value = true;
+            continue;
+        }
+        out.push(*a);
+    }
+    out
+}
+
+/// FNV-1a 64-bit, hex. Stable across runs and Rust versions (unlike
+/// DefaultHasher), which is what a persisted fingerprint requires.
+pub fn fnv(s: &str) -> String {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in s.as_bytes() {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{h:016x}")
 }
 
 /// Parse the router's `GET /models` response (verified shape: spike 1).
@@ -211,7 +247,20 @@ pub fn parse_models_response(body: &serde_json::Value) -> Vec<RouterModel> {
                         status = format!("failed({code})");
                     }
                     let source = m.get("source").and_then(|s| s.as_str()).map(String::from);
-                    Some(RouterModel { id, status, source })
+                    let args_fp = st
+                        .get("args")
+                        .and_then(|a| a.as_array())
+                        .map(|args| {
+                            let strs: Vec<&str> =
+                                args.iter().filter_map(|v| v.as_str()).collect();
+                            fnv(&stable_args(&strs).join(" "))
+                        });
+                    Some(RouterModel {
+                        id,
+                        status,
+                        source,
+                        args_fp,
+                    })
                 })
                 .collect()
         })
@@ -340,11 +389,42 @@ pub fn stop(dir: &Path, preset: &Path) -> Result<()> {
 // keyed by alias and kept in the state dir; opencode sync refuses to guess
 // and only writes measured numbers.
 
-/// One measured result. `n_ctx` is what `--fit` settled on for this machine,
-/// with the preset's flags, at measurement time.
+/// One calibration result — success (`n_ctx` measured) or remembered
+/// failure (`error`), stamped with fingerprints so staleness is detectable.
+/// Old measurement files (bare `{"n_ctx": N}`) still parse; their missing
+/// fingerprints read as "stale", which re-measures them — the right thing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Measurement {
-    pub n_ctx: u64,
+    /// The context `--fit` settled on. `None` = the load failed.
+    pub n_ctx: Option<u64>,
+    /// Why the load failed, when it did.
+    pub error: Option<String>,
+    /// Fingerprint of the model's effective launch args at measurement time.
+    pub args_fp: Option<String>,
+    /// Fingerprint of the environment (server build + devices).
+    pub env_fp: Option<String>,
+}
+
+impl Default for Measurement {
+    fn default() -> Self {
+        Self {
+            n_ctx: None,
+            error: None,
+            args_fp: None,
+            env_fp: None,
+        }
+    }
+}
+
+impl Measurement {
+    /// Fresh = measured (or failed) under exactly this config + environment.
+    pub fn is_fresh(&self, current_args_fp: Option<&str>, env_fp: &str) -> bool {
+        (self.n_ctx.is_some() || self.error.is_some())
+            && self.env_fp.as_deref() == Some(env_fp)
+            && self.args_fp.as_deref() == current_args_fp
+            && current_args_fp.is_some()
+    }
 }
 
 pub type Measurements = std::collections::BTreeMap<String, Measurement>;
@@ -366,16 +446,38 @@ pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
         .with_context(|| format!("writing {}", measurements_path(dir).display()))
 }
 
-/// Settled context for one model: `GET /props?model=X` autoloads it (may
-/// take ~15s for a 20GB model, hence the long timeout) and reports the
-/// instance's real `n_ctx`.
+/// Settled context for one model, measured without any long-blocking
+/// request: explicit load → poll status until loaded/failed (cold-cache
+/// loads of 20GB files can take minutes; a hanging GET would trip HTTP
+/// timeouts and the router's request-scoped kill paths) → read `/props`
+/// with autoload off.
 pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
+    load_model(port, model)?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    loop {
+        let status = fetch_models(port)?
+            .into_iter()
+            .find(|m| m.id == model)
+            .map(|m| m.status)
+            .ok_or_else(|| anyhow::anyhow!("{model} vanished from /models during load"))?;
+        match status.as_str() {
+            "loaded" | "sleeping" => break,
+            s if s.starts_with("failed") => {
+                bail!("{model} did not load: {s} (see router.log)")
+            }
+            _ if std::time::Instant::now() > deadline => {
+                let _ = unload_model(port, model); // don't leave it wedged
+                bail!("{model} still not loaded after 600s; gave up")
+            }
+            _ => std::thread::sleep(std::time::Duration::from_secs(1)),
+        }
+    }
     let url = format!(
-        "http://127.0.0.1:{port}/props?model={}",
+        "http://127.0.0.1:{port}/props?model={}&autoload=false",
         urlencode(model)
     );
     let body: serde_json::Value = ureq::get(&url)
-        .timeout(std::time::Duration::from_secs(180))
+        .timeout(std::time::Duration::from_secs(15))
         .call()
         .with_context(|| format!("/props for {model}"))?
         .into_json()?;
@@ -413,13 +515,18 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-/// Measure every preset model the router lists, one at a time (load →
-/// read settled ctx → unload), updating the stored measurements as it goes.
-/// `progress` is called before each model so a caller can narrate.
+/// Measure preset models one at a time (load → read settled ctx → unload),
+/// updating stored measurements as it goes. **Incremental by default**:
+/// models whose stored measurement is fresh (same effective args, same
+/// build/devices) are skipped — including remembered *failures*, so a model
+/// this build can't load doesn't re-fail on every run. `force` re-measures
+/// everything. `progress` narrates each decision.
 pub fn calibrate(
     dir: &Path,
     port: u16,
-    progress: &mut dyn FnMut(&str, usize, usize),
+    env_fp: &str,
+    force: bool,
+    progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
     let models: Vec<_> = fetch_models(port)?
         .into_iter()
@@ -431,18 +538,76 @@ pub fn calibrate(
     let mut out = read_measurements(dir);
     let total = models.len();
     for (i, m) in models.iter().enumerate() {
-        progress(&m.id, i + 1, total);
-        match fetch_settled_ctx(port, &m.id) {
-            Ok(n_ctx) => {
-                out.insert(m.id.clone(), Measurement { n_ctx });
-                write_measurements(dir, &out)?; // persist per model — a
-                // mid-run failure keeps everything measured so far
-            }
-            Err(e) => eprintln!("  {}: measurement failed: {e:#}", m.id),
+        let n = i + 1;
+        if !force
+            && let Some(stored) = out.get(&m.id)
+            && stored.is_fresh(m.args_fp.as_deref(), env_fp)
+        {
+            let what = match (&stored.n_ctx, &stored.error) {
+                (Some(ctx), _) => format!("ctx {ctx}"),
+                (None, Some(_)) => "known load failure".to_string(),
+                _ => unreachable!("is_fresh requires one of them"),
+            };
+            progress(format!("[{n}/{total}] {} — fresh ({what}), skipping", m.id));
+            continue;
         }
+        progress(format!("[{n}/{total}] measuring {} (loads the model)…", m.id));
+        // First failure gets one retry after a settle: unloads are async,
+        // so a load can race a predecessor still releasing VRAM and fail
+        // (or fit against less memory than it will really have).
+        let result = fetch_settled_ctx(port, &m.id).or_else(|first_err| {
+            progress(format!(
+                "[{n}/{total}] {} failed once ({first_err:#}); settling 5s and retrying…",
+                m.id
+            ));
+            std::thread::sleep(std::time::Duration::from_secs(5));
+            fetch_settled_ctx(port, &m.id).map_err(|e| e.context("retry also failed"))
+        });
+        let measurement = match result {
+            Ok(n_ctx) => Measurement {
+                n_ctx: Some(n_ctx),
+                error: None,
+                args_fp: m.args_fp.clone(),
+                env_fp: Some(env_fp.to_string()),
+            },
+            Err(e) => {
+                progress(format!("[{n}/{total}] {} failed: {e:#}", m.id));
+                Measurement {
+                    n_ctx: None,
+                    error: Some(format!("{e:#}")),
+                    args_fp: m.args_fp.clone(),
+                    env_fp: Some(env_fp.to_string()),
+                }
+            }
+        };
+        out.insert(m.id.clone(), measurement);
+        write_measurements(dir, &out)?; // persist per model — a mid-run
+        // failure keeps everything measured so far
         let _ = unload_model(port, &m.id);
+        wait_until_not_loaded(port, &m.id, std::time::Duration::from_secs(30));
     }
     Ok(out)
+}
+
+/// Block until the router no longer reports `model` as loaded/loading —
+/// i.e. its VRAM is actually back. Measurements taken without this race
+/// the previous model's teardown and come out low (or fail outright).
+fn wait_until_not_loaded(port: u16, model: &str, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        match fetch_models(port) {
+            Ok(models) => {
+                let busy = models
+                    .iter()
+                    .any(|m| m.id == model && matches!(m.status.as_str(), "loaded" | "loading"));
+                if !busy {
+                    return;
+                }
+            }
+            Err(_) => return, // router gone — nothing to wait for
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
 }
 
 /// Ask a running router to re-read its model sources (`/models?reload=1`,
@@ -526,6 +691,77 @@ mod tests {
         assert_eq!(models[0].status, "loaded");
         assert_eq!(models[1].status, "failed(1)");
         assert_eq!(models[2].status, "loading");
+    }
+
+    #[test]
+    fn fnv_is_stable_and_discriminating() {
+        assert_eq!(fnv("abc"), fnv("abc"));
+        assert_ne!(fnv("abc"), fnv("abd"));
+        assert_eq!(fnv(""), "cbf29ce484222325");
+    }
+
+    #[test]
+    fn args_fingerprint_comes_from_status_args() {
+        let body = serde_json::json!({"data": [
+            {"id": "a", "status": {"value": "unloaded", "args": ["llama-server", "-c", "4096"]}},
+            {"id": "b", "status": {"value": "unloaded"}}
+        ]});
+        let models = parse_models_response(&body);
+        assert_eq!(models[0].args_fp.as_deref(), Some(fnv("llama-server -c 4096").as_str()));
+        assert!(models[1].args_fp.is_none());
+    }
+
+    #[test]
+    fn ephemeral_port_does_not_change_the_fingerprint() {
+        let fp = |port: &str| {
+            let body = serde_json::json!({"data": [
+                {"id": "a", "status": {"value": "unloaded",
+                    "args": ["llama-server", "--port", port, "-c", "4096"]}}
+            ]});
+            parse_models_response(&body)[0].args_fp.clone().unwrap()
+        };
+        assert_eq!(fp("0"), fp("53001"), "load-assigned port must not mark models stale");
+        let no_port = {
+            let body = serde_json::json!({"data": [
+                {"id": "a", "status": {"value": "unloaded", "args": ["llama-server", "-c", "4096"]}}
+            ]});
+            parse_models_response(&body)[0].args_fp.clone().unwrap()
+        };
+        assert_eq!(fp("0"), no_port);
+    }
+
+    #[test]
+    fn freshness_requires_matching_fingerprints() {
+        let m = Measurement {
+            n_ctx: Some(1000),
+            error: None,
+            args_fp: Some("aaaa".into()),
+            env_fp: Some("eeee".into()),
+        };
+        assert!(m.is_fresh(Some("aaaa"), "eeee"));
+        assert!(!m.is_fresh(Some("bbbb"), "eeee"), "args changed → stale");
+        assert!(!m.is_fresh(Some("aaaa"), "ffff"), "env changed → stale");
+        assert!(!m.is_fresh(None, "eeee"), "unknown current args → stale");
+
+        let failed = Measurement {
+            n_ctx: None,
+            error: Some("boom".into()),
+            args_fp: Some("aaaa".into()),
+            env_fp: Some("eeee".into()),
+        };
+        assert!(failed.is_fresh(Some("aaaa"), "eeee"), "failures are remembered");
+    }
+
+    #[test]
+    fn old_measurement_files_parse_as_stale() {
+        let old: Measurements =
+            serde_json::from_str(r#"{"alias": {"n_ctx": 72960}}"#).unwrap();
+        let m = &old["alias"];
+        assert_eq!(m.n_ctx, Some(72960));
+        assert!(
+            !m.is_fresh(Some("anything"), "env"),
+            "no fingerprints → re-measure"
+        );
     }
 
     #[test]
