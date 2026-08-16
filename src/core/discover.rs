@@ -96,9 +96,10 @@ fn probe_install(server: &Path) -> LlamaInstall {
     }
 }
 
-/// Parse `llama-server --version` output:
+/// Parse `llama-server --version` output. Two dialects exist:
 /// ```text
-/// version: 10216 (876a43211)
+/// version: 10216 (876a43211)                        # up to ~b10216
+/// version: 0.1.0-dev (build 10454, commit 4df29be4f) # newer builds
 /// built with GNU 15.2.0 for Linux x86_64
 /// ```
 fn parse_version_output(out: &str) -> (Option<u64>, Option<String>, Option<String>) {
@@ -109,11 +110,25 @@ fn parse_version_output(out: &str) -> (Option<u64>, Option<String>, Option<Strin
         let line = line.trim();
         if let Some(rest) = line.strip_prefix("version:") {
             let rest = rest.trim();
-            let mut parts = rest.splitn(2, ' ');
-            build = parts.next().and_then(|n| n.parse().ok());
-            commit = parts
-                .next()
-                .map(|h| h.trim().trim_start_matches('(').trim_end_matches(')').to_string());
+            if let Some(bpos) = rest.find("build ") {
+                // New dialect: numbers live in "(build N, commit H)".
+                build = rest[bpos + "build ".len()..]
+                    .split([',', ')', ' '])
+                    .next()
+                    .and_then(|n| n.parse().ok());
+                if let Some(cpos) = rest.find("commit ") {
+                    commit = rest[cpos + "commit ".len()..]
+                        .split([',', ')', ' '])
+                        .next()
+                        .map(str::to_string);
+                }
+            } else {
+                let mut parts = rest.splitn(2, ' ');
+                build = parts.next().and_then(|n| n.parse().ok());
+                commit = parts
+                    .next()
+                    .map(|h| h.trim().trim_start_matches('(').trim_end_matches(')').to_string());
+            }
         } else if let Some(rest) = line.strip_prefix("built with") {
             built_with = Some(rest.trim().to_string());
         }
@@ -244,6 +259,17 @@ mod tests {
         let (build, _, built_with) = parse_version_output(out);
         assert_eq!(build, Some(10360));
         assert!(built_with.unwrap().contains("Unsloth"));
+    }
+
+    #[test]
+    fn parses_the_new_version_dialect() {
+        // Banner format changed upstream around b104xx — found live when
+        // the user's first advisor-driven rebuild "lost" its version.
+        let out = "version: 0.1.0-dev (build 10454, commit 4df29be4f)\nbuilt with GNU 15.2.0 for Linux x86_64\n";
+        let (build, commit, built_with) = parse_version_output(out);
+        assert_eq!(build, Some(10454));
+        assert_eq!(commit.as_deref(), Some("4df29be4f"));
+        assert!(built_with.unwrap().contains("GNU 15.2.0"));
     }
 
     #[test]
