@@ -144,6 +144,14 @@ fn sibling_backends(server: &Path) -> Vec<String> {
     backends
 }
 
+/// Build number of one llama-server binary (`--version` probe).
+pub fn build_of(server: &Path) -> Option<u64> {
+    let out = Command::new(server).arg("--version").output().ok()?;
+    let mut s = String::from_utf8_lossy(&out.stdout).into_owned();
+    s.push_str(&String::from_utf8_lossy(&out.stderr));
+    parse_version_output(&s).0
+}
+
 /// Live VRAM (free, total) in MiB for the primary NVIDIA card, via
 /// nvidia-smi — cheap enough for a 2s poll, and unlike `--list-devices`
 /// it doesn't initialize CUDA. `None` when nvidia-smi is absent/fails.

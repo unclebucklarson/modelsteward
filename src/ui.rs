@@ -11,7 +11,7 @@
 //! Every slow operation runs on a worker thread reporting over a channel;
 //! the UI thread never blocks on the network or a model load.
 
-use crate::core::{discover, ollama, opencode, router, rows, settings, system};
+use crate::core::{advisor, diagnose, discover, ollama, opencode, router, rows, settings, system};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -38,6 +38,7 @@ enum Msg {
     Configured(Vec<opencode::ConfiguredModel>),
     /// Live (free, total) MiB for the primary CUDA card.
     Vram(Option<(u64, u64)>),
+    BuildCheck(Box<advisor::BuildCheck>),
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
     Progress(String),
@@ -93,6 +94,17 @@ struct App {
     show_about: bool,
     last_sync: Option<String>,
     override_editor: Option<OverrideEditor>,
+    show_advisor: bool,
+    build_check: Option<advisor::BuildCheck>,
+    diagnosis: Option<DiagnosisView>,
+}
+
+/// A diagnosis being shown for one model row.
+struct DiagnosisView {
+    display: String,
+    router_id: Option<String>,
+    path: Option<PathBuf>,
+    d: diagnose::Diagnosis,
 }
 
 /// Edit buffers for one model's preset overrides. Fields show EFFECTIVE
@@ -133,6 +145,9 @@ impl App {
             show_about: false,
             last_sync: None,
             override_editor: None,
+            show_advisor: false,
+            build_check: None,
+            diagnosis: None,
         };
         app.reset_edit_buffers();
         app.spawn_scan();
@@ -559,6 +574,50 @@ impl App {
         }
     }
 
+    fn action_build_check(&mut self) {
+        self.show_advisor = true;
+        self.build_check = None;
+        let cfg = self.cfg.clone();
+        let measurements = self.measurements.clone();
+        self.spawn(
+            "checking your llama.cpp build (contacts the git remote)",
+            move |tx| {
+                let server = system::pick_server(&cfg).ok();
+                let build = server.as_deref().and_then(discover::build_of);
+                let log =
+                    std::fs::read_to_string(router::state_dir().join("router.log")).ok();
+                let check = advisor::check(server, build, &measurements, log.as_deref());
+                let _ = tx.send(Msg::BuildCheck(Box::new(check)));
+            },
+        );
+    }
+
+    fn action_rebuild(&mut self) {
+        let Some(check) = self.build_check.clone() else {
+            return;
+        };
+        self.spawn(
+            "updating + rebuilding llama.cpp (this takes many minutes)",
+            move |tx| {
+                let progress_tx = tx.clone();
+                let result = advisor::run_rebuild(&check, &mut |line| {
+                    let _ = progress_tx.send(Msg::Progress(line));
+                });
+                let _ = tx.send(match result {
+                    Ok(()) => Msg::Finished(
+                        "rebuild complete ✓ — now: Stop Router, Start Router, then Set Up \
+                         Everything (a new build makes every measurement stale, so it \
+                         re-measures and re-checks the previously locked models)"
+                            .into(),
+                    ),
+                    Err(e) => Msg::Error(format!(
+                        "rebuild failed: {e:#} — your existing binaries are untouched"
+                    )),
+                });
+            },
+        );
+    }
+
     fn vram_contention(&self) -> Option<String> {
         let router_loaded: Vec<&str> = match &self.router_state {
             Some(router::RouterState::Ours { models }) => models
@@ -605,6 +664,10 @@ impl App {
                 }
                 Msg::Ollama(o) => self.ollama = o,
                 Msg::Vram(v) => self.live_vram = v,
+                Msg::BuildCheck(c) => {
+                    self.build_check = Some(*c);
+                    self.busy = None;
+                }
                 Msg::Configured(c) => {
                     self.configured = c;
                     rebuild = true;
@@ -707,6 +770,11 @@ impl App {
                 ui.close();
             }
             ui.separator();
+            if ui.button("Check My llama.cpp (Build Advisor)…").clicked() {
+                self.action_build_check();
+                ui.close();
+            }
+            ui.separator();
             if ui.button("Install systemd User Unit…").clicked() {
                 let cfg = self.cfg.clone();
                 self.spawn("writing systemd unit", move |tx| {
@@ -795,6 +863,7 @@ impl App {
             ui.separator();
         }
         let mut pending: Option<RowAction> = None;
+        let mut why: Option<DiagnosisView> = None;
         let rows = self.rows.clone();
         egui::ScrollArea::both().show(ui, |ui| {
             egui::Grid::new("library")
@@ -803,7 +872,7 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Measured ctx", "Server", "OpenCode",
-                        "", "", "", "Advice",
+                        "", "", "", "Advice", "",
                     ] {
                         ui.strong(h);
                     }
@@ -931,10 +1000,49 @@ impl App {
                             r.advice.clone()
                         };
                         ui.colored_label(color, short).on_hover_text(&r.advice);
+                        if r.advice_level != rows::AdviceLevel::Good {
+                            if ui
+                                .button("Why?")
+                                .on_hover_text("Plain-language explanation and what to do about it")
+                                .clicked()
+                            {
+                                let not_offered = router_up
+                                    && r.router_id.is_some()
+                                    && r.server_status.is_none()
+                                    && r.failure.is_none();
+                                let mut failure = r.failure.clone();
+                                // "failed(1)" alone explains nothing — mine
+                                // the router log for this model's real error.
+                                if let (Some(f), Some(id)) = (&failure, &r.router_id)
+                                    && diagnose::classify(f) == diagnose::Cause::Unknown
+                                    && let Ok(log) = std::fs::read_to_string(
+                                        router::state_dir().join("router.log"),
+                                    )
+                                    && let Some(mined) = advisor::mine_failures(&log).get(id)
+                                {
+                                    failure = Some(format!("{f} — {mined}"));
+                                }
+                                why = Some(DiagnosisView {
+                                    display: r.display.clone(),
+                                    router_id: r.router_id.clone(),
+                                    path: r.path.clone(),
+                                    d: diagnose::diagnose(
+                                        failure.as_deref(),
+                                        not_offered,
+                                        r.archivable && r.path.is_some(),
+                                    ),
+                                });
+                            }
+                        } else {
+                            ui.label("");
+                        }
                         ui.end_row();
                     }
                 });
         });
+        if let Some(v) = why {
+            self.diagnosis = Some(v);
+        }
         if let Some(action) = pending {
             self.run_row_action(action);
         }
@@ -1440,6 +1548,169 @@ impl App {
         }
     }
 
+    fn diagnosis_window(&mut self, ctx: &egui::Context) {
+        let Some(v) = &self.diagnosis else { return };
+        let (display, d, router_id, path) =
+            (v.display.clone(), v.d.clone(), v.router_id.clone(), v.path.clone());
+        let mut open = true;
+        let mut action: Option<RowAction> = None;
+        let mut open_advisor = false;
+        let mut show_log = false;
+        let mut unload_others = false;
+        egui::Window::new(format!("Why? — {display}"))
+            .collapsible(false)
+            .default_width(460.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(&d.explanation);
+                if let Some(ev) = &d.evidence {
+                    ui.add_space(4.0);
+                    ui.small("The exact error:");
+                    ui.monospace(ev);
+                }
+                ui.separator();
+                ui.horizontal_wrapped(|ui| {
+                    for remedy in &d.remedies {
+                        match remedy {
+                            diagnose::Remedy::OpenBuildAdvisor => {
+                                if ui.button("Open Build Advisor").clicked() {
+                                    open_advisor = true;
+                                }
+                            }
+                            diagnose::Remedy::ArchiveToShelf => {
+                                if let Some(p) = &path
+                                    && ui.button("Archive to my models folder").clicked()
+                                {
+                                    action = Some(RowAction::Archive(p.clone()));
+                                }
+                            }
+                            diagnose::Remedy::UnloadOthers => {
+                                if ui.button("Unload other models").clicked() {
+                                    unload_others = true;
+                                }
+                            }
+                            diagnose::Remedy::LoadAndMeasure => {
+                                if let Some(id) = &router_id
+                                    && ui.button("Load & measure now").clicked()
+                                {
+                                    action = Some(RowAction::Load(id.clone()));
+                                }
+                            }
+                            diagnose::Remedy::ShowLog => {
+                                if ui.button("Open the full log").clicked() {
+                                    show_log = true;
+                                }
+                            }
+                        }
+                    }
+                });
+            });
+        let acted =
+            action.is_some() || open_advisor || show_log || unload_others;
+        if action.is_some() || open_advisor || !open {
+            self.diagnosis = None;
+        }
+        if open_advisor {
+            self.action_build_check();
+        }
+        if show_log {
+            let path = router::state_dir().join("router.log");
+            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+            self.log(format!("opened {}", path.display()));
+        }
+        if unload_others {
+            let loaded: Vec<String> = match &self.router_state {
+                Some(router::RouterState::Ours { models }) => models
+                    .iter()
+                    .filter(|m| m.status == "loaded")
+                    .map(|m| m.id.clone())
+                    .collect(),
+                _ => Vec::new(),
+            };
+            let port = self.cfg.port;
+            if loaded.is_empty() {
+                self.log("nothing is loaded — VRAM is as free as the router can make it");
+            } else {
+                self.spawn("unloading all models", move |tx| {
+                    for id in &loaded {
+                        let _ = router::unload_model(port, id);
+                    }
+                    let _ = tx.send(Msg::Finished(format!("unloaded {}", loaded.join(", "))));
+                });
+            }
+        }
+        if let Some(a) = action {
+            self.run_row_action(a);
+        }
+        let _ = acted;
+    }
+
+    fn advisor_window(&mut self, ctx: &egui::Context) {
+        if !self.show_advisor {
+            return;
+        }
+        let mut open = true;
+        let mut rebuild = false;
+        let mut recheck = false;
+        egui::Window::new("Build Advisor")
+            .collapsible(false)
+            .default_width(560.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                let Some(check) = &self.build_check else {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("checking your llama.cpp against upstream…");
+                    });
+                    return;
+                };
+                for (headline, detail) in advisor::verdicts(check) {
+                    ui.strong(headline);
+                    ui.label(detail);
+                    ui.add_space(6.0);
+                }
+                egui::CollapsingHeader::new("Advanced: exactly what a rebuild runs")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        for (cmd, args) in advisor::rebuild_commands(check) {
+                            ui.monospace(format!("{cmd} {}", args.join(" ")));
+                        }
+                        ui.small("Fast-forward pull only — your local changes are never overwritten.");
+                    });
+                ui.separator();
+                ui.horizontal(|ui| {
+                    let can_rebuild =
+                        check.repo.is_some() && check.cmake && check.dirty != Some(true);
+                    if ui
+                        .add_enabled(can_rebuild, egui::Button::new("⬆ Update & Rebuild Now"))
+                        .on_hover_text(
+                            "git pull --ff-only, then a full cmake build. Takes many minutes; \
+                             progress streams to the activity log. Your current binaries keep \
+                             working until the build succeeds.",
+                        )
+                        .clicked()
+                    {
+                        rebuild = true;
+                    }
+                    if ui.button("Re-check").clicked() {
+                        recheck = true;
+                    }
+                });
+                if check.dirty == Some(true) {
+                    ui.small("Rebuild disabled: the checkout has local changes — commit/stash them first.");
+                }
+            });
+        if !open {
+            self.show_advisor = false;
+        }
+        if rebuild {
+            self.action_rebuild();
+        }
+        if recheck {
+            self.action_build_check();
+        }
+    }
+
     fn status_bar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             let (dot, text) = match &self.router_state {
@@ -1719,6 +1990,8 @@ impl eframe::App for App {
         });
 
         self.override_dialog(ui.ctx());
+        self.diagnosis_window(ui.ctx());
+        self.advisor_window(ui.ctx());
 
         if self.show_about {
             egui::Window::new("About")

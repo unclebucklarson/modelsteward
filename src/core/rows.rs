@@ -76,21 +76,9 @@ pub fn read_ram_mib() -> u64 {
 const AGENT_MIN_CTX: u64 = 24_576;
 
 /// Turn a stored load-failure string into something a user can act on.
+/// One-liner for table cells; the full story lives in core::diagnose.
 pub fn failure_hint(error: &str) -> String {
-    let lower = error.to_lowercase();
-    if lower.contains("rope.dimension_sections")
-        || lower.contains("hyperparameters")
-        || lower.contains("unknown model architecture")
-        || lower.contains("unknown architecture")
-    {
-        "this model's format is newer than your llama.cpp build — updating/rebuilding llama.cpp will likely fix it".into()
-    } else if lower.contains("wrong number of tensors") {
-        "the file looks like a partial download or a multimodal blob llama.cpp can't load standalone".into()
-    } else if lower.contains("out of memory") || lower.contains("failed to allocate") {
-        "not enough memory to load with current settings".into()
-    } else {
-        "load failed — see the Server tab log for the exact error".into()
-    }
+    crate::core::diagnose::short_hint(error)
 }
 
 fn advice_for(

@@ -14,11 +14,13 @@
 //!                                        fresh measurements unless `force`)
 //!   llamacppcodeconf --sync [port]       write measured models into
 //!                                        opencode.json (backs up first)
+//!   llamacppcodeconf --advise            build advisor: check llama.cpp
+//!                                        against upstream + this machine
 //!   llamacppcodeconf --install-service   write the systemd user unit
 //!
 //! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
 
-use llamacppcodeconf::core::{opencode, router, settings, system};
+use llamacppcodeconf::core::{advisor, discover, opencode, router, settings, system};
 use std::path::PathBuf;
 
 fn main() {
@@ -57,6 +59,21 @@ fn main() {
             calibrate(&with_port(&cfg, &args[1..]), force)
         }
         Some("--sync") => sync(&with_port(&cfg, &args[1..])),
+        Some("--advise") => {
+            let server = system::pick_server(&cfg).ok();
+            let build = server.as_deref().and_then(discover::build_of);
+            let measurements = router::read_measurements(&router::state_dir());
+            let log = std::fs::read_to_string(router::state_dir().join("router.log")).ok();
+            let check = advisor::check(server, build, &measurements, log.as_deref());
+            for (headline, detail) in advisor::verdicts(&check) {
+                println!("• {headline}\n  {detail}");
+            }
+            println!("\nA rebuild would run:");
+            for (cmd, args) in advisor::rebuild_commands(&check) {
+                println!("  {cmd} {}", args.join(" "));
+            }
+            Ok(())
+        }
         Some("--install-service") => system::install_systemd_unit(&cfg).map(|path| {
             println!("unit written: {}", path.display());
             println!(
@@ -65,7 +82,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --install-service | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }

@@ -112,13 +112,23 @@ first; the local-model Advisor explains the weird ones later.
 
 ## M6 — Build Advisor
 
-Deterministic hardware/toolchain probe + rules engine → recommended cmake
-flags, staleness vs upstream ("b10216 can't load 4 of your models — a
-newer build fixes the qwen3.5-MoE hyperparameter format"), optional
-run-the-rebuild with log pane. Then the `Advisor` AI layer (default
-backend: the local model this app serves) for build-log diagnosis and
-tradeoff explanations — picks from the rules engine's flag allowlist,
-never invents flags.
+**Phase 1 DONE (probe + rules + Diagnosis):** `core/diagnose.rs` (error →
+cause → plain language + remedy buttons; "Why?" on every non-green Library
+row, log-mining for old "failed(1)" records) and `core/advisor.rs`
+(git checkout state incl. source-vs-binary split, upstream distance via
+fetch, compute capability, toolchain, locked-model list; verdict cards in
+outcome language; ff-only + arch-pinned rebuild commands; streaming
+rebuild runner). GUI: Server → Check My llama.cpp; CLI: `--advise`.
+First live run found: checkout already pulled to b10448 but binary still
+b10216 — rebuild alone unlocks 3 models.
+
+**Phase 2 remaining:**
+- Post-rebuild verification loop: after a successful rebuild, offer/auto
+  run stop → start → Set Up Everything and report "N models unlocked ✓"
+  against the pre-rebuild locked list.
+- The `Advisor` AI layer (default backend: the local model this app
+  serves) for build-log diagnosis and tradeoff explanations — picks from
+  the rules engine's flag allowlist, never invents flags.
 
 ## M7 — Performance lab
 
