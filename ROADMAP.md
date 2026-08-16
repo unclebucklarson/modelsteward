@@ -69,8 +69,11 @@ The tabs now match how a user thinks:
    filled when absent — hand-edits are never overwritten. Advice column
    reflects it. Live: all 11 loadable models pass. Bonus fix: GUI now
    auto-reloads measurements.json on change.
-6. **Per-model override editor**: dialog for ctx, KV type, extra flags
-   (later: device pinning) writing through preset + hot reload.
+6. ✔ **Per-model override editor** (DONE): ⚙ per Library row — ctx pin,
+   KV type, extra flags; stored in config.json (survives regeneration),
+   works for preset aliases AND router cache ids (bare sections), preset
+   regenerated + router hot-reloaded on save. Device pinning fields join
+   when GPU #2 exists.
 7. ~~Model downloads~~ → moved to the modelwarden sibling project
    (acquisition is storage-side; see boundary contract).
 8. **Log viewer + Tools menu**: tail router.log in-app; open preset/config.
