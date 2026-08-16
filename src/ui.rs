@@ -11,7 +11,7 @@
 //! Every slow operation runs on a worker thread reporting over a channel;
 //! the UI thread never blocks on the network or a model load.
 
-use crate::core::{ollama, opencode, router, rows, settings, system};
+use crate::core::{discover, ollama, opencode, router, rows, settings, system};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -36,6 +36,8 @@ enum Msg {
     Ollama(ollama::OllamaStatus),
     Measurements(router::Measurements),
     Configured(Vec<opencode::ConfiguredModel>),
+    /// Live (free, total) MiB for the primary CUDA card.
+    Vram(Option<(u64, u64)>),
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
     Progress(String),
@@ -78,6 +80,7 @@ struct App {
     configured: Vec<opencode::ConfiguredModel>,
     rows: Vec<rows::Row>,
     ram_mib: u64,
+    live_vram: Option<(u64, u64)>,
 
     // Settings pane edit buffers (applied on Save).
     edit_scan_dirs: String,
@@ -120,6 +123,7 @@ impl App {
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
+            live_vram: None,
             edit_scan_dirs: String::new(),
             edit_port: String::new(),
             edit_server_bin: String::new(),
@@ -231,6 +235,7 @@ impl App {
                     return;
                 }
                 let _ = tx.send(Msg::Ollama(ollama::probe(cfg.ollama_port)));
+                let _ = tx.send(Msg::Vram(discover::nvidia_vram_mib()));
                 // Reload measurements when the file changes on disk (e.g. a
                 // CLI calibration ran) — the OpenCode/Library tabs must
                 // never show stale numbers.
@@ -599,6 +604,7 @@ impl App {
                     rebuild = true;
                 }
                 Msg::Ollama(o) => self.ollama = o,
+                Msg::Vram(v) => self.live_vram = v,
                 Msg::Configured(c) => {
                     self.configured = c;
                     rebuild = true;
@@ -711,6 +717,53 @@ impl App {
                         )),
                         Err(e) => Msg::Error(format!("systemd unit: {e:#}")),
                     });
+                });
+                ui.close();
+            }
+        });
+        ui.menu_button("Tools", |ui| {
+            let mut open_path: Option<PathBuf> = None;
+            if ui.button("Open Router Preset (router.ini)").clicked() {
+                open_path = Some(system::preset_path());
+                ui.close();
+            }
+            if ui.button("Open App Config (config.json)").clicked() {
+                open_path = Some(system::config_file());
+                ui.close();
+            }
+            if ui.button("Open opencode.json").clicked() {
+                open_path = Some(opencode::default_config_path());
+                ui.close();
+            }
+            if ui.button("Open Router Log").clicked() {
+                open_path = Some(router::state_dir().join("router.log"));
+                ui.close();
+            }
+            if let Some(path) = open_path {
+                match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                    Ok(_) => self.log(format!("opened {}", path.display())),
+                    Err(e) => self.log(format!("ERROR opening {}: {e}", path.display())),
+                }
+            }
+            ui.separator();
+            if ui
+                .button("Restore opencode.json From Last Backup")
+                .on_hover_text(
+                    "Swaps opencode.json with its newest backup — run again to toggle back. \
+                     Undo for the last sync/remove.",
+                )
+                .clicked()
+            {
+                self.spawn("restoring opencode.json from backup", |tx| {
+                    let _ = tx.send(
+                        match opencode::restore_last_backup(&opencode::default_config_path()) {
+                            Ok(msg) => {
+                                send_configured(tx);
+                                Msg::Finished(msg)
+                            }
+                            Err(e) => Msg::Error(format!("restore: {e:#}")),
+                        },
+                    );
                 });
                 ui.close();
             }
@@ -1060,20 +1113,26 @@ impl App {
                         match self.measurements.get(&c.id) {
                             Some(m) if m.n_ctx.is_some() => {
                                 let measured = m.n_ctx.unwrap();
-                                if c.context == Some(measured) {
+                                let write_value = opencode::safety_context(measured);
+                                if c.context == Some(write_value) {
                                     ui.colored_label(
                                         egui::Color32::from_rgb(0, 170, 0),
                                         "✔ synced",
-                                    );
+                                    )
+                                    .on_hover_text(format!(
+                                        "measured {measured}, written {write_value} (5% safety margin)"
+                                    ));
                                 } else {
                                     ui.colored_label(
                                         ui.visuals().warn_fg_color,
-                                        format!("⟳ config differs (measured {measured})"),
+                                        format!("⟳ config differs (sync would write {write_value})"),
                                     )
-                                    .on_hover_text(
-                                        "Sync opencode.json (File menu) refreshes this to the \
-                                         measured value; if you set it by hand on purpose, leave it.",
-                                    );
+                                    .on_hover_text(format!(
+                                        "measured {measured}; the next sync will write {write_value} \
+                                         (5% safety margin) over this value. To pin a custom context, \
+                                         use the model's ⚙ overrides instead — that pins it at the \
+                                         server, so config and server stay in agreement."
+                                    ));
                                 }
                             }
                             Some(m) if m.error.is_some() => {
@@ -1411,9 +1470,15 @@ impl App {
             ui.colored_label(dot, "●");
             ui.label(text);
             ui.separator();
+            if let Some((free, total)) = self.live_vram {
+                ui.label(format!("VRAM: {free} / {total} MiB free"));
+                ui.separator();
+            }
             if let Some(scan) = &self.scan {
-                if let Some(d) = scan.devices.iter().find(|d| d.id.starts_with("CUDA")) {
-                    ui.label(format!("{}: {} MiB free", d.id, d.free_mib));
+                if self.live_vram.is_none()
+                    && let Some(d) = scan.devices.iter().find(|d| d.id.starts_with("CUDA"))
+                {
+                    ui.label(format!("{}: {} MiB free (at scan)", d.id, d.free_mib));
                     ui.separator();
                 }
                 ui.label(format!("{} models", scan.models.len()));

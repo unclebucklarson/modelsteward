@@ -39,18 +39,29 @@ pub struct DesiredModel {
     pub tool_call: Option<bool>,
 }
 
+/// The context we WRITE for a measurement: 5% safety haircut (user
+/// decision, 2026-08-16), floored to a 256 multiple. Settled context
+/// varies a few percent with desktop VRAM at load time; the haircut keeps
+/// OpenCode's budget inside what the server will actually have on a bad
+/// day. UI comparisons must use this, not the raw measurement.
+pub fn safety_context(measured: u64) -> u64 {
+    let cut = measured - measured / 20;
+    cut - (cut % 256)
+}
+
 impl DesiredModel {
     /// The JSON written for a fresh entry. `tool_call` is the measured
     /// verdict; when the probe was inconclusive we default to `true` —
     /// agent use is the point of this provider, and `false` would hide the
     /// model from OpenCode's agent picker on no evidence.
     fn entry(&self) -> serde_json::Value {
+        let ctx = safety_context(self.context);
         json!({
             "name": self.display_name,
             "tool_call": self.tool_call.unwrap_or(true),
             "limit": {
-                "context": self.context,
-                "output": self.context.div_euclid(2).min(32_768),
+                "context": ctx,
+                "output": ctx.div_euclid(2).min(32_768),
             }
         })
     }
@@ -61,7 +72,7 @@ impl DesiredModel {
     /// in either direction — a probe false-negative must not clobber a
     /// deliberate `true`, nor vice versa.
     fn patch(&self, fill_tool_call: bool) -> serde_json::Value {
-        let mut p = json!({ "limit": { "context": self.context } });
+        let mut p = json!({ "limit": { "context": safety_context(self.context) } });
         if fill_tool_call && let Some(tc) = self.tool_call {
             p["tool_call"] = json!(tc);
         }
@@ -140,9 +151,7 @@ fn existing_model_ids(source: &str) -> Result<Vec<String>> {
         .unwrap_or_default())
 }
 
-/// Read → sync → backup → write. The backup is a single rotating
-/// `<name>.lcc.bak` next to the file (this user's config dir already
-/// carries nine ad-hoc backups; we won't add a growing pile of our own).
+/// Read → sync → backup → write (numbered backups, see write_backed_up).
 pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Result<SyncReport> {
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
@@ -151,17 +160,49 @@ pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Resul
     Ok(report)
 }
 
+const BACKUP_DEPTH: u32 = 5;
+
+fn backup_path(path: &Path, n: u32) -> std::path::PathBuf {
+    path.with_extension(format!("json.lcc.bak.{n}"))
+}
+
+/// Numbered backups, newest = .1, capped at [`BACKUP_DEPTH`]. A sync
+/// followed by a comment-out no longer eats the only recovery point.
 fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     if updated == original {
         return Ok(());
     }
-    let backup = path.with_extension("json.lcc.bak");
-    std::fs::write(&backup, original)
-        .with_context(|| format!("writing backup {}", backup.display()))?;
+    for n in (1..BACKUP_DEPTH).rev() {
+        let _ = std::fs::rename(backup_path(path, n), backup_path(path, n + 1));
+    }
+    std::fs::write(backup_path(path, 1), original)
+        .with_context(|| format!("writing backup {}", backup_path(path, 1).display()))?;
     let tmp = path.with_extension("json.lcc.tmp");
     std::fs::write(&tmp, updated).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).context("moving new config into place")?;
     Ok(())
+}
+
+/// Swap the config with its newest backup — pressing twice toggles back,
+/// so this is undo AND redo in one action. Nothing is ever deleted.
+pub fn restore_last_backup(path: &Path) -> Result<String> {
+    let bak = backup_path(path, 1);
+    let current = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let backup = std::fs::read_to_string(&bak)
+        .with_context(|| format!("no backup to restore ({})", bak.display()))?;
+    if current == backup {
+        return Ok("config and newest backup are identical — nothing to restore".into());
+    }
+    let tmp = path.with_extension("json.lcc.tmp");
+    std::fs::write(&tmp, &backup).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::write(&bak, &current).context("stashing current into backup slot")?;
+    std::fs::rename(&tmp, path).context("moving restored config into place")?;
+    Ok(format!(
+        "restored {} from {} (run again to toggle back)",
+        path.display(),
+        bak.display()
+    ))
 }
 
 /// One entry as it currently stands in opencode.json — what the OpenCode
@@ -308,7 +349,7 @@ mod tests {
         );
         assert_eq!(
             parsed2.pointer("/provider/llamacpp/models/qwen3.6-27b-ud-q5_k_xl/limit/context"),
-            Some(&serde_json::json!(91_000)),
+            Some(&serde_json::json!(safety_context(91_000))),
             "context still refreshes"
         );
 
@@ -333,7 +374,7 @@ mod tests {
             sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[desired("qwen3.6-27b-ud-q5_k_xl", 72_960)])
                 .unwrap();
         assert_eq!(report.updated, vec!["qwen3.6-27b-ud-q5_k_xl"]);
-        assert!(out.contains(r#""context": 72960"#));
+        assert!(out.contains(&format!(r#""context": {}"#, safety_context(72_960))));
         // Hand-set values and the user's comment survive.
         assert!(out.contains("hand-tuned name"));
         assert!(out.contains(r#""temperature": 0.6"#));
@@ -349,9 +390,10 @@ mod tests {
                 .unwrap();
         assert_eq!(report.added, vec!["gemma4-latest"]);
         assert!(out.contains(r#""gemma4-latest""#));
-        assert!(out.contains(r#""context": 36096"#));
+        let ctx = safety_context(36_096);
+        assert!(out.contains(&format!(r#""context": {ctx}"#)));
         // output = min(ctx/2, 32768)
-        assert!(out.contains(r#""output": 18048"#));
+        assert!(out.contains(&format!(r#""output": {}"#, ctx / 2)));
         // Both pre-existing models are now orphans — reported, not removed.
         let mut orphans = report.orphans.clone();
         orphans.sort();
@@ -379,7 +421,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             parsed.pointer("/provider/llamacpp/models/m/limit/context"),
-            Some(&serde_json::json!(8192))
+            Some(&serde_json::json!(safety_context(8192)))
         );
     }
 
@@ -393,5 +435,37 @@ mod tests {
                 .unwrap();
         assert_eq!(once, twice);
         assert_eq!(report.updated.len(), 1);
+    }
+
+    #[test]
+    fn safety_haircut_is_five_percent_floored_to_256() {
+        assert_eq!(safety_context(72_960), 69_120);
+        assert_eq!(safety_context(262_144), 248_832);
+        assert_eq!(safety_context(256), 0, "tiny values floor to zero — callers must treat 0 as unusable");
+    }
+
+    #[test]
+    fn backups_are_numbered_and_restore_toggles() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(&path, "v0").unwrap();
+        for v in ["v1", "v2", "v3"] {
+            let cur = std::fs::read_to_string(&path).unwrap();
+            write_backed_up(&path, &cur, v).unwrap();
+        }
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v3");
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            "v2",
+            "newest backup is .1"
+        );
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 3)).unwrap(), "v0");
+
+        // Restore = swap with .1; twice = back where we started.
+        restore_last_backup(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 1)).unwrap(), "v3");
+        restore_last_backup(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v3");
     }
 }

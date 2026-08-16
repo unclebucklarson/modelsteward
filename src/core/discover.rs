@@ -144,6 +144,25 @@ fn sibling_backends(server: &Path) -> Vec<String> {
     backends
 }
 
+/// Live VRAM (free, total) in MiB for the primary NVIDIA card, via
+/// nvidia-smi — cheap enough for a 2s poll, and unlike `--list-devices`
+/// it doesn't initialize CUDA. `None` when nvidia-smi is absent/fails.
+pub fn nvidia_vram_mib() -> Option<(u64, u64)> {
+    let out = Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+        ])
+        .output()
+        .ok()?;
+    let line = String::from_utf8_lossy(&out.stdout);
+    let line = line.lines().next()?;
+    let (used, total) = line.split_once(',')?;
+    let used: u64 = used.trim().parse().ok()?;
+    let total: u64 = total.trim().parse().ok()?;
+    Some((total.saturating_sub(used), total))
+}
+
 /// Ask an install what devices it can see. Errors (bad binary, no devices)
 /// yield an empty list — callers render that as "CPU only / unknown".
 pub fn list_devices(server: &Path) -> Vec<Device> {
