@@ -5,6 +5,7 @@ pub mod discover;
 pub mod gguf;
 pub mod jsonc;
 pub mod library;
+pub mod ollama;
 pub mod opencode;
 pub mod router;
 pub mod system;

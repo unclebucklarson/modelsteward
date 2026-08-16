@@ -45,12 +45,18 @@ fn main() {
         Some("--reload") => router::reload(port_from(&args[1..])).map(|models| {
             println!("{}", serde_json::to_string_pretty(&models).unwrap());
         }),
-        Some("--stop") => router::stop(&router::state_dir()),
+        Some("--stop") => router::stop(&router::state_dir(), &system::preset_path()),
+        Some("--install-service") => {
+            system::install_systemd_unit(port_from(&args[1..])).map(|path| {
+                println!("unit written: {}", path.display());
+                println!("activate: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router");
+            })
+        }
         Some("--calibrate") => calibrate(port_from(&args[1..])),
         Some("--sync") => sync(port_from(&args[1..])),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --scan|--preset [dir ...] | --start|--status|--reload|--calibrate|--sync [port] | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --scan|--preset [dir ...] | --start|--status|--reload|--calibrate|--sync|--install-service [port] | --stop"
             );
             std::process::exit(2);
         }

@@ -147,6 +147,28 @@ fn cmdline_matches(cmdline: &str, preset: &Path) -> bool {
     cmdline.contains("llama-server") && cmdline.contains(&preset.display().to_string())
 }
 
+/// Find any process running llama-server with OUR preset file — covers the
+/// systemd-user-unit case, where the marker (written by whichever process
+/// spawned the server) doesn't exist in this app's state. Running our
+/// generated preset is the ownership credential; an arbitrary llama-server
+/// never matches.
+pub fn find_preset_process(preset: &Path) -> Option<u32> {
+    let proc = std::fs::read_dir("/proc").ok()?;
+    for e in proc.flatten() {
+        let name = e.file_name();
+        let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) {
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if cmdline_matches(&cmdline, preset) {
+                return Some(pid);
+            }
+        }
+    }
+    None
+}
+
 // ─── lifecycle ───────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -206,9 +228,12 @@ fn fetch_models(port: u16) -> Result<Vec<RouterModel>> {
     Ok(parse_models_response(&body))
 }
 
-/// What is true about our configured port right now.
+/// What is true about our configured port right now. "Ours" = the marker we
+/// wrote at spawn is live, OR some process (e.g. a systemd user unit) is
+/// running llama-server with our preset file.
 pub fn status(dir: &Path, cfg: &RouterConfig) -> RouterState {
-    let ours = read_marker(dir).is_some_and(|m| marker_is_live(&m));
+    let ours = read_marker(dir).is_some_and(|m| marker_is_live(&m))
+        || find_preset_process(&cfg.preset_path).is_some();
     match fetch_models(cfg.port) {
         Ok(models) if ours => RouterState::Ours { models },
         Ok(models) => RouterState::External {
@@ -268,33 +293,42 @@ pub fn start(dir: &Path, cfg: &RouterConfig) -> Result<u32> {
     Ok(pid)
 }
 
-/// Stop our router: SIGTERM to the marker pid, but only after re-verifying
-/// the cmdline still matches. External servers are untouchable by design.
-pub fn stop(dir: &Path) -> Result<()> {
-    let Some(m) = read_marker(dir) else {
-        bail!("no record of a router we started");
+/// Stop our router: SIGTERM, but only to a pid whose cmdline names our
+/// preset — the marker pid normally, or a preset-matched process (systemd
+/// case) when no marker exists. External servers are untouchable by design.
+pub fn stop(dir: &Path, preset: &Path) -> Result<()> {
+    let pid = match read_marker(dir) {
+        Some(m) if marker_is_live(&m) => m.pid,
+        Some(m) => {
+            clear_marker(dir);
+            match find_preset_process(preset) {
+                Some(pid) => pid,
+                None => bail!(
+                    "our router (pid {}) is already gone; cleared the stale record",
+                    m.pid
+                ),
+            }
+        }
+        None => find_preset_process(preset)
+            .ok_or_else(|| anyhow::anyhow!("no llama-server running our preset found"))?,
     };
-    if !marker_is_live(&m) {
-        clear_marker(dir);
-        bail!("our router (pid {}) is already gone; cleared the stale record", m.pid);
-    }
     let ok = std::process::Command::new("kill")
-        .arg(m.pid.to_string())
+        .arg(pid.to_string())
         .status()
         .context("sending SIGTERM")?
         .success();
     if !ok {
-        bail!("kill {} failed", m.pid);
+        bail!("kill {pid} failed");
     }
     // Give it a moment; router children get llama-server's stop-timeout.
     for _ in 0..50 {
-        if !marker_is_live(&m) {
+        if find_preset_process(preset).is_none() {
             clear_marker(dir);
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    bail!("router (pid {}) did not exit within 5s; not escalating automatically", m.pid)
+    bail!("router (pid {pid}) did not exit within 5s; not escalating automatically")
 }
 
 // ─── calibration ─────────────────────────────────────────────────────────────

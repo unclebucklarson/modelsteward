@@ -86,6 +86,44 @@ pub fn scan_report(extra_dirs: &[PathBuf]) -> ScanReport {
     }
 }
 
+/// Text of a systemd *user* unit that runs the router at login. The unit
+/// runs llama-server directly (not this app), with the same preset — the
+/// router process it starts passes `router::find_preset_process`, so the
+/// app recognizes it as ours and Stop works on it.
+pub fn systemd_unit_text(cfg: &router::RouterConfig) -> String {
+    format!(
+        "[Unit]\n\
+         Description=llama.cpp router (llamacppcodeconf)\n\
+         After=network.target\n\n\
+         [Service]\n\
+         ExecStart={server} --models-preset {preset} --host 127.0.0.1 --port {port} --models-max {max}\n\
+         Restart=on-failure\n\n\
+         [Install]\n\
+         WantedBy=default.target\n",
+        server = cfg.server_bin.display(),
+        preset = cfg.preset_path.display(),
+        port = cfg.port,
+        max = cfg.models_max,
+    )
+}
+
+/// Write the user unit file. Enabling/starting is left to the user (one
+/// visible command) so systemd never surprises them:
+///   systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router
+pub fn install_systemd_unit(port: u16) -> Result<PathBuf> {
+    let cfg = router_config(port);
+    if !cfg.preset_path.exists() {
+        write_preset(&[])?;
+    }
+    let dir = std::env::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("no home directory"))?
+        .join(".config/systemd/user");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join("llamacpp-router.service");
+    std::fs::write(&path, systemd_unit_text(&cfg))?;
+    Ok(path)
+}
+
 /// (Re)generate the preset from a scan; returns (path, model count).
 pub fn write_preset(extra_dirs: &[PathBuf]) -> Result<(PathBuf, usize)> {
     let models = scan_models(extra_dirs);
@@ -94,4 +132,26 @@ pub fn write_preset(extra_dirs: &[PathBuf]) -> Result<(PathBuf, usize)> {
     std::fs::create_dir_all(config_dir())?;
     std::fs::write(preset_path(), &ini)?;
     Ok((preset_path(), entries.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn systemd_unit_runs_llama_server_with_our_preset() {
+        let cfg = router::RouterConfig {
+            server_bin: PathBuf::from("/opt/bin/llama-server"),
+            port: 8080,
+            preset_path: PathBuf::from("/home/u/.config/llamacppcodeconf/router.ini"),
+            models_max: 1,
+        };
+        let unit = systemd_unit_text(&cfg);
+        assert!(unit.contains(
+            "ExecStart=/opt/bin/llama-server --models-preset /home/u/.config/llamacppcodeconf/router.ini --host 127.0.0.1 --port 8080 --models-max 1"
+        ));
+        // The preset path in ExecStart is exactly what find_preset_process
+        // matches on — this is the ownership handshake with the router module.
+        assert!(unit.contains("WantedBy=default.target"));
+    }
 }

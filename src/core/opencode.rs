@@ -131,16 +131,44 @@ pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Resul
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let (updated, report) = sync_source(&original, base_url, desired)?;
+    write_backed_up(path, &original, &updated)?;
+    Ok(report)
+}
+
+fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     if updated == original {
-        return Ok(report);
+        return Ok(());
     }
     let backup = path.with_extension("json.lcc.bak");
-    std::fs::write(&backup, &original)
+    std::fs::write(&backup, original)
         .with_context(|| format!("writing backup {}", backup.display()))?;
     let tmp = path.with_extension("json.lcc.tmp");
-    std::fs::write(&tmp, &updated).with_context(|| format!("writing {}", tmp.display()))?;
+    std::fs::write(&tmp, updated).with_context(|| format!("writing {}", tmp.display()))?;
     std::fs::rename(&tmp, path).context("moving new config into place")?;
-    Ok(report)
+    Ok(())
+}
+
+/// Model ids under our provider that aren't in `keep` — comment-out
+/// candidates for the UI to offer.
+pub fn orphans_in_file(path: &Path, keep: &[String]) -> Result<Vec<String>> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let keep: std::collections::HashSet<_> = keep.iter().map(String::as_str).collect();
+    Ok(existing_model_ids(&source)?
+        .into_iter()
+        .filter(|id| !keep.contains(id.as_str()))
+        .collect())
+}
+
+/// Comment one orphan out in place (never deletes; the entry stays visible
+/// in the file under an explanatory note). Backed up like every write.
+pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
+    let original = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let note = "Commented out by llamacppcodeconf: not in the current router \npreset / never measured. Uncomment to restore, or delete these \nlines to discard permanently.";
+    let updated = jsonc::comment_out_model(&original, PROVIDER_ID, model_id, note)
+        .with_context(|| format!("commenting out {model_id}"))?;
+    write_backed_up(path, &original, &updated)
 }
 
 #[cfg(test)]

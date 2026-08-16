@@ -4,7 +4,7 @@
 //! worker thread and reports back over a channel — the UI thread never
 //! blocks on the network or a model load.
 
-use crate::core::{opencode, router, system};
+use crate::core::{ollama, opencode, router, system};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -26,9 +26,11 @@ pub fn run() -> eframe::Result {
 enum Msg {
     Scanned(system::ScanReport),
     RouterState(router::RouterState),
+    Ollama(ollama::OllamaStatus),
     Measurements(router::Measurements),
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
+    Orphans(Vec<String>),
     Progress(String),
     Error(String),
 }
@@ -47,7 +49,9 @@ struct App {
 
     scan: Option<system::ScanReport>,
     router_state: Option<router::RouterState>,
+    ollama: ollama::OllamaStatus,
     measurements: router::Measurements,
+    orphans: Vec<String>,
     port: u16,
 
     /// Rolling activity log shown at the bottom of every pane.
@@ -66,7 +70,9 @@ impl App {
             pane: Pane::Library,
             scan: None,
             router_state: None,
+            ollama: Default::default(),
             measurements: router::read_measurements(&router::state_dir()),
+            orphans: Vec::new(),
             port: system::DEFAULT_PORT,
             activity: Vec::new(),
             busy: None,
@@ -75,6 +81,7 @@ impl App {
         };
         app.spawn_scan();
         app.spawn_status_poller(cc.egui_ctx.clone());
+        app.spawn_orphan_check();
         app
     }
 
@@ -105,9 +112,22 @@ impl App {
                 if tx.send(Msg::RouterState(state)).is_err() {
                     return;
                 }
+                let _ = tx.send(Msg::Ollama(ollama::probe(ollama::DEFAULT_PORT)));
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
+        });
+    }
+
+    /// Recompute the orphan list off-thread (reads opencode.json).
+    fn spawn_orphan_check(&self) {
+        let tx = self.tx.clone();
+        let keep: Vec<String> = self.measurements.keys().cloned().collect();
+        std::thread::spawn(move || {
+            let orphans =
+                opencode::orphans_in_file(&opencode::default_config_path(), &keep)
+                    .unwrap_or_default();
+            let _ = tx.send(Msg::Orphans(orphans));
         });
     }
 
@@ -163,9 +183,36 @@ impl App {
         });
     }
 
+    /// Both engines holding VRAM at once is the classic local-stack failure;
+    /// say so the moment it's true.
+    fn vram_contention(&self) -> Option<String> {
+        let router_loaded: Vec<&str> = match &self.router_state {
+            Some(router::RouterState::Ours { models }) => models
+                .iter()
+                .filter(|m| m.status == "loaded")
+                .map(|m| m.id.as_str())
+                .collect(),
+            _ => return None,
+        };
+        if router_loaded.is_empty() || self.ollama.loaded.is_empty() {
+            return None;
+        }
+        let ollama_names: Vec<String> = self
+            .ollama
+            .loaded
+            .iter()
+            .map(|m| format!("{} ({:.1} GB VRAM)", m.name, m.size_vram as f64 / 1e9))
+            .collect();
+        Some(format!(
+            "VRAM contention: router has {} loaded while Ollama holds {}",
+            router_loaded.join(", "),
+            ollama_names.join(", ")
+        ))
+    }
+
     fn action_stop(&mut self) {
         self.spawn("stopping router", |tx| {
-            match router::stop(&router::state_dir()) {
+            match router::stop(&router::state_dir(), &system::preset_path()) {
                 Ok(()) => {
                     let _ = tx.send(Msg::Progress("router stopped".into()));
                 }
@@ -238,6 +285,8 @@ impl App {
                     self.busy = None;
                 }
                 Msg::RouterState(s) => self.router_state = Some(s),
+                Msg::Ollama(o) => self.ollama = o,
+                Msg::Orphans(o) => self.orphans = o,
                 Msg::Measurements(m) => {
                     self.log(format!("calibration finished: {} models measured", m.len()));
                     self.measurements = m;
@@ -255,9 +304,7 @@ impl App {
                         r.orphans.len()
                     );
                     self.log(line.clone());
-                    for o in &r.orphans {
-                        self.log(format!("  orphan (left in config): {o}"));
-                    }
+                    self.orphans = r.orphans.clone();
                     self.last_sync = Some(line);
                     self.busy = None;
                 }
@@ -315,6 +362,20 @@ impl App {
                 self.action_calibrate();
                 ui.close();
             }
+            ui.separator();
+            if ui.button("Install systemd User Unit…").clicked() {
+                let port = self.port;
+                self.spawn("writing systemd unit", move |tx| {
+                    let _ = tx.send(match system::install_systemd_unit(port) {
+                        Ok(path) => Msg::Progress(format!(
+                            "unit written: {} — activate with: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router",
+                            path.display()
+                        )),
+                        Err(e) => Msg::Error(format!("systemd unit: {e:#}")),
+                    });
+                });
+                ui.close();
+            }
         });
         ui.menu_button("Help", |ui| {
             if ui.button("About").clicked() {
@@ -367,6 +428,11 @@ impl App {
     }
 
     fn server_pane(&mut self, ui: &mut egui::Ui) {
+        if let Some(warning) = self.vram_contention() {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
+            ui.small("Unload one side (Ollama models expire on their own after idle) or expect slow/failing loads.");
+            ui.separator();
+        }
         let mut load: Option<String> = None;
         let mut unload: Option<String> = None;
         let state = self.router_state.clone();
@@ -433,6 +499,22 @@ impl App {
                 });
             }
         }
+        ui.separator();
+        ui.strong("Ollama (peer — observed, never managed)");
+        if !self.ollama.reachable {
+            ui.label("daemon not answering on :11434 (not proof its models are gone)");
+        } else if self.ollama.loaded.is_empty() {
+            ui.label("daemon up, nothing loaded");
+        } else {
+            for m in &self.ollama.loaded {
+                ui.label(format!(
+                    "  {} — {:.1} GB VRAM",
+                    m.name,
+                    m.size_vram as f64 / 1e9
+                ));
+            }
+        }
+
         let port = self.port;
         if let Some(id) = load {
             self.spawn(&format!("loading {id}"), move |tx| {
@@ -476,7 +558,16 @@ impl App {
             if ui.button("Sync opencode.json").clicked() {
                 self.action_sync();
             }
-            if ui.button("Calibrate first").clicked() {
+            if ui
+                .button("Measure contexts (required before sync)")
+                .on_hover_text(
+                    "Loads each preset model once and records the context llama-server's \
+                     --fit actually settled on for THIS machine — usually far less than the \
+                     GGUF header claims. Sync only ever writes these measured values, so \
+                     OpenCode never plans prompts against a context the server doesn't have.",
+                )
+                .clicked()
+            {
                 self.action_calibrate();
             }
         });
@@ -484,6 +575,43 @@ impl App {
             ui.label(s);
         }
         ui.small("Sync writes measured context limits only. Existing entries get a minimal patch; your hand-edits and comments survive. Orphans are reported, never deleted.");
+
+        let mut to_comment: Option<String> = None;
+        if !self.orphans.is_empty() {
+            ui.separator();
+            ui.strong("Orphans (in your config, but not measured/served)");
+            for id in &self.orphans {
+                ui.horizontal(|ui| {
+                    ui.label(id);
+                    if ui
+                        .button("Comment out")
+                        .on_hover_text(
+                            "Comments the entry out in place with a note — never deletes. \
+                             Uncomment in the file to restore.",
+                        )
+                        .clicked()
+                    {
+                        to_comment = Some(id.clone());
+                    }
+                });
+            }
+        }
+        if let Some(id) = to_comment {
+            let keep: Vec<String> = self.measurements.keys().cloned().collect();
+            self.spawn(&format!("commenting out {id}"), move |tx| {
+                let path = opencode::default_config_path();
+                match opencode::comment_out_in_file(&path, &id) {
+                    Ok(()) => {
+                        let _ = tx.send(Msg::Progress(format!("{id}: commented out (backup kept)")));
+                        let orphans = opencode::orphans_in_file(&path, &keep).unwrap_or_default();
+                        let _ = tx.send(Msg::Orphans(orphans));
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Error(format!("comment out: {e:#}")));
+                    }
+                }
+            });
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -522,6 +650,10 @@ impl App {
                     ui.separator();
                 }
                 ui.label(format!("{} models", scan.models.len()));
+                ui.separator();
+            }
+            if self.vram_contention().is_some() {
+                ui.colored_label(ui.visuals().warn_fg_color, "⚠ VRAM contention");
                 ui.separator();
             }
             if let Some(b) = &self.busy {
