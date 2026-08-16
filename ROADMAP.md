@@ -100,6 +100,16 @@ The tabs now match how a user thinks:
 - `limit.output` exposed in the override editor (crude ctx/2 cap today).
 - Library staleness badge driven by fingerprint mismatch.
 
+## M6 — Build Advisor + Diagnosis ("Why?" panel)
+
+**Diagnosis** (user idea, agreed 2026-08-16): every unavailable/failed
+model gets a "Why?" button opening a plain-language panel: what happened,
+the evidence (exact log line, pre-extracted — never "see logs"), and what
+to do next as actionable buttons (Archive to shelf / Rebuild llama.cpp /
+Free VRAM / Re-measure). Shares its brain with the Build Advisor: the
+same rules that map an error to a cause map a cause to the fix. Rules
+first; the local-model Advisor explains the weird ones later.
+
 ## M6 — Build Advisor
 
 Deterministic hardware/toolchain probe + rules engine → recommended cmake
