@@ -35,17 +35,19 @@ pub struct DesiredModel {
     pub display_name: String,
     /// Measured settled context (spike 2: from `/props`, not the GGUF).
     pub context: u64,
+    /// Measured tool-calling verdict; `None` = probe inconclusive.
+    pub tool_call: Option<bool>,
 }
 
 impl DesiredModel {
-    /// The JSON written for a fresh entry. `tool_call: true` because agent
-    /// use is the point of this provider; a model that can't call tools is
-    /// the user's to demote by hand (we never overwrite their edit: syncs
-    /// of existing entries only patch `limit.context`).
+    /// The JSON written for a fresh entry. `tool_call` is the measured
+    /// verdict; when the probe was inconclusive we default to `true` —
+    /// agent use is the point of this provider, and `false` would hide the
+    /// model from OpenCode's agent picker on no evidence.
     fn entry(&self) -> serde_json::Value {
         json!({
             "name": self.display_name,
-            "tool_call": true,
+            "tool_call": self.tool_call.unwrap_or(true),
             "limit": {
                 "context": self.context,
                 "output": self.context.div_euclid(2).min(32_768),
@@ -53,11 +55,17 @@ impl DesiredModel {
         })
     }
 
-    /// The minimal patch for an entry that already exists: only the measured
-    /// context. Everything the user hand-tuned (temperature, name, even
-    /// tool_call) stays byte-for-byte.
-    fn patch(&self) -> serde_json::Value {
-        json!({ "limit": { "context": self.context } })
+    /// The patch for an entry that already exists: always the measured
+    /// context; the measured `tool_call` ONLY when the entry doesn't have
+    /// the key yet (`fill_tool_call`). A hand-set value is never overwritten
+    /// in either direction — a probe false-negative must not clobber a
+    /// deliberate `true`, nor vice versa.
+    fn patch(&self, fill_tool_call: bool) -> serde_json::Value {
+        let mut p = json!({ "limit": { "context": self.context } });
+        if fill_tool_call && let Some(tc) = self.tool_call {
+            p["tool_call"] = json!(tc);
+        }
+        p
     }
 }
 
@@ -88,11 +96,19 @@ pub fn sync_source(
         .context("ensuring provider.llamacpp.models exists")?;
 
     let existing = existing_model_ids(&source)?;
+    // Which existing entries already carry a tool_call key (hand-set or
+    // previously written) — those are never patched.
+    let has_tool_call: std::collections::HashSet<String> = configured_from_source(&source)?
+        .into_iter()
+        .filter(|c| c.tool_call.is_some())
+        .map(|c| c.id)
+        .collect();
     let mut report = SyncReport::default();
 
     for d in desired {
         if existing.contains(&d.id) {
-            source = jsonc::merge_model(&source, PROVIDER_ID, &d.id, &d.patch())
+            let fill = !has_tool_call.contains(&d.id);
+            source = jsonc::merge_model(&source, PROVIDER_ID, &d.id, &d.patch(fill))
                 .with_context(|| format!("updating {}", d.id))?;
             report.updated.push(d.id.clone());
         } else {
@@ -166,7 +182,11 @@ use serde::Serialize;
 pub fn configured_models(path: &Path) -> Result<Vec<ConfiguredModel>> {
     let source = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
-    let value = jsonc_parser::parse_to_serde_value(&source, &Default::default())
+    configured_from_source(&source)
+}
+
+fn configured_from_source(source: &str) -> Result<Vec<ConfiguredModel>> {
+    let value = jsonc_parser::parse_to_serde_value(source, &Default::default())
         .map_err(|e| anyhow::anyhow!("parsing opencode.json: {e}"))?
         .unwrap_or(serde_json::Value::Null);
     Ok(value
@@ -249,7 +269,62 @@ mod tests {
             id: id.into(),
             display_name: format!("{id} (llama.cpp)"),
             context: ctx,
+            tool_call: None,
         }
+    }
+
+    #[test]
+    fn measured_tool_call_fills_gaps_but_never_overwrites() {
+        // "stale-model" in SAMPLE has NO tool_call key → measured verdict
+        // fills it in.
+        let d = DesiredModel {
+            tool_call: Some(false),
+            ..desired("stale-model", 90_000)
+        };
+        let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
+        let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.pointer("/provider/llamacpp/models/stale-model/tool_call"),
+            Some(&serde_json::json!(false)),
+            "absent key gets the measured verdict"
+        );
+
+        // "qwen3.6-27b-ud-q5_k_xl" HAS tool_call: true in SAMPLE — a
+        // measured `false` must NOT overwrite the recorded value.
+        let d2 = DesiredModel {
+            tool_call: Some(false),
+            ..desired("qwen3.6-27b-ud-q5_k_xl", 91_000)
+        };
+        let (out2, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d2]).unwrap();
+        let parsed2 = jsonc_parser::parse_to_serde_value(&out2, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed2.pointer("/provider/llamacpp/models/qwen3.6-27b-ud-q5_k_xl/tool_call"),
+            Some(&serde_json::json!(true)),
+            "present key is sacred"
+        );
+        assert_eq!(
+            parsed2.pointer("/provider/llamacpp/models/qwen3.6-27b-ud-q5_k_xl/limit/context"),
+            Some(&serde_json::json!(91_000)),
+            "context still refreshes"
+        );
+
+        // New entries carry the measured verdict directly.
+        let d3 = DesiredModel {
+            tool_call: Some(false),
+            ..desired("brand-new", 8_192)
+        };
+        let (out3, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d3]).unwrap();
+        let parsed3 = jsonc_parser::parse_to_serde_value(&out3, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed3.pointer("/provider/llamacpp/models/brand-new/tool_call"),
+            Some(&serde_json::json!(false))
+        );
     }
 
     #[test]

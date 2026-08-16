@@ -97,6 +97,7 @@ fn advice_for(
     meta: Option<&GgufMeta>,
     size_bytes: u64,
     measured: Option<u64>,
+    tool_call: Option<bool>,
     failure: Option<&str>,
     hw: Hardware,
 ) -> (AdviceLevel, String) {
@@ -104,7 +105,14 @@ fn advice_for(
         return (AdviceLevel::Bad, failure_hint(err));
     }
     if let Some(ctx) = measured {
-        return if ctx < AGENT_MIN_CTX {
+        return if tool_call == Some(false) {
+            (
+                AdviceLevel::Warn,
+                format!(
+                    "measured {ctx} context, but produced NO tool call when probed — of limited use to OpenCode agents"
+                ),
+            )
+        } else if ctx < AGENT_MIN_CTX {
             (
                 AdviceLevel::Warn,
                 format!(
@@ -114,7 +122,10 @@ fn advice_for(
         } else {
             (
                 AdviceLevel::Good,
-                format!("measured: {ctx} context on this machine"),
+                format!(
+                    "measured: {ctx} context{} on this machine",
+                    if tool_call == Some(true) { ", tool calls work" } else { "" }
+                ),
             )
         };
     }
@@ -209,6 +220,7 @@ pub fn assemble(
 
         let measurement = router_id.as_ref().and_then(|id| measurements.get(id));
         let measured_ctx = measurement.and_then(|mm| mm.n_ctx);
+        let tool_call = measurement.and_then(|mm| mm.tool_call);
         let failure = measurement.and_then(|mm| mm.error.clone());
         let (advice_level, advice) = if !router_models.is_empty()
             && router_id.is_some()
@@ -225,6 +237,7 @@ pub fn assemble(
                 m.meta.as_ref(),
                 m.file_size,
                 measured_ctx,
+                tool_call,
                 failure.as_deref(),
                 hw,
             )
@@ -334,24 +347,25 @@ mod tests {
     #[test]
     fn advice_grades_by_size_measurement_and_failure() {
         // Too large outright.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 120 * 1024 * 1024 * 1024, None, None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 120 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Bad);
         assert!(msg.contains("too large"), "{msg}");
         // Bigger than VRAM → CPU spill warning.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 30 * 1024 * 1024 * 1024, None, None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 30 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Warn);
         assert!(msg.contains("partly on CPU"), "{msg}");
         // Measured small ctx.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(8192), None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(8192), None, None, HW);
         assert_eq!(lvl, AdviceLevel::Warn);
         assert!(msg.contains("small for agentic"), "{msg}");
         // Measured healthy.
-        let (lvl, _) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(80_000), None, HW);
+        let (lvl, _) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(80_000), None, None, HW);
         assert_eq!(lvl, AdviceLevel::Good);
         // Failure dominates.
         let (lvl, msg) = advice_for(
             Some(&GgufMeta::default()),
             10 << 30,
+            None,
             None,
             Some("key qwen35moe.rope.dimension_sections has wrong array length"),
             HW,
@@ -369,6 +383,7 @@ mod tests {
             "a".into(),
             Measurement {
                 n_ctx: Some(90_000),
+                tool_call: Some(true),
                 error: None,
                 args_fp: None,
                 env_fp: None,

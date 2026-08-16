@@ -137,6 +137,7 @@ fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredM
                 id: id.clone(),
                 display_name: format!("{id} (llama.cpp)"),
                 context: ctx,
+                tool_call: m.tool_call,
             })
         })
         .collect()

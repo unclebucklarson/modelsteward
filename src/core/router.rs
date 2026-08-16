@@ -401,6 +401,9 @@ pub fn stop(dir: &Path, preset: &Path) -> Result<()> {
 pub struct Measurement {
     /// The context `--fit` settled on. `None` = the load failed.
     pub n_ctx: Option<u64>,
+    /// Whether the model produced a well-formed tool call when probed —
+    /// measured, like everything else. `None` = probe not run / inconclusive.
+    pub tool_call: Option<bool>,
     /// Why the load failed, when it did.
     pub error: Option<String>,
     /// Fingerprint of the model's effective launch args at measurement time.
@@ -413,6 +416,7 @@ impl Default for Measurement {
     fn default() -> Self {
         Self {
             n_ctx: None,
+            tool_call: None,
             error: None,
             args_fp: None,
             env_fp: None,
@@ -422,8 +426,12 @@ impl Default for Measurement {
 
 impl Measurement {
     /// Fresh = measured (or failed) under exactly this config + environment.
+    /// A success without a tool-call verdict counts as stale (pre-tool-probe
+    /// data) so the next calibration upgrades it.
     pub fn is_fresh(&self, current_args_fp: Option<&str>, env_fp: &str) -> bool {
-        (self.n_ctx.is_some() || self.error.is_some())
+        let complete =
+            self.error.is_some() || (self.n_ctx.is_some() && self.tool_call.is_some());
+        complete
             && self.env_fp.as_deref() == Some(env_fp)
             && self.args_fp.as_deref() == current_args_fp
             && current_args_fp.is_some()
@@ -571,12 +579,32 @@ pub fn calibrate(
             fetch_settled_ctx(port, &m.id).map_err(|e| e.context("retry also failed"))
         });
         let measurement = match result {
-            Ok(n_ctx) => Measurement {
-                n_ctx: Some(n_ctx),
-                error: None,
-                args_fp: m.args_fp.clone(),
-                env_fp: Some(env_fp.to_string()),
-            },
+            Ok(n_ctx) => {
+                // While it's loaded, measure tool-calling too — the other
+                // half of "is this model actually useful to OpenCode".
+                progress(format!("[{n}/{total}] {}: ctx {n_ctx}; probing tool calls…", m.id));
+                let tool_call = match probe_tool_call(port, &m.id) {
+                    Ok(v) => {
+                        progress(format!(
+                            "[{n}/{total}] {}: tool calls {}",
+                            m.id,
+                            if v { "work" } else { "NOT produced" }
+                        ));
+                        Some(v)
+                    }
+                    Err(e) => {
+                        progress(format!("[{n}/{total}] {}: tool probe inconclusive: {e:#}", m.id));
+                        None
+                    }
+                };
+                Measurement {
+                    n_ctx: Some(n_ctx),
+                    tool_call,
+                    error: None,
+                    args_fp: m.args_fp.clone(),
+                    env_fp: Some(env_fp.to_string()),
+                }
+            }
             Err(e) => {
                 let detail = match mine_load_error(dir) {
                     Some(cause) => format!("{e:#} — {cause}"),
@@ -585,6 +613,7 @@ pub fn calibrate(
                 progress(format!("[{n}/{total}] {} failed: {detail}", m.id));
                 Measurement {
                     n_ctx: None,
+                    tool_call: None,
                     error: Some(detail),
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
@@ -598,6 +627,51 @@ pub fn calibrate(
         wait_until_not_loaded(port, &m.id, std::time::Duration::from_secs(30));
     }
     Ok(out)
+}
+
+/// Does the response contain a well-formed tool call? Pure over the JSON so
+/// it's testable: requires a non-empty `tool_calls` whose first entry names
+/// our probe function with arguments that parse as a JSON object.
+pub fn parse_tool_call_probe(body: &serde_json::Value) -> bool {
+    let Some(tc) = body
+        .pointer("/choices/0/message/tool_calls/0/function")
+    else {
+        return false;
+    };
+    let named_ours = tc.get("name").and_then(|n| n.as_str()) == Some("get_weather");
+    let args_ok = tc
+        .get("arguments")
+        .and_then(|a| a.as_str())
+        .and_then(|a| serde_json::from_str::<serde_json::Value>(a).ok())
+        .is_some_and(|v| v.is_object());
+    named_ours && args_ok
+}
+
+/// Probe a LOADED model's tool-calling: one chat request with a single tool
+/// and an instruction to use it. Thinking models reason before calling, so
+/// the token budget is generous and the timeout long. `Ok(false)` is a real
+/// measurement ("answered, but no usable tool call"); `Err` is inconclusive
+/// (network/server trouble) and stored as `None`.
+pub fn probe_tool_call(port: u16, model: &str) -> Result<bool> {
+    let body: serde_json::Value = ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .timeout(std::time::Duration::from_secs(300))
+        .send_json(serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user",
+                "content": "What is the weather in Paris right now? Use the get_weather tool to find out."}],
+            "tools": [{"type": "function", "function": {
+                "name": "get_weather",
+                "description": "Get current weather for a city",
+                "parameters": {"type": "object",
+                    "properties": {"city": {"type": "string"}},
+                    "required": ["city"]}}}],
+            "max_tokens": 2500,
+            "temperature": 0
+        }))
+        .with_context(|| format!("tool probe for {model}"))?
+        .into_json()
+        .context("tool probe returned non-JSON")?;
+    Ok(parse_tool_call_probe(&body))
 }
 
 /// The most recent child-load error in router.log — called right after a
@@ -761,9 +835,35 @@ mod tests {
     }
 
     #[test]
+    fn tool_call_probe_parsing_is_strict() {
+        // The real shape from spike 2's live tool-call test.
+        let good = serde_json::json!({"choices":[{"message":{"tool_calls":[
+            {"function":{"name":"get_weather","arguments":"{\"city\":\"Paris\"}"}}]},
+            "finish_reason":"tool_calls"}]});
+        assert!(parse_tool_call_probe(&good));
+
+        // Truncated arguments (the max_tokens pitfall) → not a pass.
+        let truncated = serde_json::json!({"choices":[{"message":{"tool_calls":[
+            {"function":{"name":"get_weather","arguments":"{"}}]},
+            "finish_reason":"length"}]});
+        assert!(!parse_tool_call_probe(&truncated));
+
+        // Plain text answer, no tool call.
+        let text = serde_json::json!({"choices":[{"message":{"content":"It is sunny."},
+            "finish_reason":"stop"}]});
+        assert!(!parse_tool_call_probe(&text));
+
+        // Hallucinated different function name.
+        let wrong = serde_json::json!({"choices":[{"message":{"tool_calls":[
+            {"function":{"name":"weather_lookup","arguments":"{}"}}]}}]});
+        assert!(!parse_tool_call_probe(&wrong));
+    }
+
+    #[test]
     fn freshness_requires_matching_fingerprints() {
         let m = Measurement {
             n_ctx: Some(1000),
+            tool_call: Some(true),
             error: None,
             args_fp: Some("aaaa".into()),
             env_fp: Some("eeee".into()),
@@ -775,6 +875,7 @@ mod tests {
 
         let failed = Measurement {
             n_ctx: None,
+            tool_call: None,
             error: Some("boom".into()),
             args_fp: Some("aaaa".into()),
             env_fp: Some("eeee".into()),

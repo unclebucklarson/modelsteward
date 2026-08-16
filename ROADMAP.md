@@ -62,9 +62,13 @@ The tabs now match how a user thinks:
 
 ## M5.6 — Test, refine, then deepen
 
-5. **Measured tool-calling**: during calibration, fire a one-shot tools
-   request at each loaded model and record whether well-formed `tool_calls`
-   come back; sync writes measured `tool_call`, not assumed.
+5. ✔ **Measured tool-calling** (DONE): calibration probes each loaded model
+   with a one-shot tools request (strict validation: right function name,
+   arguments parse as JSON; truncated calls don't count). New config
+   entries get the measured verdict; existing entries only have the key
+   filled when absent — hand-edits are never overwritten. Advice column
+   reflects it. Live: all 11 loadable models pass. Bonus fix: GUI now
+   auto-reloads measurements.json on change.
 6. **Per-model override editor**: dialog for ctx, KV type, extra flags
    (later: device pinning) writing through preset + hot reload.
 7. **Model downloads**: paste a HuggingFace repo (`user/model:quant`);

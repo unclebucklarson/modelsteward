@@ -205,6 +205,8 @@ impl App {
     fn spawn_status_poller(&self, ctx: egui::Context) {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
+            let meas_path = router::state_dir().join("measurements.json");
+            let mut last_meas_mtime = None;
             loop {
                 let cfg = system::load_config();
                 let state = router::status(&router::state_dir(), &system::router_config(&cfg));
@@ -212,6 +214,16 @@ impl App {
                     return;
                 }
                 let _ = tx.send(Msg::Ollama(ollama::probe(cfg.ollama_port)));
+                // Reload measurements when the file changes on disk (e.g. a
+                // CLI calibration ran) — the OpenCode/Library tabs must
+                // never show stale numbers.
+                let mtime = std::fs::metadata(&meas_path).and_then(|m| m.modified()).ok();
+                if mtime != last_meas_mtime {
+                    last_meas_mtime = mtime;
+                    let _ = tx.send(Msg::Measurements(router::read_measurements(
+                        &router::state_dir(),
+                    )));
+                }
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
@@ -279,10 +291,19 @@ impl App {
             "measuring new/stale models (fresh ones are skipped)"
         };
         self.spawn(label, move |tx| {
-            let _ = tx.send(match run_calibration(&cfg, force, tx) {
-                Ok(m) => Msg::Measurements(m),
-                Err(e) => Msg::Error(format!("calibrate: {e:#}")),
-            });
+            match run_calibration(&cfg, force, tx) {
+                Ok(m) => {
+                    let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
+                    let failed = m.values().filter(|x| x.error.is_some()).count();
+                    let _ = tx.send(Msg::Measurements(m));
+                    let _ = tx.send(Msg::Finished(format!(
+                        "calibration finished: {measured} measured, {failed} known failures"
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("calibrate: {e:#}")));
+                }
+            }
         });
     }
 
@@ -539,14 +560,11 @@ impl App {
                     self.configured = c;
                     rebuild = true;
                 }
+                // NOTE: does not clear `busy` — the poller sends this on
+                // every on-disk change, including mid-calibration persists.
+                // Operations end with Finished/Error/SyncDone.
                 Msg::Measurements(m) => {
-                    let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
-                    let failed = m.values().filter(|x| x.error.is_some()).count();
-                    self.log(format!(
-                        "measurements: {measured} good, {failed} known failures"
-                    ));
                     self.measurements = m;
-                    self.busy = None;
                     rebuild = true;
                 }
                 Msg::PresetWritten(path, n) => {
@@ -1243,6 +1261,7 @@ fn run_sync(
                 id: id.clone(),
                 display_name: format!("{id} (llama.cpp)"),
                 context: ctx,
+                tool_call: m.tool_call,
             })
         })
         .collect();
@@ -1263,14 +1282,15 @@ fn sync_single(
     measurements: &router::Measurements,
     id: &str,
 ) -> anyhow::Result<()> {
-    let ctx = measurements
+    let m = measurements
         .get(id)
-        .and_then(|m| m.n_ctx)
+        .filter(|m| m.n_ctx.is_some())
         .ok_or_else(|| anyhow::anyhow!("{id} has no successful measurement"))?;
     let desired = opencode::DesiredModel {
         id: id.to_string(),
         display_name: format!("{id} (llama.cpp)"),
-        context: ctx,
+        context: m.n_ctx.unwrap(),
+        tool_call: m.tool_call,
     };
     opencode::sync_file(
         &opencode::default_config_path(),
@@ -1302,11 +1322,24 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
     };
     match router::fetch_settled_ctx(cfg.port, id) {
         Ok(ctx) => {
+            let _ = tx.send(Msg::Progress(format!(
+                "{id}: ctx {ctx}; probing tool calls (thinking models take a minute)…"
+            )));
+            let tool_call = match router::probe_tool_call(cfg.port, id) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    let _ = tx.send(Msg::Progress(format!(
+                        "{id}: tool probe inconclusive: {e:#}"
+                    )));
+                    None
+                }
+            };
             let mut all = router::read_measurements(&dir);
             all.insert(
                 id.to_string(),
                 router::Measurement {
                     n_ctx: Some(ctx),
+                    tool_call,
                     error: None,
                     args_fp,
                     env_fp: Some(env_fp),
@@ -1317,8 +1350,13 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
             match sync_single(cfg, &all, id) {
                 Ok(()) => {
                     send_configured(tx);
+                    let tools = match tool_call {
+                        Some(true) => ", tool calls work",
+                        Some(false) => ", tool calls NOT produced",
+                        None => "",
+                    };
                     let _ = tx.send(Msg::Finished(format!(
-                        "{id}: measured {ctx} context, added to OpenCode{}",
+                        "{id}: measured {ctx} context{tools}, added to OpenCode{}",
                         if keep_loaded { ", still loaded" } else { "" }
                     )));
                 }
@@ -1340,6 +1378,7 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                 id.to_string(),
                 router::Measurement {
                     n_ctx: None,
+                    tool_call: None,
                     error: Some(detail.clone()),
                     args_fp,
                     env_fp: Some(env_fp),
