@@ -122,6 +122,12 @@ rebuild runner). GUI: Server → Check My llama.cpp; CLI: `--advise`.
 First live run found: checkout already pulled to b10448 but binary still
 b10216 — rebuild alone unlocks 3 models.
 
+**Multi-backend (DONE):** probe detects CUDA (nvcc + compute cap), Vulkan
+(glslc + runtime), ROCm (hipcc + gfx target); Build Advisor window has
+per-backend checkboxes with detection-based defaults; all backends passed
+to cmake explicitly ON/OFF so stale caches can't drift a build; verdicts
+call out near-misses (GPU present, toolchain missing → suggest Vulkan).
+
 **Phase 2 remaining:**
 - Post-rebuild verification loop: after a successful rebuild, offer/auto
   run stop → start → Set Up Everything and report "N models unlocked ✓"
