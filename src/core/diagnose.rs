@@ -70,7 +70,12 @@ pub fn classify(error: &str) -> Cause {
 /// failure (with mined log line, when we got one); `not_offered` is the
 /// on-disk-but-router-doesn't-list state; `archivable` gates the
 /// archive remedy.
-pub fn diagnose(error: Option<&str>, not_offered: bool, archivable: bool) -> Diagnosis {
+pub fn diagnose(
+    error: Option<&str>,
+    not_offered: bool,
+    archivable: bool,
+    build_is_current: Option<bool>,
+) -> Diagnosis {
     if let Some(err) = error {
         let cause = classify(err);
         // The mined log line rides in after "— " in stored errors; show
@@ -81,13 +86,26 @@ pub fn diagnose(error: Option<&str>, not_offered: bool, archivable: bool) -> Dia
                 .unwrap_or_else(|| err.to_string()),
         );
         let (explanation, remedies) = match cause {
-            Cause::NeedsNewerBuild => (
-                "This model uses a newer format than your installed llama.cpp \
-                 understands. The file is fine — the program reading it is out of \
-                 date. Updating and rebuilding llama.cpp will most likely unlock it."
-                    .to_string(),
-                vec![Remedy::OpenBuildAdvisor, Remedy::ShowLog],
-            ),
+            Cause::NeedsNewerBuild => match build_is_current {
+                // Newest build still rejects it → the file itself is the
+                // outlier (typically an Ollama-specific conversion).
+                Some(true) => (
+                    "Your llama.cpp is already the newest build, and it still can't \
+                     read this file's format — so this looks like a conversion made \
+                     specifically for another tool (usually Ollama). It will keep \
+                     working through Ollama itself; for llama.cpp, download a \
+                     llama.cpp-native GGUF of the same model instead."
+                        .to_string(),
+                    vec![Remedy::ShowLog],
+                ),
+                _ => (
+                    "This model uses a newer format than your installed llama.cpp \
+                     understands. The file is fine — the program reading it is out of \
+                     date. Updating and rebuilding llama.cpp will most likely unlock it."
+                        .to_string(),
+                    vec![Remedy::OpenBuildAdvisor, Remedy::ShowLog],
+                ),
+            },
             Cause::BadBlob => (
                 "This file isn't a complete standalone model — it's either a \
                  partial download or a component (like a vision add-on) that can't \
@@ -176,22 +194,39 @@ mod tests {
     }
 
     #[test]
+    fn current_build_reframes_format_errors_as_ollama_specific() {
+        let d = diagnose(
+            Some("key qwen35.rope.dimension_sections has wrong array length; expected 4, got 3"),
+            false,
+            false,
+            Some(true),
+        );
+        assert_eq!(d.cause, Cause::NeedsNewerBuild);
+        assert!(d.explanation.contains("another tool"), "{}", d.explanation);
+        assert!(
+            !d.remedies.contains(&Remedy::OpenBuildAdvisor),
+            "no point advising a rebuild that provably won't help"
+        );
+    }
+
+    #[test]
     fn diagnosis_gives_novice_language_and_actions() {
         let d = diagnose(
             Some("did not load: failed(1) — error loading model hyperparameters: key x has wrong array length"),
             false,
             false,
+            None,
         );
         assert_eq!(d.cause, Cause::NeedsNewerBuild);
         assert!(d.remedies.contains(&Remedy::OpenBuildAdvisor));
         assert!(d.evidence.unwrap().contains("wrong array length"), "evidence is the mined tail");
         assert!(!d.explanation.contains("cmake"), "no jargon in explanations");
 
-        let d = diagnose(None, true, true);
+        let d = diagnose(None, true, true, None);
         assert_eq!(d.cause, Cause::NotOffered);
         assert_eq!(d.remedies, vec![Remedy::ArchiveToShelf]);
 
-        let d = diagnose(None, false, false);
+        let d = diagnose(None, false, false, None);
         assert_eq!(d.cause, Cause::Unmeasured);
         assert_eq!(d.remedies, vec![Remedy::LoadAndMeasure]);
     }

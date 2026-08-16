@@ -1030,6 +1030,12 @@ impl App {
                                         failure.as_deref(),
                                         not_offered,
                                         r.archivable && r.path.is_some(),
+                                        self.build_check.as_ref().map(|c| {
+                                            matches!(
+                                                (c.current_build, c.upstream_build),
+                                                (Some(cur), Some(up)) if cur >= up
+                                            )
+                                        }),
                                     ),
                                 });
                             }

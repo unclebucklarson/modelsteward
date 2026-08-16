@@ -224,13 +224,29 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
         )),
     }
     if !c.locked_models.is_empty() {
-        out.push((
-            format!(
-                "Rebuilding would likely unlock {} model(s) you own",
-                c.locked_models.len()
-            ),
-            c.locked_models.join(", "),
-        ));
+        let up_to_date = matches!((c.current_build, c.upstream_build), (Some(cur), Some(up)) if cur >= up);
+        if up_to_date {
+            out.push((
+                format!(
+                    "{} model(s) fail with format errors even on the newest build",
+                    c.locked_models.len()
+                ),
+                format!(
+                    "{} — these conversions appear specific to another tool (usually \
+                     Ollama). They still run through Ollama; for llama.cpp, download \
+                     llama.cpp-native GGUFs of the same models.",
+                    c.locked_models.join(", ")
+                ),
+            ));
+        } else {
+            out.push((
+                format!(
+                    "Rebuilding would likely unlock {} model(s) you own",
+                    c.locked_models.len()
+                ),
+                c.locked_models.join(", "),
+            ));
+        }
     }
     match (&c.cuda_arch, &c.nvcc, c.cmake) {
         (Some(arch), Some(_), true) => out.push((
