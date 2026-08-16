@@ -96,6 +96,7 @@ struct App {
     override_editor: Option<OverrideEditor>,
     show_advisor: bool,
     build_check: Option<advisor::BuildCheck>,
+    backend_sel: Option<advisor::BackendSelection>,
     diagnosis: Option<DiagnosisView>,
 }
 
@@ -147,6 +148,7 @@ impl App {
             override_editor: None,
             show_advisor: false,
             build_check: None,
+            backend_sel: None,
             diagnosis: None,
         };
         app.reset_edit_buffers();
@@ -596,11 +598,14 @@ impl App {
         let Some(check) = self.build_check.clone() else {
             return;
         };
+        let sel = self
+            .backend_sel
+            .unwrap_or_else(|| advisor::default_backends(&check));
         self.spawn(
             "updating + rebuilding llama.cpp (this takes many minutes)",
             move |tx| {
                 let progress_tx = tx.clone();
-                let result = advisor::run_rebuild(&check, &mut |line| {
+                let result = advisor::run_rebuild(&check, sel, &mut |line| {
                     let _ = progress_tx.send(Msg::Progress(line));
                 });
                 let _ = tx.send(match result {
@@ -665,6 +670,7 @@ impl App {
                 Msg::Ollama(o) => self.ollama = o,
                 Msg::Vram(v) => self.live_vram = v,
                 Msg::BuildCheck(c) => {
+                    self.backend_sel = Some(advisor::default_backends(&c));
                     self.build_check = Some(*c);
                     self.busy = None;
                 }
@@ -1675,13 +1681,47 @@ impl App {
                     ui.label(detail);
                     ui.add_space(6.0);
                 }
+                let mut sel = self
+                    .backend_sel
+                    .unwrap_or_else(|| advisor::default_backends(check));
+                ui.separator();
+                ui.strong("Build with:");
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        check.nvcc.is_some(),
+                        egui::Checkbox::new(&mut sel.cuda, "CUDA (NVIDIA)"),
+                    )
+                    .on_hover_text(match &check.nvcc {
+                        Some(v) => format!("nvcc: {v}"),
+                        None => "needs the CUDA toolkit (nvcc)".into(),
+                    });
+                    ui.add_enabled(
+                        check.glslc,
+                        egui::Checkbox::new(&mut sel.vulkan, "Vulkan (any GPU)"),
+                    )
+                    .on_hover_text(if check.glslc {
+                        "glslc present — works on NVIDIA, AMD, and Intel".to_string()
+                    } else {
+                        "needs the Vulkan SDK / shaderc (glslc)".to_string()
+                    });
+                    ui.add_enabled(
+                        check.hipcc.is_some(),
+                        egui::Checkbox::new(&mut sel.hip, "ROCm (AMD)"),
+                    )
+                    .on_hover_text(match (&check.hipcc, &check.rocm_gfx) {
+                        (Some(v), Some(gfx)) => format!("{v} — target {gfx}"),
+                        (Some(v), None) => format!("{v} — no gfx target detected"),
+                        _ => "needs ROCm (hipcc)".into(),
+                    });
+                });
+                self.backend_sel = Some(sel);
                 egui::CollapsingHeader::new("Advanced: exactly what a rebuild runs")
                     .default_open(false)
                     .show(ui, |ui| {
-                        for (cmd, args) in advisor::rebuild_commands(check) {
+                        for (cmd, args) in advisor::rebuild_commands(check, sel) {
                             ui.monospace(format!("{cmd} {}", args.join(" ")));
                         }
-                        ui.small("Fast-forward pull only — your local changes are never overwritten.");
+                        ui.small("Fast-forward pull only — your local changes are never overwritten. Backends not selected are set OFF explicitly so stale cmake caches can't resurrect them.");
                     });
                 ui.separator();
                 ui.horizontal(|ui| {

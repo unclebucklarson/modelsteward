@@ -33,6 +33,16 @@ pub struct BuildCheck {
     /// e.g. "86" for compute capability 8.6.
     pub cuda_arch: Option<String>,
     pub nvcc: Option<String>,
+    /// Vulkan shader compiler (glslc) — required to BUILD the Vulkan
+    /// backend (a runtime alone isn't enough).
+    pub glslc: bool,
+    /// Vulkan runtime present (vulkaninfo answers) — devices could use a
+    /// Vulkan build even without the build toolchain installed.
+    pub vulkan_runtime: bool,
+    /// ROCm compiler (hipcc) version line, when installed.
+    pub hipcc: Option<String>,
+    /// AMD GPU target from rocminfo, e.g. "gfx1100".
+    pub rocm_gfx: Option<String>,
     pub cmake: bool,
     /// Models whose stored failure looks like "needs a newer build".
     pub locked_models: Vec<String>,
@@ -68,6 +78,33 @@ pub fn parse_compute_cap(s: &str) -> Option<String> {
     let major: u32 = major.trim().parse().ok()?;
     let minor: u32 = minor.trim().parse().ok()?;
     Some(format!("{major}{minor}"))
+}
+
+/// First AMD "gfx…" target in rocminfo output. Pure for testing.
+pub fn parse_gfx_target(out: &str) -> Option<String> {
+    out.lines().find_map(|l| {
+        let name = l.trim().strip_prefix("Name:")?.trim();
+        name.starts_with("gfx").then(|| name.to_string())
+    })
+}
+
+/// Which backends a rebuild should enable. Defaults come from detection;
+/// the Build Advisor window exposes them as checkboxes.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct BackendSelection {
+    pub cuda: bool,
+    pub vulkan: bool,
+    pub hip: bool,
+}
+
+/// Sane defaults: every backend whose build toolchain AND hardware signal
+/// are present. Vulkan is the universal fallback — it only needs glslc.
+pub fn default_backends(c: &BuildCheck) -> BackendSelection {
+    BackendSelection {
+        cuda: c.cuda_arch.is_some() && c.nvcc.is_some(),
+        vulkan: c.glslc,
+        hip: c.hipcc.is_some() && c.rocm_gfx.is_some(),
+    }
 }
 
 /// Per-model load errors mined from a router log: the last
@@ -152,6 +189,12 @@ pub fn check(
                 .trim()
                 .to_string()
         }),
+        glslc: run("glslc", &["--version"]).is_some(),
+        vulkan_runtime: run("vulkaninfo", &["--summary"]).is_some(),
+        hipcc: run("hipcc", &["--version"]).map(|v| {
+            v.lines().next().unwrap_or("present").trim().to_string()
+        }),
+        rocm_gfx: run("rocminfo", &[]).as_deref().and_then(parse_gfx_target),
         cmake: run("cmake", &["--version"]).is_some(),
         current_build,
         server_bin: server_bin.clone(),
@@ -248,20 +291,61 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
             ));
         }
     }
-    match (&c.cuda_arch, &c.nvcc, c.cmake) {
-        (Some(arch), Some(_), true) => out.push((
-            "Toolchain ready to build".into(),
-            format!("CUDA compiler present; GPU compute capability {arch}."),
-        )),
-        (Some(_), None, _) => out.push((
-            "CUDA compiler (nvcc) not found".into(),
-            "Install the CUDA toolkit to rebuild with GPU support.".into(),
-        )),
-        (_, _, false) => out.push((
+    if !c.cmake {
+        out.push((
             "cmake not found".into(),
             "Install cmake to rebuild llama.cpp.".into(),
-        )),
-        _ => {}
+        ));
+    } else {
+        let sel = default_backends(c);
+        let mut ready: Vec<String> = Vec::new();
+        if sel.cuda {
+            ready.push(format!(
+                "CUDA (compute capability {})",
+                c.cuda_arch.as_deref().unwrap_or("?")
+            ));
+        }
+        if sel.vulkan {
+            ready.push("Vulkan (NVIDIA/AMD/Intel)".into());
+        }
+        if sel.hip {
+            ready.push(format!("ROCm ({})", c.rocm_gfx.as_deref().unwrap_or("?")));
+        }
+        if ready.is_empty() {
+            out.push((
+                "No GPU build toolchain found — CPU-only build possible".into(),
+                "Install the CUDA toolkit (NVIDIA), ROCm (AMD), or the Vulkan SDK \
+                 with glslc (any GPU) to build with acceleration."
+                    .into(),
+            ));
+        } else {
+            out.push((
+                format!("Ready to build with: {}", ready.join(" + ")),
+                "Backends are selectable below; defaults match your detected \
+                 hardware and toolchains."
+                    .into(),
+            ));
+        }
+        // Near-misses a novice would never spot on their own.
+        if c.cuda_arch.is_some() && c.nvcc.is_none() {
+            out.push((
+                "NVIDIA GPU found, but the CUDA compiler (nvcc) is missing".into(),
+                "Install the CUDA toolkit for the fastest backend on this card — \
+                 or build Vulkan, which works without it.".into(),
+            ));
+        }
+        if c.vulkan_runtime && !c.glslc {
+            out.push((
+                "Vulkan runtime present, but the shader compiler (glslc) is missing".into(),
+                "Install shaderc / the Vulkan SDK to include the Vulkan backend.".into(),
+            ));
+        }
+        if c.rocm_gfx.is_some() && c.hipcc.is_none() {
+            out.push((
+                "AMD GPU found, but the ROCm compiler (hipcc) is missing".into(),
+                "Install ROCm for the native AMD backend — or build Vulkan instead.".into(),
+            ));
+        }
     }
     if c.dirty == Some(true) {
         out.push((
@@ -275,8 +359,9 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
 }
 
 /// The exact commands the rebuild runs — also shown in the advanced
-/// section so nothing is hidden. Pure over the check.
-pub fn rebuild_commands(c: &BuildCheck) -> Vec<(String, Vec<String>)> {
+/// section so nothing is hidden. Pure over the check + selection; no
+/// backend selected = a CPU-only build (valid, if slow).
+pub fn rebuild_commands(c: &BuildCheck, sel: BackendSelection) -> Vec<(String, Vec<String>)> {
     let repo = c
         .repo
         .as_ref()
@@ -296,9 +381,17 @@ pub fn rebuild_commands(c: &BuildCheck) -> Vec<(String, Vec<String>)> {
     configure.push(repo.clone());
     configure.push("-B".into());
     configure.push(format!("{repo}/build"));
-    configure.push("-DGGML_CUDA=ON".into());
-    if let Some(arch) = &c.cuda_arch {
+    // Explicit ON/OFF for every backend: the cmake cache remembers old
+    // options, so an unstated backend silently inherits the previous
+    // configure — exactly how builds drift.
+    configure.push(format!("-DGGML_CUDA={}", if sel.cuda { "ON" } else { "OFF" }));
+    if sel.cuda && let Some(arch) = &c.cuda_arch {
         configure.push(format!("-DCMAKE_CUDA_ARCHITECTURES={arch}"));
+    }
+    configure.push(format!("-DGGML_VULKAN={}", if sel.vulkan { "ON" } else { "OFF" }));
+    configure.push(format!("-DGGML_HIP={}", if sel.hip { "ON" } else { "OFF" }));
+    if sel.hip && let Some(gfx) = &c.rocm_gfx {
+        configure.push(format!("-DAMDGPU_TARGETS={gfx}"));
     }
     cmds.push(("cmake".to_string(), configure));
     cmds.push((
@@ -316,9 +409,13 @@ pub fn rebuild_commands(c: &BuildCheck) -> Vec<(String, Vec<String>)> {
 
 /// Run the rebuild, streaming output lines to `progress`. Stops at the
 /// first failing step. Refuses without a repo.
-pub fn run_rebuild(c: &BuildCheck, progress: &mut dyn FnMut(String)) -> Result<()> {
+pub fn run_rebuild(
+    c: &BuildCheck,
+    sel: BackendSelection,
+    progress: &mut dyn FnMut(String),
+) -> Result<()> {
     anyhow::ensure!(c.repo.is_some(), "no git checkout to rebuild");
-    for (cmd, args) in rebuild_commands(c) {
+    for (cmd, args) in rebuild_commands(c, sel) {
         progress(format!("$ {cmd} {}", args.join(" ")));
         let mut child = Command::new(&cmd)
             .args(&args)
@@ -437,7 +534,11 @@ mod tests {
         let v = verdicts(&c);
         assert!(v[0].0.contains("150 builds behind"));
         assert!(v.iter().any(|(h, _)| h.contains("unlock 2 model(s)")));
-        assert!(v.iter().any(|(h, _)| h.contains("Toolchain ready")));
+        assert!(
+            v.iter()
+                .any(|(h, _)| h.contains("Ready to build with: CUDA (compute capability 86)")),
+            "toolchain card names the ready backends"
+        );
         assert!(
             v.iter().all(|(h, _)| !h.contains("-D")),
             "headlines never contain cmake flags"
@@ -445,16 +546,63 @@ mod tests {
     }
 
     #[test]
-    fn rebuild_commands_are_ff_only_and_arch_pinned() {
+    fn rebuild_commands_are_ff_only_arch_pinned_and_backend_explicit() {
         let c = BuildCheck {
             repo: Some(PathBuf::from("/home/u/src/llama.cpp")),
             cuda_arch: Some("86".into()),
+            rocm_gfx: Some("gfx1100".into()),
             ..Default::default()
         };
-        let cmds = rebuild_commands(&c);
+        let all = BackendSelection { cuda: true, vulkan: true, hip: true };
+        let cmds = rebuild_commands(&c, all);
         assert_eq!(cmds[0].0, "git");
         assert!(cmds[0].1.contains(&"--ff-only".to_string()), "never clobbers local work");
-        assert!(cmds[1].1.iter().any(|a| a == "-DCMAKE_CUDA_ARCHITECTURES=86"));
+        let cfg = &cmds[1].1;
+        assert!(cfg.iter().any(|a| a == "-DGGML_CUDA=ON"));
+        assert!(cfg.iter().any(|a| a == "-DCMAKE_CUDA_ARCHITECTURES=86"));
+        assert!(cfg.iter().any(|a| a == "-DGGML_VULKAN=ON"));
+        assert!(cfg.iter().any(|a| a == "-DGGML_HIP=ON"));
+        assert!(cfg.iter().any(|a| a == "-DAMDGPU_TARGETS=gfx1100"));
         assert!(cmds[2].1.iter().any(|a| a == "Release"));
+
+        // Deselected backends are explicitly OFF — the cmake cache would
+        // otherwise resurrect whatever the last configure used.
+        let cuda_only = BackendSelection { cuda: true, vulkan: false, hip: false };
+        let cfg = &rebuild_commands(&c, cuda_only)[1].1;
+        assert!(cfg.iter().any(|a| a == "-DGGML_VULKAN=OFF"));
+        assert!(cfg.iter().any(|a| a == "-DGGML_HIP=OFF"));
+        assert!(!cfg.iter().any(|a| a.contains("AMDGPU_TARGETS")));
+    }
+
+    #[test]
+    fn backend_defaults_follow_toolchain_and_hardware() {
+        let mut c = BuildCheck {
+            cuda_arch: Some("86".into()),
+            nvcc: Some("release 12.4".into()),
+            glslc: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            default_backends(&c),
+            BackendSelection { cuda: true, vulkan: true, hip: false }
+        );
+        // AMD box: no nvcc, ROCm installed.
+        c = BuildCheck {
+            hipcc: Some("HIP version 6.1".into()),
+            rocm_gfx: Some("gfx1100".into()),
+            glslc: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            default_backends(&c),
+            BackendSelection { cuda: false, vulkan: false, hip: true }
+        );
+    }
+
+    #[test]
+    fn parses_rocminfo_gfx_target() {
+        let out = "  Marketing Name:  AMD Radeon RX 7900\n  Name:                    gfx1100\n  Name: amdgcn-amd-amdhsa--gfx1100\n";
+        assert_eq!(parse_gfx_target(out), Some("gfx1100".into()));
+        assert_eq!(parse_gfx_target("Name: some-cpu"), None);
     }
 }

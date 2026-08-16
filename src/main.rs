@@ -68,8 +68,16 @@ fn main() {
             for (headline, detail) in advisor::verdicts(&check) {
                 println!("• {headline}\n  {detail}");
             }
-            println!("\nA rebuild would run:");
-            for (cmd, args) in advisor::rebuild_commands(&check) {
+            let sel = advisor::default_backends(&check);
+            println!("\nA rebuild (backends: {}) would run:", {
+                let mut v = Vec::new();
+                if sel.cuda { v.push("CUDA"); }
+                if sel.vulkan { v.push("Vulkan"); }
+                if sel.hip { v.push("ROCm"); }
+                if v.is_empty() { v.push("CPU-only"); }
+                v.join(" + ")
+            });
+            for (cmd, args) in advisor::rebuild_commands(&check, sel) {
                 println!("  {cmd} {}", args.join(" "));
             }
             Ok(())
