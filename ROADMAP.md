@@ -52,6 +52,16 @@ teardown before loading.
 
 ## Smaller items (fold in opportunistically)
 
+- **Cache-source models are now calibrated/synced** (found by user: a
+  `llama-server -hf` download appeared on the Server tab but could never
+  reach OpenCode). Remaining gap: the Library tab doesn't list cache
+  models (this llama-server build doesn't expose their file paths via
+  /models) — consider merging the router's model list into the Library
+  view when the router is up.
+- GUI should reload measurements.json when it changes on disk (stale
+  OpenCode tab after CLI calibration) and show display-name + alias
+  consistently across panes (found by user).
+
 - Numbered backups (cap ~5) or "Undo last config change" (.bak swap).
 - **Measured-ctx variance policy**: settled ctx varies a few percent with
   desktop VRAM at load time (observed 83k–94k across runs for the same

@@ -528,12 +528,16 @@ pub fn calibrate(
     force: bool,
     progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
+    // Preset models AND the router's own HF cache downloads ("cache" source
+    // — e.g. models pulled by `llama-server -hf` or vendor tools). Both are
+    // servable through the router, so both deserve measurement; anything
+    // else (a future source we don't know) is left alone.
     let models: Vec<_> = fetch_models(port)?
         .into_iter()
-        .filter(|m| m.source.as_deref() == Some("preset"))
+        .filter(|m| matches!(m.source.as_deref(), Some("preset") | Some("cache")))
         .collect();
     if models.is_empty() {
-        bail!("router lists no preset models to calibrate");
+        bail!("router lists no preset or cache models to calibrate");
     }
     let mut out = read_measurements(dir);
     let total = models.len();
