@@ -1,10 +1,17 @@
-//! The desktop shell: a traditional menu-bar application over the headless
-//! core. Menus fire actions, panes show state, the status bar keeps the
-//! vitals visible. Every slow operation (scan, calibrate, HTTP) runs on a
-//! worker thread and reports back over a channel — the UI thread never
-//! blocks on the network or a model load.
+//! The desktop shell, organized the way a user thinks about it:
+//!
+//! * **Library** — every model from every source, one row each, with
+//!   hardware-aware advice, Load/Unload, and an "In OpenCode" checkbox.
+//!   Loading a model measures it and adds it to OpenCode automatically.
+//! * **Server** — the router's controls plus detail on what's loaded now.
+//! * **OpenCode** — what opencode.json actually contains, with sync state
+//!   and failures explained.
+//! * **Settings** — scan paths, ports, binary override.
+//!
+//! Every slow operation runs on a worker thread reporting over a channel;
+//! the UI thread never blocks on the network or a model load.
 
-use crate::core::{ollama, opencode, router, settings, system};
+use crate::core::{ollama, opencode, router, rows, settings, system};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -12,7 +19,7 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1000.0, 700.0])
+            .with_inner_size([1150.0, 720.0])
             .with_title("llama.cpp Code Conf"),
         ..Default::default()
     };
@@ -28,9 +35,9 @@ enum Msg {
     RouterState(router::RouterState),
     Ollama(ollama::OllamaStatus),
     Measurements(router::Measurements),
+    Configured(Vec<opencode::ConfiguredModel>),
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
-    Orphans(Vec<String>),
     Progress(String),
     /// Terminates the busy state with a final line.
     Finished(String),
@@ -45,6 +52,15 @@ enum Pane {
     Settings,
 }
 
+/// A deferred row action, collected during rendering and executed after
+/// (so table closures never need `&mut self`).
+enum RowAction {
+    Load(String),
+    Unload(String),
+    AddToOpenCode(String),
+    RemoveFromOpenCode(String),
+}
+
 struct App {
     tx: Sender<Msg>,
     rx: Receiver<Msg>,
@@ -55,7 +71,9 @@ struct App {
     router_state: Option<router::RouterState>,
     ollama: ollama::OllamaStatus,
     measurements: router::Measurements,
-    orphans: Vec<String>,
+    configured: Vec<opencode::ConfiguredModel>,
+    rows: Vec<rows::Row>,
+    ram_mib: u64,
 
     // Settings pane edit buffers (applied on Save).
     edit_scan_dirs: String,
@@ -63,7 +81,6 @@ struct App {
     edit_server_bin: String,
     edit_ollama_port: String,
 
-    /// Rolling activity log shown at the bottom of every pane.
     activity: Vec<String>,
     busy: Option<String>,
     show_about: bool,
@@ -72,33 +89,32 @@ struct App {
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        let cfg = system::load_config();
+        let (tx, rx) = channel();
         let mut app = Self {
-            tx: channel().0, // replaced below
-            rx: channel().1,
+            tx,
+            rx,
             pane: Pane::Library,
-            edit_scan_dirs: String::new(),
-            edit_port: String::new(),
-            edit_server_bin: String::new(),
-            edit_ollama_port: String::new(),
-            cfg,
+            cfg: system::load_config(),
             scan: None,
             router_state: None,
             ollama: Default::default(),
             measurements: router::read_measurements(&router::state_dir()),
-            orphans: Vec::new(),
+            configured: Vec::new(),
+            rows: Vec::new(),
+            ram_mib: rows::read_ram_mib(),
+            edit_scan_dirs: String::new(),
+            edit_port: String::new(),
+            edit_server_bin: String::new(),
+            edit_ollama_port: String::new(),
             activity: Vec::new(),
             busy: None,
             show_about: false,
             last_sync: None,
         };
-        let (tx, rx) = channel();
-        app.tx = tx;
-        app.rx = rx;
         app.reset_edit_buffers();
         app.spawn_scan();
         app.spawn_status_poller(cc.egui_ctx.clone());
-        app.spawn_orphan_check();
+        app.spawn_config_read();
         app
     }
 
@@ -127,6 +143,42 @@ impl App {
         }
     }
 
+    fn hardware(&self) -> rows::Hardware {
+        let vram_mib = self
+            .scan
+            .as_ref()
+            .map(|s| {
+                s.devices
+                    .iter()
+                    .filter(|d| d.id.starts_with("CUDA"))
+                    .chain(s.devices.iter())
+                    .map(|d| d.total_mib)
+                    .next()
+                    .unwrap_or(0)
+            })
+            .unwrap_or(0);
+        rows::Hardware {
+            vram_mib,
+            ram_mib: self.ram_mib,
+        }
+    }
+
+    fn rebuild_rows(&mut self) {
+        let router_models = match &self.router_state {
+            Some(router::RouterState::Ours { models }) => models.clone(),
+            _ => Vec::new(),
+        };
+        let opencode_ids: Vec<String> = self.configured.iter().map(|c| c.id.clone()).collect();
+        let models = self.scan.as_ref().map(|s| s.models.clone()).unwrap_or_default();
+        self.rows = rows::assemble(
+            &models,
+            &router_models,
+            &self.measurements,
+            &opencode_ids,
+            self.hardware(),
+        );
+    }
+
     // ─── workers ─────────────────────────────────────────────────────────
 
     fn spawn_scan(&self) {
@@ -137,9 +189,17 @@ impl App {
         });
     }
 
-    /// Status poll loop: every 2s for the life of the app. Exits when the
-    /// channel closes (app dropped). Reads the config file each round so a
-    /// saved port change takes effect without restarting the poller.
+    fn spawn_config_read(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let configured =
+                opencode::configured_models(&opencode::default_config_path()).unwrap_or_default();
+            let _ = tx.send(Msg::Configured(configured));
+        });
+    }
+
+    /// Status poll loop: every 2s for the life of the app. Reads the config
+    /// file each round so a saved port change takes effect live.
     fn spawn_status_poller(&self, ctx: egui::Context) {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
@@ -153,22 +213,6 @@ impl App {
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
-        });
-    }
-
-    /// Recompute the orphan list off-thread (reads opencode.json).
-    fn spawn_orphan_check(&self) {
-        let tx = self.tx.clone();
-        let keep: Vec<String> = self
-            .measurements
-            .iter()
-            .filter(|(_, m)| m.n_ctx.is_some())
-            .map(|(id, _)| id.clone())
-            .collect();
-        std::thread::spawn(move || {
-            let orphans = opencode::orphans_in_file(&opencode::default_config_path(), &keep)
-                .unwrap_or_default();
-            let _ = tx.send(Msg::Orphans(orphans));
         });
     }
 
@@ -244,10 +288,15 @@ impl App {
         let cfg = self.cfg.clone();
         let measurements = self.measurements.clone();
         self.spawn("syncing opencode.json", move |tx| {
-            let _ = tx.send(match run_sync(&cfg, &measurements) {
-                Ok(report) => Msg::SyncDone(report),
-                Err(e) => Msg::Error(format!("sync: {e:#}")),
-            });
+            match run_sync(&cfg, &measurements) {
+                Ok(report) => {
+                    let _ = tx.send(Msg::SyncDone(report));
+                    send_configured(tx);
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("sync: {e:#}")));
+                }
+            }
         });
     }
 
@@ -307,6 +356,7 @@ impl App {
             match run_sync(&cfg, &measurements) {
                 Ok(report) => {
                     let _ = tx.send(Msg::SyncDone(report));
+                    send_configured(tx);
                     let _ = tx.send(Msg::Progress(
                         "setup complete — OpenCode is ready to use these models".into(),
                     ));
@@ -318,8 +368,67 @@ impl App {
         });
     }
 
-    /// Both engines holding VRAM at once is the classic local-stack failure;
-    /// say so the moment it's true.
+    fn run_row_action(&mut self, action: RowAction) {
+        let cfg = self.cfg.clone();
+        match action {
+            RowAction::Load(id) => {
+                // Load = measure = make available to OpenCode, and keep it
+                // warm for immediate use.
+                self.spawn(&format!("loading + measuring {id}"), move |tx| {
+                    measure_and_sync(&cfg, &id, true, tx);
+                });
+            }
+            RowAction::Unload(id) => {
+                self.spawn(&format!("unloading {id}"), move |tx| {
+                    let _ = tx.send(match router::unload_model(cfg.port, &id) {
+                        Ok(()) => Msg::Finished(format!(
+                            "{id}: unloaded (still in OpenCode — the router reloads it on demand)"
+                        )),
+                        Err(e) => Msg::Error(format!("{e:#}")),
+                    });
+                });
+            }
+            RowAction::AddToOpenCode(id) => {
+                let measured = self
+                    .measurements
+                    .get(&id)
+                    .and_then(|m| m.n_ctx)
+                    .is_some();
+                if measured {
+                    let measurements = self.measurements.clone();
+                    self.spawn(&format!("adding {id} to OpenCode"), move |tx| {
+                        let _ = match sync_single(&cfg, &measurements, &id) {
+                            Ok(()) => {
+                                send_configured(tx);
+                                tx.send(Msg::Finished(format!("{id}: added to OpenCode")))
+                            }
+                            Err(e) => tx.send(Msg::Error(format!("{e:#}"))),
+                        };
+                    });
+                } else {
+                    // Not measured yet: load briefly, measure, add, unload.
+                    self.spawn(&format!("measuring {id} for OpenCode"), move |tx| {
+                        measure_and_sync(&cfg, &id, false, tx);
+                    });
+                }
+            }
+            RowAction::RemoveFromOpenCode(id) => {
+                self.spawn(&format!("removing {id} from OpenCode"), move |tx| {
+                    let path = opencode::default_config_path();
+                    let _ = match opencode::comment_out_in_file(&path, &id) {
+                        Ok(()) => {
+                            send_configured(tx);
+                            tx.send(Msg::Finished(format!(
+                                "{id}: commented out of opencode.json (backup kept)"
+                            )))
+                        }
+                        Err(e) => tx.send(Msg::Error(format!("remove: {e:#}"))),
+                    };
+                });
+            }
+        }
+    }
+
     fn vram_contention(&self) -> Option<String> {
         let router_loaded: Vec<&str> = match &self.router_state {
             Some(router::RouterState::Ours { models }) => models
@@ -339,13 +448,14 @@ impl App {
             .map(|m| format!("{} ({:.1} GB VRAM)", m.name, m.size_vram as f64 / 1e9))
             .collect();
         Some(format!(
-            "VRAM contention: router has {} loaded while Ollama holds {}",
+            "VRAM contention: router has {} loaded while Ollama holds {} — `ollama stop <model>` frees it immediately",
             router_loaded.join(", "),
             ollama_names.join(", ")
         ))
     }
 
     fn drain_messages(&mut self) {
+        let mut rebuild = false;
         while let Ok(msg) = self.rx.try_recv() {
             match msg {
                 Msg::Scanned(report) => {
@@ -357,19 +467,26 @@ impl App {
                     ));
                     self.scan = Some(report);
                     self.busy = None;
+                    rebuild = true;
                 }
-                Msg::RouterState(s) => self.router_state = Some(s),
+                Msg::RouterState(s) => {
+                    self.router_state = Some(s);
+                    rebuild = true;
+                }
                 Msg::Ollama(o) => self.ollama = o,
-                Msg::Orphans(o) => self.orphans = o,
+                Msg::Configured(c) => {
+                    self.configured = c;
+                    rebuild = true;
+                }
                 Msg::Measurements(m) => {
                     let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
                     let failed = m.values().filter(|x| x.error.is_some()).count();
                     self.log(format!(
-                        "calibration: {measured} measured, {failed} known failures"
+                        "measurements: {measured} good, {failed} known failures"
                     ));
                     self.measurements = m;
                     self.busy = None;
-                    self.spawn_orphan_check();
+                    rebuild = true;
                 }
                 Msg::PresetWritten(path, n) => {
                     self.log(format!("preset written: {} models → {}", n, path.display()));
@@ -377,13 +494,12 @@ impl App {
                 }
                 Msg::SyncDone(r) => {
                     let line = format!(
-                        "sync: {} added, {} updated, {} orphans",
+                        "sync: {} added, {} updated, {} not synced",
                         r.added.len(),
                         r.updated.len(),
                         r.orphans.len()
                     );
                     self.log(line.clone());
-                    self.orphans = r.orphans.clone();
                     self.last_sync = Some(line);
                     self.busy = None;
                 }
@@ -398,9 +514,12 @@ impl App {
                 }
             }
         }
+        if rebuild {
+            self.rebuild_rows();
+        }
     }
 
-    // ─── panes ───────────────────────────────────────────────────────────
+    // ─── menu ────────────────────────────────────────────────────────────
 
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("File", |ui| {
@@ -415,6 +534,7 @@ impl App {
             ui.separator();
             if ui.button("Rescan System").clicked() {
                 self.spawn_scan();
+                self.spawn_config_read();
                 ui.close();
             }
             if ui.button("Regenerate Preset").clicked() {
@@ -481,99 +601,134 @@ impl App {
         });
     }
 
-    /// Health of a library model, derived from measurements and (when the
-    /// router is up) fingerprint freshness.
-    fn health_of(&self, alias: &str) -> String {
-        let Some(m) = self.measurements.get(alias) else {
-            return "—".into();
-        };
-        let current_args_fp = match &self.router_state {
-            Some(router::RouterState::Ours { models }) => models
-                .iter()
-                .find(|rm| rm.id == alias)
-                .and_then(|rm| rm.args_fp.clone()),
-            _ => None,
-        };
-        let env_fp = self.scan.as_ref().map(system::env_fingerprint);
-        let fresh = match (&current_args_fp, &env_fp) {
-            (Some(afp), Some(efp)) => m.is_fresh(Some(afp), efp),
-            // Router down / no scan: can't judge staleness — show plain state.
-            _ => true,
-        };
-        match (&m.n_ctx, &m.error, fresh) {
-            (Some(_), _, true) => "✔ ok".into(),
-            (Some(_), _, false) => "⟳ stale".into(),
-            (None, Some(_), true) => "⚠ failed".into(),
-            (None, Some(_), false) => "⚠ failed (stale)".into(),
-            _ => "—".into(),
-        }
-    }
+    // ─── Library ─────────────────────────────────────────────────────────
 
     fn library_pane(&mut self, ui: &mut egui::Ui) {
-        let Some(scan) = self.scan.clone() else {
+        if self.scan.is_none() {
             ui.spinner();
             ui.label("scanning…");
             return;
-        };
+        }
+        let router_up = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
+        if !router_up {
+            ui.horizontal(|ui| {
+                ui.label("Router is not running — Load and checkbox actions need it.");
+                if ui.button("▶ Start Router").clicked() {
+                    self.action_start();
+                }
+            });
+            ui.separator();
+        }
+        let mut pending: Option<RowAction> = None;
+        let rows = self.rows.clone();
         egui::ScrollArea::both().show(ui, |ui| {
-            egui::Grid::new("models")
+            egui::Grid::new("library")
                 .striped(true)
-                .min_col_width(60.0)
+                .min_col_width(48.0)
                 .show(ui, |ui| {
                     for h in [
-                        "Model", "Source", "Quant", "Size", "Train ctx", "Measured ctx", "Health",
+                        "Model", "Source", "Size", "Quant", "Measured ctx", "Server", "OpenCode",
+                        "", "Advice",
                     ] {
                         ui.strong(h);
                     }
                     ui.end_row();
-                    for m in &scan.models {
-                        let alias = crate::core::library::alias_suggestion(m);
-                        ui.label(m.display_name());
-                        ui.label(match &m.source {
-                            crate::core::library::Source::Shelf => "shelf".to_string(),
-                            crate::core::library::Source::Ollama { .. } => "ollama".to_string(),
-                        });
-                        let meta = m.meta.as_ref();
-                        ui.label(meta.and_then(|x| x.quantization.clone()).unwrap_or_default());
-                        ui.label(format!("{:.1} GB", m.file_size as f64 / 1e9));
-                        ui.label(
-                            meta.and_then(|x| x.context_length)
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "?".into()),
+                    for r in &rows {
+                        ui.label(&r.display).on_hover_text(
+                            r.router_id
+                                .as_deref()
+                                .map(|id| format!("served as: {id}"))
+                                .unwrap_or_else(|| "no servable identity".into()),
                         );
+                        ui.label(&r.source);
+                        ui.label(if r.size_bytes > 0 {
+                            format!("{:.1} GB", r.size_bytes as f64 / 1e9)
+                        } else {
+                            "—".into()
+                        });
+                        ui.label(&r.quant);
                         ui.label(
-                            self.measurements
-                                .get(&alias)
-                                .and_then(|mm| mm.n_ctx)
+                            r.measured_ctx
                                 .map(|c| c.to_string())
                                 .unwrap_or_else(|| "—".into()),
                         );
-                        let health = self.health_of(&alias);
-                        let resp = ui.label(&health);
-                        if health.starts_with('⚠')
-                            && let Some(err) = self
-                                .measurements
-                                .get(&alias)
-                                .and_then(|mm| mm.error.clone())
+                        ui.label(r.server_status.as_deref().unwrap_or("—"));
+
+                        // "In OpenCode" checkbox — the whole make-it-usable flow.
+                        let mut checked = r.in_opencode;
+                        let can_act = router_up && r.router_id.is_some();
+                        let cb = ui.add_enabled(can_act, egui::Checkbox::without_text(&mut checked));
+                        let cb = cb.on_hover_text(
+                            "Checked = in opencode.json. Checking an unmeasured model loads it \
+                             briefly to measure the real context first.",
+                        );
+                        if cb.changed()
+                            && let Some(id) = &r.router_id
                         {
-                            resp.on_hover_text(format!(
-                                "{err}\n\nLikely fix: a newer llama.cpp build (see ROADMAP: Build Advisor)."
-                            ));
+                            pending = Some(if checked {
+                                RowAction::AddToOpenCode(id.clone())
+                            } else {
+                                RowAction::RemoveFromOpenCode(id.clone())
+                            });
                         }
+
+                        // Load / Unload.
+                        match (&r.router_id, r.server_status.as_deref()) {
+                            (Some(id), Some("loaded")) => {
+                                if ui.button("Unload").clicked() {
+                                    pending = Some(RowAction::Unload(id.clone()));
+                                }
+                            }
+                            (Some(id), Some("unloaded")) => {
+                                if ui
+                                    .add_enabled(router_up, egui::Button::new("Load"))
+                                    .on_hover_text(
+                                        "Loads now, measures the real context, and adds it to \
+                                         OpenCode automatically.",
+                                    )
+                                    .clicked()
+                                {
+                                    pending = Some(RowAction::Load(id.clone()));
+                                }
+                            }
+                            (Some(_), Some(_)) => {
+                                ui.label("…");
+                            }
+                            _ => {
+                                ui.label("—");
+                            }
+                        }
+
+                        let color = match r.advice_level {
+                            rows::AdviceLevel::Good => egui::Color32::from_rgb(0, 170, 0),
+                            rows::AdviceLevel::Warn => ui.visuals().warn_fg_color,
+                            rows::AdviceLevel::Bad => ui.visuals().error_fg_color,
+                            rows::AdviceLevel::Unknown => ui.visuals().weak_text_color(),
+                        };
+                        let short: String = if r.advice.chars().count() > 60 {
+                            let mut s: String = r.advice.chars().take(57).collect();
+                            s.push('…');
+                            s
+                        } else {
+                            r.advice.clone()
+                        };
+                        ui.colored_label(color, short).on_hover_text(&r.advice);
                         ui.end_row();
                     }
                 });
         });
+        if let Some(action) = pending {
+            self.run_row_action(action);
+        }
     }
+
+    // ─── Server ──────────────────────────────────────────────────────────
 
     fn server_pane(&mut self, ui: &mut egui::Ui) {
         if let Some(warning) = self.vram_contention() {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
-            ui.small("Unload one side (Ollama models expire on their own after idle) or expect slow/failing loads.");
             ui.separator();
         }
-        let mut load: Option<String> = None;
-        let mut unload: Option<String> = None;
         let state = self.router_state.clone();
         match &state {
             None => {
@@ -609,42 +764,76 @@ impl App {
             }
             Some(router::RouterState::Ours { models }) => {
                 ui.horizontal(|ui| {
-                    ui.label(format!("Router running on port {} —", self.cfg.port));
+                    ui.label(format!(
+                        "Router up on port {} — {} models offered —",
+                        self.cfg.port,
+                        models.len()
+                    ));
                     if ui.button("■ Stop").clicked() {
                         self.action_stop();
                     }
                 });
                 ui.separator();
-                let models = models.clone();
-                egui::ScrollArea::both().show(ui, |ui| {
-                    egui::Grid::new("served").striped(true).show(ui, |ui| {
-                        for h in ["Model", "Status", "Source", ""] {
-                            ui.strong(h);
-                        }
-                        ui.end_row();
-                        for m in &models {
-                            ui.label(&m.id);
-                            ui.label(&m.status);
+                let loaded: Vec<_> = models
+                    .iter()
+                    .filter(|m| matches!(m.status.as_str(), "loaded" | "loading" | "sleeping"))
+                    .cloned()
+                    .collect();
+                if loaded.is_empty() {
+                    ui.label("Nothing loaded right now. The router loads a model automatically when OpenCode (or anything) first asks for it — or use Load on the Library tab.");
+                } else {
+                    let mut unload: Option<String> = None;
+                    for m in &loaded {
+                        ui.strong(format!("Currently {}: {}", m.status, m.id));
+                        egui::Grid::new(format!("detail-{}", m.id)).show(ui, |ui| {
+                            let meas = self.measurements.get(&m.id);
+                            ui.label("Measured context");
+                            ui.label(
+                                meas.and_then(|x| x.n_ctx)
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "not yet measured".into()),
+                            );
+                            ui.end_row();
+                            ui.label("Source");
                             ui.label(m.source.as_deref().unwrap_or("?"));
-                            match m.status.as_str() {
-                                "loaded" => {
-                                    if ui.button("Unload").clicked() {
-                                        unload = Some(m.id.clone());
+                            ui.end_row();
+                            ui.label("In OpenCode");
+                            ui.label(if self.configured.iter().any(|c| c.id == m.id) {
+                                "yes"
+                            } else {
+                                "no"
+                            });
+                            ui.end_row();
+                            if let Some(scan) = &self.scan {
+                                for d in &scan.devices {
+                                    if d.id.starts_with("CUDA") {
+                                        ui.label(format!("{} total", d.id));
+                                        ui.label(format!("{} MiB", d.total_mib));
+                                        ui.end_row();
                                     }
-                                }
-                                "unloaded" => {
-                                    if ui.button("Load").clicked() {
-                                        load = Some(m.id.clone());
-                                    }
-                                }
-                                _ => {
-                                    ui.label("…");
                                 }
                             }
-                            ui.end_row();
+                        });
+                        if m.status == "loaded" && ui.button("Unload").clicked() {
+                            unload = Some(m.id.clone());
                         }
+                        ui.add_space(6.0);
+                    }
+                    if let Some(id) = unload {
+                        self.run_row_action(RowAction::Unload(id));
+                    }
+                }
+                ui.separator();
+                egui::CollapsingHeader::new("Router log (tail)")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(200.0)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                                ui.monospace(tail_of_log());
+                            });
                     });
-                });
             }
         }
         ui.separator();
@@ -665,57 +854,95 @@ impl App {
                 ));
             }
         }
-
-        let port = self.cfg.port;
-        if let Some(id) = load {
-            self.spawn(&format!("loading {id}"), move |tx| {
-                let _ = tx.send(match router::load_model(port, &id) {
-                    Ok(()) => Msg::Finished(format!("{id}: load requested")),
-                    Err(e) => Msg::Error(format!("{e:#}")),
-                });
-            });
-        }
-        if let Some(id) = unload {
-            self.spawn(&format!("unloading {id}"), move |tx| {
-                let _ = tx.send(match router::unload_model(port, &id) {
-                    Ok(()) => Msg::Finished(format!("{id}: unload requested")),
-                    Err(e) => Msg::Error(format!("{e:#}")),
-                });
-            });
-        }
     }
+
+    // ─── OpenCode ────────────────────────────────────────────────────────
 
     fn opencode_pane(&mut self, ui: &mut egui::Ui) {
         ui.label(format!(
             "Config: {}",
             opencode::default_config_path().display()
         ));
-        let measured = self
-            .measurements
-            .iter()
-            .filter(|(_, m)| m.n_ctx.is_some())
-            .count();
-        let failed = self
-            .measurements
-            .iter()
-            .filter(|(_, m)| m.error.is_some())
-            .count();
-        ui.label(format!(
-            "Measured models ready to sync: {measured} (plus {failed} known failures, excluded)"
-        ));
-        egui::Grid::new("measured").striped(true).show(ui, |ui| {
-            ui.strong("Model id");
-            ui.strong("Measured context");
-            ui.end_row();
-            for (id, m) in &self.measurements {
-                ui.label(id);
-                match (&m.n_ctx, &m.error) {
-                    (Some(ctx), _) => ui.label(ctx.to_string()),
-                    (None, Some(_)) => ui.colored_label(ui.visuals().warn_fg_color, "load fails"),
-                    _ => ui.label("—"),
-                };
-                ui.end_row();
-            }
+        ui.small(
+            "These are the llama.cpp models OpenCode can currently use. Loading a model on the \
+             Library tab adds it here automatically with its measured context.",
+        );
+        ui.add_space(4.0);
+        if self.configured.is_empty() {
+            ui.label("No llama.cpp models in opencode.json yet — use ⚡ Set Up Everything, or Load a model on the Library tab.");
+        }
+        let mut pending: Option<RowAction> = None;
+        let configured = self.configured.clone();
+        egui::ScrollArea::both().show(ui, |ui| {
+            egui::Grid::new("configured")
+                .striped(true)
+                .min_col_width(56.0)
+                .show(ui, |ui| {
+                    for h in ["Model id", "Context", "Output", "Tools", "Status", ""] {
+                        ui.strong(h);
+                    }
+                    ui.end_row();
+                    for c in &configured {
+                        ui.label(&c.id);
+                        ui.label(c.context.map(|v| v.to_string()).unwrap_or_default());
+                        ui.label(c.output.map(|v| v.to_string()).unwrap_or_default());
+                        ui.label(match c.tool_call {
+                            Some(true) => "yes",
+                            Some(false) => "no",
+                            None => "?",
+                        });
+                        // Status vs our measurements.
+                        match self.measurements.get(&c.id) {
+                            Some(m) if m.n_ctx.is_some() => {
+                                let measured = m.n_ctx.unwrap();
+                                if c.context == Some(measured) {
+                                    ui.colored_label(
+                                        egui::Color32::from_rgb(0, 170, 0),
+                                        "✔ synced",
+                                    );
+                                } else {
+                                    ui.colored_label(
+                                        ui.visuals().warn_fg_color,
+                                        format!("⟳ config differs (measured {measured})"),
+                                    )
+                                    .on_hover_text(
+                                        "Sync opencode.json (File menu) refreshes this to the \
+                                         measured value; if you set it by hand on purpose, leave it.",
+                                    );
+                                }
+                            }
+                            Some(m) if m.error.is_some() => {
+                                let err = m.error.clone().unwrap_or_default();
+                                ui.colored_label(
+                                    ui.visuals().error_fg_color,
+                                    "✖ can't load",
+                                )
+                                .on_hover_text(format!(
+                                    "{}\n\nDetail: {err}",
+                                    rows::failure_hint(&err)
+                                ));
+                            }
+                            _ => {
+                                ui.colored_label(
+                                    ui.visuals().weak_text_color(),
+                                    "? never measured",
+                                )
+                                .on_hover_text(
+                                    "This entry wasn't written by this tool, or the model is \
+                                     gone. Remove it, or measure it from the Library tab.",
+                                );
+                            }
+                        }
+                        if ui
+                            .button("Remove")
+                            .on_hover_text("Comments the entry out with a note — never deletes.")
+                            .clicked()
+                        {
+                            pending = Some(RowAction::RemoveFromOpenCode(c.id.clone()));
+                        }
+                        ui.end_row();
+                    }
+                });
         });
         ui.separator();
         ui.horizontal(|ui| {
@@ -726,78 +953,30 @@ impl App {
             {
                 self.action_setup();
             }
-            if ui.button("Sync opencode.json").clicked() {
-                self.action_sync();
-            }
             if ui
-                .button("Measure contexts")
-                .on_hover_text(
-                    "Loads each preset model once and records the context llama-server's \
-                     --fit actually settled on for THIS machine — usually far less than the \
-                     GGUF header claims. Sync only ever writes these measured values, so \
-                     OpenCode never plans prompts against a context the server doesn't have. \
-                     Fresh measurements are skipped; use Server → Re-measure ALL to force.",
-                )
+                .button("Sync all measured")
+                .on_hover_text("Writes every measured model's context into opencode.json")
                 .clicked()
             {
-                self.action_calibrate(false);
+                self.action_sync();
             }
         });
         if let Some(s) = &self.last_sync {
             ui.label(s);
         }
-        ui.small("Sync writes measured context limits only. Existing entries get a minimal patch; your hand-edits and comments survive. Orphans are reported, never deleted.");
-
-        let mut to_comment: Option<String> = None;
-        if !self.orphans.is_empty() {
-            ui.separator();
-            ui.strong("Orphans (in your config, but not measured/served)");
-            for id in &self.orphans {
-                ui.horizontal(|ui| {
-                    ui.label(id);
-                    if ui
-                        .button("Comment out")
-                        .on_hover_text(
-                            "Comments the entry out in place with a note — never deletes. \
-                             Uncomment in the file to restore.",
-                        )
-                        .clicked()
-                    {
-                        to_comment = Some(id.clone());
-                    }
-                });
-            }
-        }
-        if let Some(id) = to_comment {
-            let keep: Vec<String> = self
-                .measurements
-                .iter()
-                .filter(|(_, m)| m.n_ctx.is_some())
-                .map(|(id, _)| id.clone())
-                .collect();
-            self.spawn(&format!("commenting out {id}"), move |tx| {
-                let path = opencode::default_config_path();
-                match opencode::comment_out_in_file(&path, &id) {
-                    Ok(()) => {
-                        let _ =
-                            tx.send(Msg::Finished(format!("{id}: commented out (backup kept)")));
-                        let orphans = opencode::orphans_in_file(&path, &keep).unwrap_or_default();
-                        let _ = tx.send(Msg::Orphans(orphans));
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Msg::Error(format!("comment out: {e:#}")));
-                    }
-                }
-            });
+        if let Some(action) = pending {
+            self.run_row_action(action);
         }
     }
+
+    // ─── Settings ────────────────────────────────────────────────────────
 
     fn settings_pane(&mut self, ui: &mut egui::Ui) {
         ui.label(format!("Stored in {}", system::config_file().display()));
         ui.add_space(6.0);
 
         ui.strong("Model scan directories (one per line)");
-        ui.small("The Ollama store is found automatically and doesn't belong here.");
+        ui.small("Ollama's store and the HuggingFace cache are found automatically.");
         ui.add(
             egui::TextEdit::multiline(&mut self.edit_scan_dirs)
                 .desired_rows(3)
@@ -938,7 +1117,7 @@ impl App {
     }
 }
 
-// ─── worker bodies shared by actions and the one-click setup ────────────────
+// ─── worker bodies ───────────────────────────────────────────────────────────
 
 fn start_router(cfg: &settings::AppConfig) -> anyhow::Result<u32> {
     if !system::preset_path().exists() {
@@ -981,13 +1160,125 @@ fn run_sync(
         .collect();
     anyhow::ensure!(
         !desired.is_empty(),
-        "no successful measurements yet — measure contexts first (measured, not guessed)"
+        "no successful measurements yet — measure a model first (measured, not guessed)"
     );
     opencode::sync_file(
         &opencode::default_config_path(),
         &format!("http://127.0.0.1:{}/v1", cfg.port),
         &desired,
     )
+}
+
+/// Sync exactly one measured model into opencode.json.
+fn sync_single(
+    cfg: &settings::AppConfig,
+    measurements: &router::Measurements,
+    id: &str,
+) -> anyhow::Result<()> {
+    let ctx = measurements
+        .get(id)
+        .and_then(|m| m.n_ctx)
+        .ok_or_else(|| anyhow::anyhow!("{id} has no successful measurement"))?;
+    let desired = opencode::DesiredModel {
+        id: id.to_string(),
+        display_name: format!("{id} (llama.cpp)"),
+        context: ctx,
+    };
+    opencode::sync_file(
+        &opencode::default_config_path(),
+        &format!("http://127.0.0.1:{}/v1", cfg.port),
+        &[desired],
+    )?;
+    Ok(())
+}
+
+fn send_configured(tx: &Sender<Msg>) {
+    let configured =
+        opencode::configured_models(&opencode::default_config_path()).unwrap_or_default();
+    let _ = tx.send(Msg::Configured(configured));
+}
+
+/// Load (if needed) + measure + record + add to opencode.json; optionally
+/// leave the model warm. The Library's Load button and checkbox both land
+/// here — loading IS measuring, so nothing enters the config unguessed.
+fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: &Sender<Msg>) {
+    let dir = router::state_dir();
+    let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let args_fp = router::status(&dir, &system::router_config(cfg));
+    let args_fp = match args_fp {
+        router::RouterState::Ours { models } => models
+            .iter()
+            .find(|m| m.id == id)
+            .and_then(|m| m.args_fp.clone()),
+        _ => None,
+    };
+    match router::fetch_settled_ctx(cfg.port, id) {
+        Ok(ctx) => {
+            let mut all = router::read_measurements(&dir);
+            all.insert(
+                id.to_string(),
+                router::Measurement {
+                    n_ctx: Some(ctx),
+                    error: None,
+                    args_fp,
+                    env_fp: Some(env_fp),
+                },
+            );
+            let _ = router::write_measurements(&dir, &all);
+            let _ = tx.send(Msg::Measurements(all.clone()));
+            match sync_single(cfg, &all, id) {
+                Ok(()) => {
+                    send_configured(tx);
+                    let _ = tx.send(Msg::Finished(format!(
+                        "{id}: measured {ctx} context, added to OpenCode{}",
+                        if keep_loaded { ", still loaded" } else { "" }
+                    )));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("{id} measured but sync failed: {e:#}")));
+                }
+            }
+            if !keep_loaded {
+                let _ = router::unload_model(cfg.port, id);
+            }
+        }
+        Err(e) => {
+            let detail = match router::mine_load_error(&dir) {
+                Some(cause) => format!("{e:#} — {cause}"),
+                None => format!("{e:#}"),
+            };
+            let mut all = router::read_measurements(&dir);
+            all.insert(
+                id.to_string(),
+                router::Measurement {
+                    n_ctx: None,
+                    error: Some(detail.clone()),
+                    args_fp,
+                    env_fp: Some(env_fp),
+                },
+            );
+            let _ = router::write_measurements(&dir, &all);
+            let _ = tx.send(Msg::Measurements(all));
+            let _ = tx.send(Msg::Error(format!("{id}: {detail}")));
+        }
+    }
+}
+
+/// Last few KB of the router log, for the Server pane.
+fn tail_of_log() -> String {
+    let path = router::state_dir().join("router.log");
+    let Ok(meta) = std::fs::metadata(&path) else {
+        return "(no log yet)".into();
+    };
+    use std::io::{Read, Seek, SeekFrom};
+    let Ok(mut f) = std::fs::File::open(&path) else {
+        return "(log unreadable)".into();
+    };
+    let start = meta.len().saturating_sub(4096);
+    let _ = f.seek(SeekFrom::Start(start));
+    let mut s = String::new();
+    let _ = f.read_to_string(&mut s);
+    s.lines().skip(1).collect::<Vec<_>>().join("\n")
 }
 
 impl eframe::App for App {

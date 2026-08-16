@@ -148,6 +148,44 @@ fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     Ok(())
 }
 
+/// One entry as it currently stands in opencode.json — what the OpenCode
+/// tab displays. Values are whatever the file says (which may be the
+/// user's hand edits), not what we'd write.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConfiguredModel {
+    pub id: String,
+    pub name: Option<String>,
+    pub context: Option<u64>,
+    pub output: Option<u64>,
+    pub tool_call: Option<bool>,
+}
+
+use serde::Serialize;
+
+/// Read the current `provider.llamacpp.models` entries with their values.
+pub fn configured_models(path: &Path) -> Result<Vec<ConfiguredModel>> {
+    let source = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let value = jsonc_parser::parse_to_serde_value(&source, &Default::default())
+        .map_err(|e| anyhow::anyhow!("parsing opencode.json: {e}"))?
+        .unwrap_or(serde_json::Value::Null);
+    Ok(value
+        .pointer(&format!("/provider/{PROVIDER_ID}/models"))
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.iter()
+                .map(|(id, v)| ConfiguredModel {
+                    id: id.clone(),
+                    name: v.get("name").and_then(|x| x.as_str()).map(String::from),
+                    context: v.pointer("/limit/context").and_then(|x| x.as_u64()),
+                    output: v.pointer("/limit/output").and_then(|x| x.as_u64()),
+                    tool_call: v.get("tool_call").and_then(|x| x.as_bool()),
+                })
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
 /// Model ids under our provider that aren't in `keep` — comment-out
 /// candidates for the UI to offer.
 pub fn orphans_in_file(path: &Path, keep: &[String]) -> Result<Vec<String>> {

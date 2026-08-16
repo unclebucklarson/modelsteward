@@ -39,6 +39,27 @@ autoload (cold-cache 20GB loads take minutes and tripped HTTP timeouts /
 router kill paths), and each measurement waits for the previous model's
 teardown before loading.
 
+## M5.7 — Information-architecture redesign (DONE, per user direction)
+
+The tabs now match how a user thinks:
+
+- **Library** = every model from every source — user scan dirs, Ollama
+  store, HuggingFace hub cache (`~/.cache/huggingface/hub`, mmproj
+  companions excluded) — one row each with hardware-aware advice
+  ("too large for this machine", "bigger than VRAM — will spill to CPU",
+  "measured: N context", failure reason + likely fix), live server
+  status, Load/Unload, and an **In OpenCode** checkbox.
+- **Loading IS measuring**: Load button and checkbox both go through
+  load → read settled ctx → record → auto-sync into opencode.json.
+  The batch calibrate remains as optional pre-warming.
+- **Server** = router controls + detail on the currently loaded model
+  (measured ctx, source, in-OpenCode, device table) + router log tail +
+  Ollama peer section.
+- **OpenCode** = the actual opencode.json entries with their values and
+  per-entry status (✔ synced / ⟳ differs / ✖ can't load with hint /
+  ? never measured) and Remove (comment-out).
+- Failure reasons now mined from router.log into measurements.
+
 ## M5.6 — Test, refine, then deepen
 
 5. **Measured tool-calling**: during calibration, fire a one-shot tools
@@ -90,6 +111,15 @@ speculative-decoding trial (`--spec-draft-model` + small draft model);
 results shown next to every recommendation.
 
 ## Parked / ideas
+
+- **Model archival / "not at the mercy of Ollama or HF"** (user idea):
+  unify by *reference* (the Library already is that view), not by mass
+  relocation — moving blobs would double disk and break Ollama's
+  content-addressed store. Instead: an opt-in per-model **"Archive to
+  shelf"** action that copies (hardlink when same filesystem) a cache/
+  Ollama model into `~/models`, which the user owns and no other tool
+  prunes. Row then shows "archived" and survives `ollama rm` / HF cache
+  eviction.
 
 - Multi-GPU override UI (device pinning, per-device fit targets) — core
   is list-based already; UI lands when a second GPU exists to test with.

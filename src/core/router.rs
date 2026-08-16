@@ -75,11 +75,14 @@ pub fn render_preset(models: &[(String, &ModelFile, ModelOverrides)]) -> String 
 /// Default (alias, model, overrides) list for a scanned library: every model
 /// with readable metadata, aliased via [`library::alias_suggestion`].
 /// Duplicate aliases get a numeric suffix — never two sections one name.
+/// HF-hub cache files are excluded: the router serves those natively as
+/// "cache" models, and a preset entry would create a second identity.
 pub fn default_entries(models: &[ModelFile]) -> Vec<(String, &ModelFile, ModelOverrides)> {
     let mut used = std::collections::HashSet::new();
     models
         .iter()
         .filter(|m| m.meta.is_some())
+        .filter(|m| !matches!(m.source, crate::core::library::Source::HfHub { .. }))
         .map(|m| {
             let base = library::alias_suggestion(m);
             let mut alias = base.clone();
@@ -575,10 +578,14 @@ pub fn calibrate(
                 env_fp: Some(env_fp.to_string()),
             },
             Err(e) => {
-                progress(format!("[{n}/{total}] {} failed: {e:#}", m.id));
+                let detail = match mine_load_error(dir) {
+                    Some(cause) => format!("{e:#} — {cause}"),
+                    None => format!("{e:#}"),
+                };
+                progress(format!("[{n}/{total}] {} failed: {detail}", m.id));
                 Measurement {
                     n_ctx: None,
-                    error: Some(format!("{e:#}")),
+                    error: Some(detail),
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
                 }
@@ -591,6 +598,25 @@ pub fn calibrate(
         wait_until_not_loaded(port, &m.id, std::time::Duration::from_secs(30));
     }
     Ok(out)
+}
+
+/// The most recent child-load error in router.log — called right after a
+/// failed load, when the last "error loading model:" line is that load's.
+/// Heuristic by design; worst case it attributes a neighbor's error, which
+/// still beats a bare "failed(1)".
+pub fn mine_load_error(dir: &Path) -> Option<String> {
+    let path = dir.join("router.log");
+    let len = std::fs::metadata(&path).ok()?.len();
+    let mut f = std::fs::File::open(&path).ok()?;
+    use std::io::{Read, Seek, SeekFrom};
+    let start = len.saturating_sub(64 * 1024);
+    f.seek(SeekFrom::Start(start)).ok()?;
+    let mut tail = String::new();
+    f.read_to_string(&mut tail).ok()?;
+    tail.lines().rev().find_map(|l| {
+        let idx = l.find("error loading model:")?;
+        Some(l[idx + "error loading model:".len()..].trim().to_string())
+    })
 }
 
 /// Block until the router no longer reports `model` as loaded/loading —

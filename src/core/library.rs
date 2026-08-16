@@ -21,6 +21,12 @@ pub enum Source {
     /// knows it by. The blob is a raw GGUF and llama-server can load it
     /// directly — zero duplication.
     Ollama { name: String },
+    /// A GGUF in the HuggingFace hub cache (`~/.cache/huggingface/hub`),
+    /// downloaded by llama-server's `-hf`, unsloth studio, or the hf CLI.
+    /// `repo` is "org/name"; llama-server's router serves these natively
+    /// under ids like "org/name:QUANT", so they are NOT written into the
+    /// preset — the router already offers them.
+    HfHub { repo: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -34,17 +40,41 @@ pub struct ModelFile {
 }
 
 impl ModelFile {
-    /// The label a row leads with: Ollama's name, the GGUF's own name, or
+    /// The label a row leads with: Ollama's name, the HF repo + file, or
     /// the file stem, in that order of preference.
     pub fn display_name(&self) -> String {
-        match &self.source {
-            Source::Ollama { name } => name.clone(),
-            Source::Shelf => self
-                .path
+        let stem = || {
+            self.path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.path.display().to_string()),
+                .unwrap_or_else(|| self.path.display().to_string())
+        };
+        match &self.source {
+            Source::Ollama { name } => name.clone(),
+            Source::HfHub { repo } => format!("{repo} — {}", stem()),
+            Source::Shelf => stem(),
         }
+    }
+
+    /// The id the running router knows this model by, when predictable:
+    /// preset models go by their alias; HF-hub files by "repo:QUANT" (the
+    /// router tags cache models with the quant embedded in the filename).
+    pub fn router_cache_id(&self) -> Option<String> {
+        let Source::HfHub { repo } = &self.source else {
+            return None;
+        };
+        let stem = self.path.file_stem()?.to_string_lossy().to_uppercase();
+        // Filename like Qwen3.8-27B-UD-Q5_K_XL → tag Q5_K_XL: take the
+        // longest known quant token the stem ends with.
+        for tag in [
+            "Q8_0", "Q6_K", "Q5_K_XL", "Q5_K_M", "Q5_K_S", "Q4_K_XL", "Q4_K_M", "Q4_K_S",
+            "Q4_0", "Q3_K_M", "Q2_K", "IQ4_XS", "IQ4_NL", "BF16", "F16", "IT",
+        ] {
+            if stem.ends_with(tag) {
+                return Some(format!("{repo}:{tag}"));
+            }
+        }
+        None
     }
 }
 
@@ -64,11 +94,76 @@ pub fn default_ollama_stores() -> Vec<PathBuf> {
     candidates
 }
 
-/// Scan shelf directories and the Ollama stores. Never errors as a whole —
-/// an unreadable directory contributes nothing rather than sinking the scan.
-/// Duplicate paths (a shelf dir listed twice, two store candidates that
-/// resolve to the same blob) collapse to one entry.
-pub fn scan(scan_dirs: &[PathBuf], ollama_stores: &[PathBuf]) -> Vec<ModelFile> {
+/// The HuggingFace hub cache, when present.
+pub fn default_hf_hub() -> Option<PathBuf> {
+    let hub = std::env::var_os("HF_HOME")
+        .map(|h| PathBuf::from(h).join("hub"))
+        .unwrap_or_else(|| {
+            std::env::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".cache/huggingface/hub")
+        });
+    hub.is_dir().then_some(hub)
+}
+
+/// GGUFs in the HF hub cache: `hub/models--org--name/snapshots/<rev>/*.gguf`.
+pub fn hf_hub_models(hub: &Path) -> Vec<ModelFile> {
+    let mut out = Vec::new();
+    let Ok(repos) = std::fs::read_dir(hub) else {
+        return out;
+    };
+    for repo_dir in repos.flatten() {
+        let dirname = repo_dir.file_name().to_string_lossy().into_owned();
+        let Some(rest) = dirname.strip_prefix("models--") else {
+            continue;
+        };
+        let repo = rest.replace("--", "/");
+        let snapshots = repo_dir.path().join("snapshots");
+        let Ok(revs) = std::fs::read_dir(&snapshots) else {
+            continue;
+        };
+        for rev in revs.flatten() {
+            let Ok(files) = std::fs::read_dir(rev.path()) else {
+                continue;
+            };
+            for f in files.flatten() {
+                let path = f.path();
+                // mmproj-*.gguf are vision projectors that ride along with a
+                // main model — companions, not servable models themselves.
+                let is_mmproj = path
+                    .file_stem()
+                    .is_some_and(|s| s.to_string_lossy().to_lowercase().starts_with("mmproj"));
+                if !is_mmproj
+                    && path
+                        .extension()
+                        .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
+                {
+                    // Snapshot entries are usually symlinks into blobs/;
+                    // metadata() follows them for the real size.
+                    let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    out.push(ModelFile {
+                        meta: gguf::read_meta(&path).ok(),
+                        path,
+                        file_size,
+                        source: Source::HfHub { repo: repo.clone() },
+                    });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Scan shelf directories, the Ollama stores, and (when given) the HF hub
+/// cache. Never errors as a whole — an unreadable directory contributes
+/// nothing rather than sinking the scan. Duplicate paths (a shelf dir
+/// listed twice, two store candidates that resolve to the same blob)
+/// collapse to one entry.
+pub fn scan(
+    scan_dirs: &[PathBuf],
+    ollama_stores: &[PathBuf],
+    hf_hub: Option<&Path>,
+) -> Vec<ModelFile> {
     let mut out = Vec::new();
     for dir in scan_dirs {
         walk_gguf(dir, 0, &mut out);
@@ -76,14 +171,21 @@ pub fn scan(scan_dirs: &[PathBuf], ollama_stores: &[PathBuf]) -> Vec<ModelFile> 
     for store in ollama_stores {
         out.extend(ollama_models(store));
     }
+    if let Some(hub) = hf_hub {
+        out.extend(hf_hub_models(hub));
+    }
     let mut seen = std::collections::HashSet::new();
     out.retain(|m| {
         let key = m.path.canonicalize().unwrap_or_else(|_| m.path.clone());
         seen.insert(key)
     });
-    // Stable order: shelf first (alphabetical), then Ollama entries.
+    // Stable order: shelf, then Ollama, then HF hub — alphabetical within.
     out.sort_by(|a, b| {
-        let rank = |m: &ModelFile| matches!(m.source, Source::Ollama { .. }) as u8;
+        let rank = |m: &ModelFile| match m.source {
+            Source::Shelf => 0u8,
+            Source::Ollama { .. } => 1,
+            Source::HfHub { .. } => 2,
+        };
         (rank(a), a.display_name().to_lowercase()).cmp(&(rank(b), b.display_name().to_lowercase()))
     });
     out
@@ -183,7 +285,7 @@ fn ollama_model_from_manifest(
 pub fn alias_suggestion(m: &ModelFile) -> String {
     let raw = match &m.source {
         Source::Ollama { name } => name.clone(),
-        Source::Shelf => m.display_name(),
+        _ => m.display_name(),
     };
     let mut s: String = raw
         .to_lowercase()
@@ -227,7 +329,7 @@ mod tests {
             ("Tiny/tiny.GGUF", &synthetic_gguf("llama", 4096, 15)[..]),
             ("notes/readme.txt", b"not a model"),
         ]);
-        let models = scan(&[shelf.path().to_path_buf()], &[]);
+        let models = scan(&[shelf.path().to_path_buf()], &[], None);
         assert_eq!(models.len(), 2);
         assert!(models.iter().all(|m| matches!(m.source, Source::Shelf)));
         let qwen = models
@@ -244,14 +346,14 @@ mod tests {
     #[test]
     fn broken_gguf_is_listed_without_meta() {
         let shelf = shelf_with(&[("Broken/broken.gguf", b"corrupt")]);
-        let models = scan(&[shelf.path().to_path_buf()], &[]);
+        let models = scan(&[shelf.path().to_path_buf()], &[], None);
         assert_eq!(models.len(), 1);
         assert!(models[0].meta.is_none(), "visible, but honestly meta-less");
     }
 
     #[test]
     fn missing_scan_dir_contributes_nothing() {
-        let models = scan(&[PathBuf::from("/nonexistent/nowhere")], &[]);
+        let models = scan(&[PathBuf::from("/nonexistent/nowhere")], &[], None);
         assert!(models.is_empty());
     }
 
@@ -262,7 +364,7 @@ mod tests {
             &synthetic_gguf("llama", 4096, 15)[..],
         )]);
         let dir = shelf.path().to_path_buf();
-        let models = scan(&[dir.clone(), dir], &[]);
+        let models = scan(&[dir.clone(), dir], &[], None);
         assert_eq!(models.len(), 1);
     }
 
@@ -302,7 +404,7 @@ mod tests {
             "Qwen3.6-27B/Qwen3.6-27B-UD-Q5_K_XL.gguf",
             &synthetic_gguf("qwen3", 1, 1)[..],
         )]);
-        let models = scan(&[shelf.path().to_path_buf()], &[]);
+        let models = scan(&[shelf.path().to_path_buf()], &[], None);
         assert_eq!(alias_suggestion(&models[0]), "qwen3.6-27b-ud-q5_k_xl");
 
         let ollama = ModelFile {

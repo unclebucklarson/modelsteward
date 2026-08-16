@@ -76,7 +76,11 @@ pub fn router_config(cfg: &settings::AppConfig) -> router::RouterConfig {
 pub fn scan_models(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> Vec<library::ModelFile> {
     let mut scan_dirs = cfg.scan_dirs.clone();
     scan_dirs.extend(extra_dirs.iter().cloned());
-    library::scan(&scan_dirs, &library::default_ollama_stores())
+    library::scan(
+        &scan_dirs,
+        &library::default_ollama_stores(),
+        library::default_hf_hub().as_deref(),
+    )
 }
 
 pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanReport {
