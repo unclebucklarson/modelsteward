@@ -59,6 +59,8 @@ enum RowAction {
     Unload(String),
     AddToOpenCode(String),
     RemoveFromOpenCode(String),
+    /// Pull a cache/Ollama-owned file into the user's shelf (by path).
+    Archive(PathBuf),
 }
 
 struct App {
@@ -426,6 +428,65 @@ impl App {
                     };
                 });
             }
+            RowAction::Archive(path) => {
+                let Some(model) = self
+                    .scan
+                    .as_ref()
+                    .and_then(|s| s.models.iter().find(|m| m.path == path).cloned())
+                else {
+                    self.log("archive: model not found in scan — rescan first");
+                    return;
+                };
+                let shelf_root = cfg
+                    .scan_dirs
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        std::env::home_dir()
+                            .unwrap_or_else(|| PathBuf::from("."))
+                            .join("models")
+                    });
+                self.spawn(
+                    &format!("archiving {} to your shelf", model.display_name()),
+                    move |tx| {
+                        match crate::core::library::archive_to_shelf(&model, &shelf_root) {
+                            Ok(dest) => {
+                                let _ = tx.send(Msg::Progress(format!(
+                                    "archived → {} (hardlinked when possible; yours now)",
+                                    dest.display()
+                                )));
+                                // Make it servable: regenerate preset, tell
+                                // the router, rescan so the row updates.
+                                match system::write_preset(&cfg, &[]) {
+                                    Ok((_, n)) => {
+                                        let _ = tx.send(Msg::Progress(format!(
+                                            "preset regenerated ({n} models)"
+                                        )));
+                                        if let Ok(models) = router::reload(cfg.port) {
+                                            let _ = tx.send(Msg::Progress(format!(
+                                                "router reloaded: {} models offered",
+                                                models.len()
+                                            )));
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let _ = tx
+                                            .send(Msg::Error(format!("archive/preset: {e:#}")));
+                                        return;
+                                    }
+                                }
+                                let _ = tx.send(Msg::Scanned(system::scan_report(&cfg, &[])));
+                                let _ = tx.send(Msg::Finished(
+                                    "archive complete — the model is now a shelf model; Load it to measure + add to OpenCode".into(),
+                                ));
+                            }
+                            Err(e) => {
+                                let _ = tx.send(Msg::Error(format!("archive: {e:#}")));
+                            }
+                        }
+                    },
+                );
+            }
         }
     }
 
@@ -628,7 +689,7 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Measured ctx", "Server", "OpenCode",
-                        "", "Advice",
+                        "", "", "Advice",
                     ] {
                         ui.strong(h);
                     }
@@ -703,6 +764,27 @@ impl App {
                             _ => {
                                 ui.label("—");
                             }
+                        }
+
+                        // Archive: pull a cache/Ollama-owned file into the
+                        // user's shelf, out of reach of other tools' pruning.
+                        if r.archivable
+                            && let Some(path) = &r.path
+                        {
+                            if ui
+                                .button("→ shelf")
+                                .on_hover_text(
+                                    "Copies (hardlinks when free) this file into your models \
+                                     directory. It becomes a normal shelf model: served by the \
+                                     preset, measurable, and safe from cache eviction or \
+                                     `ollama rm`.",
+                                )
+                                .clicked()
+                            {
+                                pending = Some(RowAction::Archive(path.clone()));
+                            }
+                        } else {
+                            ui.label("");
                         }
 
                         let color = match r.advice_level {

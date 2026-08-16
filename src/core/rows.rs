@@ -40,6 +40,11 @@ pub struct Row {
     pub in_opencode: bool,
     pub advice_level: AdviceLevel,
     pub advice: String,
+    /// Disk path when this row came from a scanned file (router-only rows
+    /// have none). Drives the Archive action.
+    pub path: Option<std::path::PathBuf>,
+    /// Archivable = lives in a store some other tool owns/prunes.
+    pub archivable: bool,
 }
 
 /// Hardware picture for advice. `vram_mib` is the largest single device
@@ -230,6 +235,8 @@ pub fn assemble(
                 .as_ref()
                 .is_some_and(|id| opencode_ids.contains(id)),
             router_id,
+            path: Some(m.path.clone()),
+            archivable: !matches!(m.source, Source::Shelf),
             source: match &m.source {
                 Source::Shelf => "shelf".into(),
                 Source::Ollama { .. } => "ollama".into(),
@@ -278,6 +285,8 @@ pub fn assemble(
             display: rm.id.clone(),
             in_opencode: opencode_ids.contains(&rm.id),
             router_id: Some(rm.id.clone()),
+            path: None,
+            archivable: false,
             source: rm.source.clone().unwrap_or_else(|| "router".into()),
             size_bytes: 0,
             quant: String::new(),

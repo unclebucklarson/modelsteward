@@ -175,10 +175,17 @@ pub fn scan(
     if let Some(hub) = hf_hub {
         out.extend(hf_hub_models(hub));
     }
+    // Dedupe by inode, not path: an archived model hardlinked into the
+    // shelf is the SAME file as its cache original and must appear once.
+    // Shelf entries are pushed first, so the user-owned copy is the one
+    // that survives.
     let mut seen = std::collections::HashSet::new();
     out.retain(|m| {
-        let key = m.path.canonicalize().unwrap_or_else(|_| m.path.clone());
-        seen.insert(key)
+        use std::os::unix::fs::MetadataExt;
+        let key = std::fs::metadata(&m.path)
+            .map(|md| (md.dev(), md.ino()))
+            .unwrap_or((0, 0));
+        key == (0, 0) || seen.insert(key)
     });
     // Stable order: shelf, then Ollama, then HF hub — alphabetical within.
     out.sort_by(|a, b| {
@@ -278,6 +285,55 @@ fn ollama_model_from_manifest(
         file_size,
         source: Source::Ollama { name },
     })
+}
+
+/// Pull a cache-owned model into the user's shelf, where no other tool
+/// prunes it and the preset serves it like any local file. Hardlinks when
+/// source and shelf share a filesystem (instant, zero extra disk); copies
+/// otherwise (via a temp name so a half-copy is never scanned as a model).
+/// Refuses to overwrite. Returns the new shelf path.
+pub fn archive_to_shelf(m: &ModelFile, shelf_root: &Path) -> anyhow::Result<PathBuf> {
+    use anyhow::Context;
+    anyhow::ensure!(
+        !matches!(m.source, Source::Shelf),
+        "{} is already on the shelf",
+        m.path.display()
+    );
+    // Resolve symlinks (HF snapshots symlink into blobs/) so we link/copy
+    // the real bytes.
+    let src = m
+        .path
+        .canonicalize()
+        .with_context(|| format!("resolving {}", m.path.display()))?;
+    let (subdir, file_name) = match &m.source {
+        Source::Ollama { name } => {
+            let safe = name.replace([':', '/'], "-");
+            (safe.clone(), format!("{safe}.gguf"))
+        }
+        Source::HfHub { repo } => (
+            repo.rsplit('/').next().unwrap_or(repo).to_string(),
+            m.path
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "model.gguf".into()),
+        ),
+        Source::Shelf => unreachable!("guarded above"),
+    };
+    let dir = shelf_root.join(subdir);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    let dest = dir.join(file_name);
+    anyhow::ensure!(
+        !dest.exists(),
+        "{} already exists — refusing to overwrite",
+        dest.display()
+    );
+    if std::fs::hard_link(&src, &dest).is_err() {
+        // Different filesystem: real copy through a temp name.
+        let tmp = dest.with_extension("gguf.partial");
+        std::fs::copy(&src, &tmp).with_context(|| format!("copying to {}", tmp.display()))?;
+        std::fs::rename(&tmp, &dest).context("finalizing copy")?;
+    }
+    Ok(dest)
 }
 
 /// Suggested serve alias for a model file: the file stem (or Ollama name),
@@ -397,6 +453,84 @@ mod tests {
             Some(131_072)
         );
         assert!(models[0].path.ends_with("blobs/sha256-abc123"));
+    }
+
+    #[test]
+    fn archive_pulls_cache_files_onto_the_shelf() {
+        use std::os::unix::fs::MetadataExt;
+        let store = tempfile::tempdir().unwrap();
+        let shelf = tempfile::tempdir().unwrap();
+        let bytes = synthetic_gguf("qwen3", 4096, 15);
+
+        // HF-hub style: snapshot file symlinked to a blob.
+        let blob = store.path().join("blob-abc");
+        std::fs::write(&blob, &bytes).unwrap();
+        let snap = store.path().join("Qwen3.8-27B-UD-Q4_K_XL.gguf");
+        std::os::unix::fs::symlink(&blob, &snap).unwrap();
+        let m = ModelFile {
+            path: snap,
+            file_size: bytes.len() as u64,
+            source: Source::HfHub {
+                repo: "unsloth/Qwen3.8-27B-GGUF".into(),
+            },
+            meta: None,
+        };
+        let dest = archive_to_shelf(&m, shelf.path()).unwrap();
+        assert!(dest.ends_with("Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf"));
+        // Same tempfs → hardlink: same inode as the BLOB (symlink resolved).
+        assert_eq!(
+            std::fs::metadata(&dest).unwrap().ino(),
+            std::fs::metadata(&blob).unwrap().ino()
+        );
+        // Refuses to overwrite.
+        assert!(archive_to_shelf(&m, shelf.path()).is_err());
+
+        // Ollama style: extensionless blob gets a proper name.
+        let oblob = store.path().join("sha256-def");
+        std::fs::write(&oblob, &bytes).unwrap();
+        let om = ModelFile {
+            path: oblob,
+            file_size: bytes.len() as u64,
+            source: Source::Ollama {
+                name: "ornith:35b".into(),
+            },
+            meta: None,
+        };
+        let odest = archive_to_shelf(&om, shelf.path()).unwrap();
+        assert!(odest.ends_with("ornith-35b/ornith-35b.gguf"));
+
+        // Shelf models refuse (already owned).
+        let sm = ModelFile {
+            path: dest.clone(),
+            file_size: 0,
+            source: Source::Shelf,
+            meta: None,
+        };
+        assert!(archive_to_shelf(&sm, shelf.path()).is_err());
+    }
+
+    #[test]
+    fn hardlinked_archive_and_original_dedupe_to_the_shelf_row() {
+        let shelf = shelf_with(&[(
+            "Archived/model.gguf",
+            &synthetic_gguf("llama", 4096, 15)[..],
+        )]);
+        // Simulate the HF original as a hardlink of the archived file, in a
+        // hub-layout directory that scan() reads via the hf_hub param.
+        let hub = tempfile::tempdir().unwrap();
+        let snapdir = hub
+            .path()
+            .join("models--org--repo/snapshots/rev1");
+        std::fs::create_dir_all(&snapdir).unwrap();
+        std::fs::hard_link(
+            shelf.path().join("Archived/model.gguf"),
+            snapdir.join("model.gguf"),
+        )
+        .unwrap();
+
+        let models = scan(&[shelf.path().to_path_buf()], &[], Some(hub.path()));
+        assert_eq!(models.len(), 1, "one file, one row");
+        assert!(matches!(models[0].source, Source::Shelf), "shelf wins");
     }
 
     #[test]

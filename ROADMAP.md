@@ -116,14 +116,12 @@ results shown next to every recommendation.
   cache index doesn't list (e.g. a second quant of the same repo) currently
   shows "not offered". It could be made servable by writing a preset entry
   pointing at its snapshot path — needs care to keep one identity per file.
-- **Model archival / "not at the mercy of Ollama or HF"** (user idea):
-  unify by *reference* (the Library already is that view), not by mass
-  relocation — moving blobs would double disk and break Ollama's
-  content-addressed store. Instead: an opt-in per-model **"Archive to
-  shelf"** action that copies (hardlink when same filesystem) a cache/
-  Ollama model into `~/models`, which the user owns and no other tool
-  prunes. Row then shows "archived" and survives `ollama rm` / HF cache
-  eviction.
+- ✔ **Archive to shelf** (user idea, DONE): per-row "→ shelf" button pulls
+  a cache/Ollama model into the user's models dir (hardlink when same
+  filesystem — instant, zero extra disk; temp-named copy otherwise),
+  regenerates the preset, hot-reloads the router, rescans. Scan dedupes
+  by inode so the shelf copy replaces the cache row. Solves both the
+  "unoffered variant" quirk and "at the mercy of Ollama/HF" pruning.
 
 - Multi-GPU override UI (device pinning, per-device fit targets) — core
   is list-based already; UI lands when a second GPU exists to test with.
