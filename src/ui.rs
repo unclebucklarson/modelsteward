@@ -61,6 +61,8 @@ enum RowAction {
     RemoveFromOpenCode(String),
     /// Pull a cache/Ollama-owned file into the user's shelf (by path).
     Archive(PathBuf),
+    /// Open the per-model override editor.
+    EditOverrides(String),
 }
 
 struct App {
@@ -87,6 +89,15 @@ struct App {
     busy: Option<String>,
     show_about: bool,
     last_sync: Option<String>,
+    override_editor: Option<OverrideEditor>,
+}
+
+/// Edit buffers for one model's preset overrides.
+struct OverrideEditor {
+    id: String,
+    ctx_text: String,
+    kv_text: String,
+    extra_text: String,
 }
 
 impl App {
@@ -112,6 +123,7 @@ impl App {
             busy: None,
             show_about: false,
             last_sync: None,
+            override_editor: None,
         };
         app.reset_edit_buffers();
         app.spawn_scan();
@@ -449,6 +461,20 @@ impl App {
                     };
                 });
             }
+            RowAction::EditOverrides(id) => {
+                let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
+                self.override_editor = Some(OverrideEditor {
+                    id,
+                    ctx_text: ov.ctx.map(|c| c.to_string()).unwrap_or_default(),
+                    kv_text: ov.cache_type_kv.clone().unwrap_or_default(),
+                    extra_text: ov
+                        .extra
+                        .iter()
+                        .map(|(k, v)| format!("{k} = {v}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                });
+            }
             RowAction::Archive(path) => {
                 let Some(model) = self
                     .scan
@@ -707,7 +733,7 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Measured ctx", "Server", "OpenCode",
-                        "", "", "Advice",
+                        "", "", "", "Advice",
                     ] {
                         ui.strong(h);
                     }
@@ -782,6 +808,22 @@ impl App {
                             _ => {
                                 ui.label("—");
                             }
+                        }
+
+                        if let Some(id) = &r.router_id {
+                            if ui
+                                .button("⚙")
+                                .on_hover_text(
+                                    "Per-model overrides: pin context, KV cache type, extra \
+                                     llama-server flags. Stored in the app config; survives \
+                                     preset regeneration.",
+                                )
+                                .clicked()
+                            {
+                                pending = Some(RowAction::EditOverrides(id.clone()));
+                            }
+                        } else {
+                            ui.label("");
                         }
 
                         // Archive: pull a cache/Ollama-owned file into the
@@ -1170,7 +1212,130 @@ impl App {
             port,
             server_bin,
             ollama_port,
+            overrides: self.cfg.overrides.clone(),
         })
+    }
+
+    /// The per-model override dialog: pin context, KV type, extra flags.
+    /// Saved to config.json → preset regenerated → router reloaded, so it
+    /// takes effect on the model's next load. Changing flags makes the old
+    /// measurement stale by fingerprint — the next measure catches it.
+    fn override_dialog(&mut self, ctx: &egui::Context) {
+        let Some(ed) = &mut self.override_editor else {
+            return;
+        };
+        let mut save = false;
+        let mut clear = false;
+        let mut cancel = false;
+        let mut open = true;
+        egui::Window::new(format!("Overrides — {}", ed.id))
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::Grid::new("override-fields").num_columns(2).show(ui, |ui| {
+                    ui.label("Context (empty = --fit decides)");
+                    ui.text_edit_singleline(&mut ed.ctx_text);
+                    ui.end_row();
+                    ui.label("KV cache type (empty = q8_0 default)");
+                    ui.horizontal(|ui| {
+                        ui.text_edit_singleline(&mut ed.kv_text);
+                        ui.small("f16 | q8_0 | q4_0");
+                    });
+                    ui.end_row();
+                });
+                ui.label("Extra llama-server flags (key = value, one per line):");
+                ui.add(
+                    egui::TextEdit::multiline(&mut ed.extra_text)
+                        .desired_rows(3)
+                        .hint_text("fit-target = 2048\nmodel-draft = /path/draft.gguf")
+                        .desired_width(f32::INFINITY),
+                );
+                ui.small("Applied on the model's next load. Re-measure afterwards — changed flags make old numbers stale.");
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Clear overrides").clicked() {
+                        clear = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if !open || cancel {
+            self.override_editor = None;
+            return;
+        }
+        if !(save || clear) {
+            return;
+        }
+        let ed = self.override_editor.take().expect("checked above");
+        let result: Result<(), String> = (|| {
+            if clear {
+                self.cfg.overrides.remove(&ed.id);
+            } else {
+                let ctx_val = match ed.ctx_text.trim() {
+                    "" => None,
+                    t => Some(t.parse::<u64>().map_err(|_| format!("invalid context: {t:?}"))?),
+                };
+                let kv = match ed.kv_text.trim() {
+                    "" => None,
+                    t => Some(t.to_string()),
+                };
+                let mut extra = Vec::new();
+                for line in ed.extra_text.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let (k, v) = line
+                        .split_once('=')
+                        .ok_or_else(|| format!("not `key = value`: {line:?}"))?;
+                    extra.push((k.trim().to_string(), v.trim().to_string()));
+                }
+                let ov = router::ModelOverrides {
+                    cache_type_kv: kv,
+                    ctx: ctx_val,
+                    extra,
+                };
+                if ov == router::ModelOverrides::default() {
+                    self.cfg.overrides.remove(&ed.id);
+                } else {
+                    self.cfg.overrides.insert(ed.id.clone(), ov);
+                }
+            }
+            self.cfg
+                .save(&system::config_file())
+                .map_err(|e| format!("{e:#}"))?;
+            Ok(())
+        })();
+        match result {
+            Ok(()) => {
+                self.log(format!("{}: overrides saved", ed.id));
+                let cfg = self.cfg.clone();
+                self.spawn("applying overrides (preset + reload)", move |tx| {
+                    let _ = tx.send(match system::write_preset(&cfg, &[]) {
+                        Ok((_, n)) => {
+                            let reload_note = match router::reload(cfg.port) {
+                                Ok(_) => "router reloaded",
+                                Err(_) => "router not running (will apply on next start)",
+                            };
+                            Msg::Finished(format!(
+                                "preset regenerated ({n} models), {reload_note} — re-measure to refresh numbers"
+                            ))
+                        }
+                        Err(e) => Msg::Error(format!("apply overrides: {e:#}")),
+                    });
+                });
+            }
+            Err(e) => {
+                self.log(format!("ERROR: {e}"));
+                self.override_editor = Some(ed); // reopen with user's text intact
+            }
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {
@@ -1444,6 +1609,8 @@ impl eframe::App for App {
                 Pane::Settings => self.settings_pane(ui),
             }
         });
+
+        self.override_dialog(ui.ctx());
 
         if self.show_about {
             egui::Window::new("About")

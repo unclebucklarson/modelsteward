@@ -170,8 +170,24 @@ pub fn write_preset(
     extra_dirs: &[PathBuf],
 ) -> Result<(PathBuf, usize)> {
     let models = scan_models(cfg, extra_dirs);
-    let entries = router::default_entries(&models);
-    let ini = router::render_preset(&entries);
+    let mut entries = router::default_entries(&models);
+    // Apply the user's per-model overrides (stored in config.json so preset
+    // regeneration keeps them). Overrides keyed to ids that aren't preset
+    // aliases (cache models) become bare sections configuring those ids.
+    for (alias, _, ov) in &mut entries {
+        if let Some(user_ov) = cfg.overrides.get(alias) {
+            *ov = user_ov.clone();
+        }
+    }
+    let aliases: std::collections::HashSet<&str> =
+        entries.iter().map(|(a, _, _)| a.as_str()).collect();
+    let extra_sections: Vec<(String, router::ModelOverrides)> = cfg
+        .overrides
+        .iter()
+        .filter(|(id, _)| !aliases.contains(id.as_str()))
+        .map(|(id, ov)| (id.clone(), ov.clone()))
+        .collect();
+    let ini = router::render_preset(&entries, &extra_sections);
     std::fs::create_dir_all(config_dir())?;
     std::fs::write(preset_path(), &ini)?;
     Ok((preset_path(), entries.len()))

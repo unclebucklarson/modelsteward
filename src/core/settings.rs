@@ -2,6 +2,7 @@
 //! missing or partial config file never blocks startup — the file only
 //! records what the user changed.
 
+use crate::core::router::ModelOverrides;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,10 @@ pub struct AppConfig {
     pub server_bin: Option<PathBuf>,
     /// Where the Ollama peer answers.
     pub ollama_port: u16,
+    /// Per-model preset overrides, keyed by router id (preset alias or
+    /// cache id). Living HERE — not in router.ini — is what lets preset
+    /// regeneration keep the user's tuning instead of flattening it.
+    pub overrides: std::collections::BTreeMap<String, ModelOverrides>,
 }
 
 impl Default for AppConfig {
@@ -32,6 +37,7 @@ impl Default for AppConfig {
             port: 8080,
             server_bin: None,
             ollama_port: 11434,
+            overrides: Default::default(),
         }
     }
 }
