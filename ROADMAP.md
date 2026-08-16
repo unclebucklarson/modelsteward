@@ -71,8 +71,8 @@ The tabs now match how a user thinks:
    auto-reloads measurements.json on change.
 6. **Per-model override editor**: dialog for ctx, KV type, extra flags
    (later: device pinning) writing through preset + hot reload.
-7. **Model downloads**: paste a HuggingFace repo (`user/model:quant`);
-   llama-server `-hf` pulls into its cache, which the router already lists.
+7. ~~Model downloads~~ → moved to the modelwarden sibling project
+   (acquisition is storage-side; see boundary contract).
 8. **Log viewer + Tools menu**: tail router.log in-app; open preset/config.
 
 ## Smaller items (fold in opportunistically)
@@ -113,6 +113,14 @@ llama-bench integration: baseline pp/tg per model stored beside
 measurements; A/B any preset change with measured verdict; one-click
 speculative-decoding trial (`--spec-draft-model` + small draft model);
 results shown next to every recommendation.
+
+## Sibling project: modelwarden (`~/src2/modelwarden`)
+
+Inventory / backup / archival for model files lives in its own project —
+see its HANDOFF.md for mission, boundary contract, and harvest map.
+Boundary: **warden owns storage truth; this app owns serving + OpenCode.**
+Consequence here: roadmap item 7 (HF downloads) moves to modelwarden —
+acquisition is storage-side.
 
 ## Parked / ideas
 
