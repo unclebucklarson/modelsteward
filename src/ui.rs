@@ -912,7 +912,18 @@ impl App {
                         } else {
                             "—".into()
                         });
-                        ui.label(&r.quant);
+                        {
+                            let resp = ui.label(&r.quant);
+                            if let Some(h) = &r.quant_header_disagrees {
+                                resp.on_hover_text(format!(
+                                    "File name says {} but the file's own header stamps {h}. \
+                                     For dynamic quants (e.g. Unsloth UD) the filename is the \
+                                     truthful one — the header field can't express mixed \
+                                     per-layer types.",
+                                    r.quant
+                                ));
+                            }
+                        }
                         ui.label(
                             r.measured_ctx
                                 .map(|c| c.to_string())

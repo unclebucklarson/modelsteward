@@ -3,7 +3,7 @@
 //! This is what the Library tab renders — a model's whole story in one line.
 
 use crate::core::gguf::GgufMeta;
-use crate::core::library::{ModelFile, Source};
+use crate::core::library::{self as library, ModelFile, Source};
 use crate::core::router::{Measurements, RouterModel};
 use serde::Serialize;
 
@@ -30,6 +30,10 @@ pub struct Row {
     pub source: String,
     pub size_bytes: u64,
     pub quant: String,
+    /// Set when the filename and header disagree about the quant — the
+    /// column shows the filename's (more truthful for dynamic quants);
+    /// this holds the header's stamp for the tooltip.
+    pub quant_header_disagrees: Option<String>,
     pub train_ctx: Option<u64>,
     /// Measured settled context, when calibrated on this machine.
     pub measured_ctx: Option<u64>,
@@ -288,11 +292,19 @@ pub fn assemble(
                 Source::HfHub { .. } => "hf cache".into(),
             },
             size_bytes: m.file_size,
-            quant: m
-                .meta
-                .as_ref()
-                .and_then(|x| x.quantization.clone())
-                .unwrap_or_default(),
+            quant: {
+                let header = m.meta.as_ref().and_then(|x| x.quantization.clone());
+                library::quant_token_from_filename(&m.path)
+                    .or(header)
+                    .unwrap_or_default()
+            },
+            quant_header_disagrees: {
+                let header = m.meta.as_ref().and_then(|x| x.quantization.clone());
+                match (library::quant_token_from_filename(&m.path), header) {
+                    (Some(f), Some(h)) if f != h => Some(h),
+                    _ => None,
+                }
+            },
             train_ctx: m.meta.as_ref().and_then(|x| x.context_length),
             measured_ctx,
             failure,
@@ -332,6 +344,7 @@ pub fn assemble(
             router_id: Some(rm.id.clone()),
             path: None,
             archivable: false,
+            quant_header_disagrees: None,
             source: rm.source.clone().unwrap_or_else(|| "router".into()),
             size_bytes: 0,
             quant: String::new(),
@@ -524,6 +537,24 @@ mod tests {
         // Both carry the duplicate note.
         assert!(rows.iter().all(|r| r.advice.contains("stored twice")), "{:?}",
             rows.iter().map(|r| &r.advice).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn filename_quant_outranks_a_lying_header_stamp() {
+        // Real case: unsloth UD-Q5_K_XL stamped general.file_type=Q4_K_S
+        // while its tensors are predominantly q5_K/q6_K.
+        let mut m = file("Qwen3.8-27B-UD-Q5_K_XL.gguf", Source::Shelf, 20, true);
+        m.meta.as_mut().unwrap().quantization = Some("Q4_K_S".into());
+        let rows = assemble(&[m], &[], &Measurements::new(), &[], HW);
+        assert_eq!(rows[0].quant, "Q5_K_XL");
+        assert_eq!(rows[0].quant_header_disagrees.as_deref(), Some("Q4_K_S"));
+
+        // Agreement (or no filename token) → header value, no note.
+        let mut m2 = file("model-Q4_K_M.gguf", Source::Shelf, 10, true);
+        m2.meta.as_mut().unwrap().quantization = Some("Q4_K_M".into());
+        let rows = assemble(&[m2], &[], &Measurements::new(), &[], HW);
+        assert_eq!(rows[0].quant, "Q4_K_M");
+        assert!(rows[0].quant_header_disagrees.is_none());
     }
 
     #[test]

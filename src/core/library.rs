@@ -63,19 +63,27 @@ impl ModelFile {
         let Source::HfHub { repo } = &self.source else {
             return None;
         };
-        let stem = self.path.file_stem()?.to_string_lossy().to_uppercase();
-        // Filename like Qwen3.8-27B-UD-Q5_K_XL → tag Q5_K_XL: take the
-        // longest known quant token the stem ends with.
-        for tag in [
-            "Q8_0", "Q6_K", "Q5_K_XL", "Q5_K_M", "Q5_K_S", "Q4_K_XL", "Q4_K_M", "Q4_K_S",
-            "Q4_0", "Q3_K_M", "Q2_K", "IQ4_XS", "IQ4_NL", "BF16", "F16", "IT",
-        ] {
-            if stem.ends_with(tag) {
-                return Some(format!("{repo}:{tag}"));
-            }
-        }
-        None
+        let tag = quant_token_from_filename(&self.path)?;
+        Some(format!("{repo}:{tag}"))
     }
+}
+
+/// The quant token a filename ends with ("...-UD-Q5_K_XL.gguf" → "Q5_K_XL").
+/// Filenames are often MORE truthful than the header's `general.file_type`:
+/// dynamic quants (Unsloth UD) mix per-layer types and stamp a misleading
+/// single enum — verified live: a UD-Q5_K_XL stamped Q4_K_S while its
+/// tensors were predominantly q5_K/q6_K.
+pub fn quant_token_from_filename(path: &Path) -> Option<String> {
+    let stem = path.file_stem()?.to_string_lossy().to_uppercase();
+    for tag in [
+        "Q8_0", "Q6_K", "Q5_K_XL", "Q5_K_M", "Q5_K_S", "Q4_K_XL", "Q4_K_M", "Q4_K_S",
+        "Q4_0", "Q3_K_M", "Q2_K", "IQ4_XS", "IQ4_NL", "BF16", "F16", "IT",
+    ] {
+        if stem.ends_with(tag) {
+            return Some(tag.to_string());
+        }
+    }
+    None
 }
 
 /// Ollama store locations worth probing, most specific first: the
