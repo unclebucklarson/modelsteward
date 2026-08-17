@@ -69,7 +69,7 @@ pub fn router_config(cfg: &settings::AppConfig) -> router::RouterConfig {
         server_bin: pick_server(cfg).unwrap_or_else(|_| PathBuf::from("llama-server")),
         port: cfg.port,
         preset_path: preset_path(),
-        models_max: 1,
+        models_max: cfg.models_max.max(1),
     }
 }
 

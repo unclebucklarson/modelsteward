@@ -20,6 +20,10 @@ pub struct AppConfig {
     pub server_bin: Option<PathBuf>,
     /// Where the Ollama peer answers.
     pub ollama_port: u16,
+    /// Router `--models-max`: how many models may be loaded at once.
+    /// 1 fits one big model on a 24GB-class card; raise it to keep a small
+    /// sidecar model (notes, embeddings) resident next to the big coder.
+    pub models_max: u32,
     /// Per-model preset overrides, keyed by router id (preset alias or
     /// cache id). Living HERE — not in router.ini — is what lets preset
     /// regeneration keep the user's tuning instead of flattening it.
@@ -37,6 +41,7 @@ impl Default for AppConfig {
             port: 8080,
             server_bin: None,
             ollama_port: 11434,
+            models_max: 1,
             overrides: Default::default(),
         }
     }
@@ -73,6 +78,7 @@ mod tests {
         let cfg = AppConfig::load(&path);
         assert_eq!(cfg.port, 9090);
         assert_eq!(cfg.ollama_port, 11434);
+        assert_eq!(cfg.models_max, 1, "partial files keep the models_max default");
         assert!(cfg.server_bin.is_none());
 
         // Full roundtrip.

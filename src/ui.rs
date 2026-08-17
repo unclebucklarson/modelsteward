@@ -88,6 +88,7 @@ struct App {
     edit_port: String,
     edit_server_bin: String,
     edit_ollama_port: String,
+    edit_models_max: String,
 
     activity: Vec<String>,
     busy: Option<String>,
@@ -141,6 +142,7 @@ impl App {
             edit_port: String::new(),
             edit_server_bin: String::new(),
             edit_ollama_port: String::new(),
+            edit_models_max: String::new(),
             activity: Vec::new(),
             busy: None,
             show_about: false,
@@ -174,6 +176,7 @@ impl App {
             .map(|p| p.display().to_string())
             .unwrap_or_default();
         self.edit_ollama_port = self.cfg.ollama_port.to_string();
+        self.edit_models_max = self.cfg.models_max.to_string();
     }
 
     fn log(&mut self, line: impl Into<String>) {
@@ -1353,6 +1356,16 @@ impl App {
                 .desired_rows(3)
                 .desired_width(f32::INFINITY),
         );
+        if ui.button("📁 Add directory…").clicked()
+            && let Some(dir) = rfd::FileDialog::new()
+                .set_title("Add a model scan directory")
+                .pick_folder()
+        {
+            if !self.edit_scan_dirs.trim().is_empty() {
+                self.edit_scan_dirs.push('\n');
+            }
+            self.edit_scan_dirs.push_str(&dir.display().to_string());
+        }
         ui.add_space(6.0);
 
         egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
@@ -1362,15 +1375,66 @@ impl App {
             ui.label("llama-server binary");
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut self.edit_server_bin);
+                if ui.button("Browse…").clicked()
+                    && let Some(file) = rfd::FileDialog::new()
+                        .set_title("Choose the llama-server binary")
+                        .pick_file()
+                {
+                    self.edit_server_bin = file.display().to_string();
+                }
                 ui.small("empty = auto-pick");
+            });
+            ui.end_row();
+            ui.label("Max loaded models");
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.edit_models_max);
+                ui.small("1 = one big model; raise to keep a small sidecar model resident too");
             });
             ui.end_row();
             ui.label("Ollama port");
             ui.text_edit_singleline(&mut self.edit_ollama_port);
             ui.end_row();
         });
+
+        // Detected installs: autodiscovery meets manual pointing — one
+        // click adopts a found binary instead of typing its path.
+        if let Some(scan) = &self.scan
+            && !scan.installs.is_empty()
+        {
+            ui.add_space(4.0);
+            ui.strong("Detected llama-server installs");
+            let installs = scan.installs.clone();
+            for inst in &installs {
+                ui.horizontal(|ui| {
+                    if ui.button("Use").clicked() {
+                        self.edit_server_bin = inst.server_path.display().to_string();
+                    }
+                    let build = inst
+                        .build
+                        .map(|b| format!("b{b}"))
+                        .unwrap_or_else(|| "?".into());
+                    let backends = if inst.backends.is_empty() {
+                        String::new()
+                    } else {
+                        // cpu-<arch> variants are noise at a glance.
+                        let mut names: Vec<&str> = inst
+                            .backends
+                            .iter()
+                            .map(String::as_str)
+                            .filter(|b| !b.starts_with("cpu-"))
+                            .collect();
+                        names.dedup();
+                        format!(" [{}]", names.join(", "))
+                    };
+                    ui.label(format!("{build}{backends} — {}", inst.server_path.display()));
+                });
+            }
+        }
         if let Ok(picked) = system::pick_server(&self.cfg) {
-            ui.small(format!("currently using: {}", picked.display()));
+            let build = discover::build_of(&picked)
+                .map(|b| format!(" (b{b})"))
+                .unwrap_or_default();
+            ui.small(format!("currently using: {}{build}", picked.display()));
         }
         ui.add_space(8.0);
 
@@ -1379,6 +1443,9 @@ impl App {
                 match self.parse_edit_buffers() {
                     Ok(new_cfg) => {
                         let port_changed = new_cfg.port != self.cfg.port;
+                        let router_changed = port_changed
+                            || new_cfg.server_bin != self.cfg.server_bin
+                            || new_cfg.models_max != self.cfg.models_max;
                         self.cfg = new_cfg;
                         match self.cfg.save(&system::config_file()) {
                             Ok(()) => {
@@ -1386,6 +1453,11 @@ impl App {
                                 if port_changed {
                                     self.log(
                                         "port changed — regenerate preset + sync so opencode.json's baseURL follows",
+                                    );
+                                }
+                                if router_changed {
+                                    self.log(
+                                        "router settings changed — Stop + Start the router to apply",
                                     );
                                 }
                                 self.spawn_scan();
@@ -1413,6 +1485,13 @@ impl App {
             .trim()
             .parse()
             .map_err(|_| format!("invalid ollama port: {:?}", self.edit_ollama_port))?;
+        let models_max: u32 = self
+            .edit_models_max
+            .trim()
+            .parse()
+            .ok()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| format!("max loaded models must be ≥ 1: {:?}", self.edit_models_max))?;
         let scan_dirs: Vec<PathBuf> = self
             .edit_scan_dirs
             .lines()
@@ -1435,6 +1514,7 @@ impl App {
             port,
             server_bin,
             ollama_port,
+            models_max,
             overrides: self.cfg.overrides.clone(),
         })
     }
