@@ -89,6 +89,11 @@ The tabs now match how a user thinks:
 - GUI should reload measurements.json when it changes on disk (stale
   OpenCode tab after CLI calibration) and show display-name + alias
   consistently across panes (found by user).
+- **Migrate measurements on archive**: archiving a cache model gives it a
+  new preset alias, so its old measurement (keyed by the cache id) shows
+  on a leftover router-only row while the shelf row reads "not measured".
+  Copy n_ctx/tool_call to the new alias (fingerprints cleared → re-measures
+  next calibrate) and consider suppressing the stale cache-id row.
 
 - Numbered backups (cap ~5) or "Undo last config change" (.bak swap).
 - **Measured-ctx variance policy**: settled ctx varies a few percent with
