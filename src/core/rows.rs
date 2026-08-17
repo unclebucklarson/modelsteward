@@ -3,7 +3,7 @@
 //! This is what the Library tab renders — a model's whole story in one line.
 
 use crate::core::gguf::GgufMeta;
-use crate::core::library::{self, ModelFile, Source};
+use crate::core::library::{ModelFile, Source};
 use crate::core::router::{Measurements, RouterModel};
 use serde::Serialize;
 
@@ -152,13 +152,26 @@ fn advice_for(
     }
 }
 
-/// Predict the router id for a library file: preset alias normally, cache
-/// id for HF-hub files.
-fn predicted_router_id(m: &ModelFile) -> Option<String> {
-    match &m.source {
-        Source::HfHub { .. } => m.router_cache_id(),
-        _ => m.meta.is_some().then(|| library::alias_suggestion(m)),
+/// Router ids for library files, computed with the SAME logic the preset
+/// generator uses — including duplicate-alias suffixing ("-2"). Predicting
+/// aliases independently glued two same-named files onto one router entry
+/// while the real "-2" entry showed as a phantom row (user-found).
+fn router_ids_by_path(
+    models: &[ModelFile],
+) -> std::collections::HashMap<std::path::PathBuf, String> {
+    let mut out: std::collections::HashMap<std::path::PathBuf, String> =
+        crate::core::router::default_entries(models)
+            .into_iter()
+            .map(|(alias, m, _)| (m.path.clone(), alias))
+            .collect();
+    for m in models {
+        if let Source::HfHub { .. } = &m.source
+            && let Some(id) = m.router_cache_id()
+        {
+            out.insert(m.path.clone(), id);
+        }
     }
+    out
 }
 
 pub fn assemble(
@@ -174,17 +187,32 @@ pub fn assemble(
     // one model). Exact id matches claim first; the unique-repo fallback
     // runs ONLY for files whose tag we couldn't predict at all, and only
     // onto still-unclaimed entries.
+    let ids_by_path = router_ids_by_path(models);
     let mut used_router_ids: std::collections::HashSet<String> = models
         .iter()
         .filter_map(|m| {
-            let id = predicted_router_id(m)?;
-            router_models.iter().any(|rm| rm.id == id).then_some(id)
+            let id = ids_by_path.get(&m.path)?;
+            router_models
+                .iter()
+                .any(|rm| &rm.id == id)
+                .then(|| id.clone())
         })
         .collect();
+    // Same file name + same size in two places = almost certainly the same
+    // bytes stored twice; say so instead of leaving the user to infer it.
+    let mut name_size_counts: std::collections::HashMap<(String, u64), u32> =
+        std::collections::HashMap::new();
+    for m in models {
+        if let Some(name) = m.path.file_name() {
+            *name_size_counts
+                .entry((name.to_string_lossy().into_owned(), m.file_size))
+                .or_default() += 1;
+        }
+    }
     let mut rows: Vec<Row> = Vec::new();
 
     for m in models {
-        let mut router_id = predicted_router_id(m);
+        let mut router_id = ids_by_path.get(&m.path).cloned();
         let mut server_status = None;
         if let Some(id) = &router_id {
             if let Some(rm) = router_models.iter().find(|rm| &rm.id == id) {
@@ -229,6 +257,22 @@ pub fn assemble(
                 failure.as_deref(),
                 hw,
             )
+        };
+        let is_dup = m
+            .path
+            .file_name()
+            .map(|n| {
+                name_size_counts
+                    .get(&(n.to_string_lossy().into_owned(), m.file_size))
+                    .copied()
+                    .unwrap_or(0)
+                    > 1
+            })
+            .unwrap_or(false);
+        let advice = if is_dup {
+            format!("{advice}; note: another copy with the same name + size exists — likely the same model stored twice")
+        } else {
+            advice
         };
         rows.push(Row {
             display: m.display_name(),
@@ -446,6 +490,40 @@ mod tests {
         );
         assert!(q4.server_status.is_none(), "not offered ≠ offered");
         assert!(q4.advice.contains("doesn't currently offer"), "{}", q4.advice);
+    }
+
+    #[test]
+    fn same_named_files_get_the_preset_suffix_not_a_shared_identity() {
+        // Two files with identical stems (user's manual download + archived
+        // copy). The preset generator aliases them base and base-2; rows
+        // must map one file to each — never both onto base with a phantom
+        // "-2" row left over.
+        let models = vec![
+            file("Qwen3.8-27B-UD-Q4_K_XL.gguf", Source::Shelf, 18, true),
+            {
+                let mut f2 = file("Qwen3.8-27B-UD-Q4_K_XL.gguf", Source::Shelf, 18, true);
+                f2.path = std::path::PathBuf::from("/other/Qwen3.8-27B-UD-Q4_K_XL.gguf");
+                f2
+            },
+        ];
+        let routers = vec![
+            rm("qwen3.8-27b-ud-q4_k_xl", "loaded", "preset"),
+            rm("qwen3.8-27b-ud-q4_k_xl-2", "unloaded", "preset"),
+        ];
+        let rows = assemble(&models, &routers, &Measurements::new(), &[], HW);
+        assert_eq!(rows.len(), 2, "no phantom router-only row");
+        let ids: Vec<_> = rows.iter().filter_map(|r| r.router_id.clone()).collect();
+        assert!(ids.contains(&"qwen3.8-27b-ud-q4_k_xl".to_string()));
+        assert!(ids.contains(&"qwen3.8-27b-ud-q4_k_xl-2".to_string()));
+        // Statuses map per file, not shared.
+        let loaded: Vec<_> = rows
+            .iter()
+            .filter(|r| r.server_status.as_deref() == Some("loaded"))
+            .collect();
+        assert_eq!(loaded.len(), 1);
+        // Both carry the duplicate note.
+        assert!(rows.iter().all(|r| r.advice.contains("stored twice")), "{:?}",
+            rows.iter().map(|r| &r.advice).collect::<Vec<_>>());
     }
 
     #[test]

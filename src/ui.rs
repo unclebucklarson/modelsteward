@@ -890,7 +890,23 @@ impl App {
                                 .map(|id| format!("served as: {id}"))
                                 .unwrap_or_else(|| "no servable identity".into()),
                         );
-                        ui.label(&r.source);
+                        ui.label(&r.source).on_hover_text(match r.source.as_str() {
+                            "shelf" => {
+                                "Your shelf: locally stored, manually managed models — the \
+                                 directories from Settings → scan dirs. No other tool touches \
+                                 or expires these; '→ shelf' archives a copy here."
+                            }
+                            "ollama" => {
+                                "Inside Ollama's blob store — managed by Ollama; `ollama rm` \
+                                 deletes it. llama.cpp serves it directly, no copy."
+                            }
+                            "hf cache" => {
+                                "HuggingFace download cache — managed by whichever tool \
+                                 downloaded it; revisions shift and caches get pruned. \
+                                 Archive to shelf to own it."
+                            }
+                            _ => "Offered by the running router (no scanned file matched).",
+                        });
                         ui.label(if r.size_bytes > 0 {
                             format!("{:.1} GB", r.size_bytes as f64 / 1e9)
                         } else {

@@ -69,6 +69,12 @@ The unit runs llama-server with the app's preset file, which is also the
 ownership handshake: the app recognizes that process as its own (Stop works
 on it), while any other llama-server stays strictly observe-only.
 
+## Glossary
+
+- **shelf** — your own model directories (`~/models` plus whatever you add
+  in Settings): locally stored, manually managed, touched by no other tool.
+  The Library's "→ shelf" button archives a cache/Ollama model here.
+
 ## Design rules (short version)
 
 - llama.cpp does the hard parts (router mode, `--fit` memory auto-sizing,
