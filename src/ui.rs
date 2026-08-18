@@ -51,7 +51,7 @@ enum Msg {
 enum Pane {
     Library,
     Server,
-    OpenCode,
+    Connections,
     Settings,
 }
 
@@ -1224,9 +1224,100 @@ impl App {
         }
     }
 
-    // ─── OpenCode ────────────────────────────────────────────────────────
+    // ─── Connections ─────────────────────────────────────────────────────
+    //
+    // The router speaks the standard OpenAI-compatible API — ANY app can
+    // connect. OpenCode is the first-class connector (config synced for
+    // it); the generic section serves every other app: base URL, the
+    // measured model list, and copy-paste snippets.
 
-    fn opencode_pane(&mut self, ui: &mut egui::Ui) {
+    fn connections_pane(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Any app (OpenAI-compatible API)");
+        let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
+        ui.horizontal(|ui| {
+            ui.label("Base URL:");
+            ui.monospace(&base_url);
+            if ui.small_button("copy").clicked() {
+                ui.ctx().copy_text(base_url.clone());
+                self.log("base URL copied");
+            }
+        });
+        ui.small(
+            "Point any OpenAI-compatible client here (API key: anything, it's ignored).              Use a model id below; the router loads it on first request.",
+        );
+        let measured: Vec<(String, u64, Option<bool>)> = self
+            .measurements
+            .iter()
+            .filter_map(|(id, m)| m.n_ctx.map(|c| (id.clone(), c, m.tool_call)))
+            .collect();
+        ui.horizontal(|ui| {
+            if ui
+                .button("Copy curl example")
+                .on_hover_text("A working chat request against your router")
+                .clicked()
+            {
+                let model = measured
+                    .first()
+                    .map(|(id, _, _)| id.as_str())
+                    .unwrap_or("<model-id>");
+                ui.ctx().copy_text(format!(
+                    "curl {base_url}/chat/completions -H 'Content-Type: application/json' -d '{{\n  \"model\": \"{model}\",\n  \"messages\": [{{\"role\": \"user\", \"content\": \"Hello!\"}}]\n}}'"
+                ));
+                self.log("curl example copied");
+            }
+            if ui
+                .button("Copy Python (openai sdk)")
+                .on_hover_text("Client setup for any Python app")
+                .clicked()
+            {
+                let model = measured
+                    .first()
+                    .map(|(id, _, _)| id.as_str())
+                    .unwrap_or("<model-id>");
+                ui.ctx().copy_text(format!(
+                    "from openai import OpenAI\n\nclient = OpenAI(base_url=\"{base_url}\", api_key=\"local\")\nreply = client.chat.completions.create(\n    model=\"{model}\",\n    messages=[{{\"role\": \"user\", \"content\": \"Hello!\"}}],\n)\nprint(reply.choices[0].message.content)"
+                ));
+                self.log("python snippet copied");
+            }
+            if ui
+                .button("Copy models JSON")
+                .on_hover_text(
+                    "Machine-readable list of measured models with safe context limits —                      feed this to your own app's config",
+                )
+                .clicked()
+            {
+                let list: Vec<serde_json::Value> = measured
+                    .iter()
+                    .map(|(id, ctx, tools)| {
+                        let safe = opencode::safety_context(*ctx);
+                        serde_json::json!({
+                            "id": id,
+                            "context": safe,
+                            "output": safe.div_euclid(2).min(32_768),
+                            "tool_call": tools,
+                        })
+                    })
+                    .collect();
+                ui.ctx().copy_text(
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "base_url": base_url,
+                        "models": list,
+                    }))
+                    .unwrap_or_default(),
+                );
+                self.log("models JSON copied");
+            }
+        });
+        if measured.is_empty() {
+            ui.small("No measured models yet — Load one on the Library tab first.");
+        }
+        ui.add_space(8.0);
+        ui.separator();
+        ui.strong("OpenCode (synced connector)");
+        self.opencode_section(ui);
+    }
+
+    fn opencode_section(&mut self, ui: &mut egui::Ui) {
         ui.label(format!(
             "Config: {}",
             opencode::default_config_path().display()
@@ -2130,14 +2221,14 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.pane, Pane::Library, "📚 Library");
                 ui.selectable_value(&mut self.pane, Pane::Server, "🖥 Server");
-                ui.selectable_value(&mut self.pane, Pane::OpenCode, "⚙ OpenCode");
+                ui.selectable_value(&mut self.pane, Pane::Connections, "🔌 Connections");
                 ui.selectable_value(&mut self.pane, Pane::Settings, "🔧 Settings");
             });
             ui.separator();
             match self.pane {
                 Pane::Library => self.library_pane(ui),
                 Pane::Server => self.server_pane(ui),
-                Pane::OpenCode => self.opencode_pane(ui),
+                Pane::Connections => self.connections_pane(ui),
                 Pane::Settings => self.settings_pane(ui),
             }
         });

@@ -147,6 +147,17 @@ call out near-misses (GPU present, toolchain missing → suggest Vulkan).
   serves) for build-log diagnosis and tradeoff explanations — picks from
   the rules engine's flag allowlist, never invents flags.
 
+## Connections (server-manager pivot) — phase 1 DONE 2026-08-17
+
+User direction: this is a llama.cpp server manager for ANY local-AI app
+(note-taking app next), not OpenCode-only. OpenCode tab → **Connections**:
+OpenCode stays the first-class synced connector; new generic panel gives
+any OpenAI-compatible app the base URL, measured model list, and copy-
+paste snippets (curl / Python SDK / models-JSON with safe limits).
+`models_max` setting already landed for multi-app residency. Remaining:
+per-app connectors when a second app has a real config file to sync;
+multi-app VRAM residency guidance.
+
 ## M6.5 — Feature-aware serving (discussed 2026-08-17)
 
 Load every model with the options its features deserve. Detection is
