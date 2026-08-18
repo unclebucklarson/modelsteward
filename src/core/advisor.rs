@@ -44,6 +44,10 @@ pub struct BuildCheck {
     /// AMD GPU target from rocminfo, e.g. "gfx1100".
     pub rocm_gfx: Option<String>,
     pub cmake: bool,
+    /// NVIDIA driver persistence mode: Some(false) = off, which adds
+    /// driver-init latency to every model load. None = not an NVIDIA box
+    /// or nvidia-smi absent.
+    pub persistence_mode: Option<bool>,
     /// Models whose stored failure looks like "needs a newer build".
     pub locked_models: Vec<String>,
 }
@@ -69,6 +73,15 @@ pub fn parse_build_tag(tag: &str) -> Option<u64> {
         .next()?
         .parse()
         .ok()
+}
+
+/// nvidia-smi persistence_mode line → Some(enabled). Pure for testing.
+pub fn parse_persistence_mode(s: &str) -> Option<bool> {
+    match s.lines().next()?.trim() {
+        "Enabled" => Some(true),
+        "Disabled" => Some(false),
+        _ => None,
+    }
 }
 
 /// nvidia-smi compute_cap "8.6" → cmake arch "86". Pure for testing.
@@ -196,6 +209,12 @@ pub fn check(
         }),
         rocm_gfx: run("rocminfo", &[]).as_deref().and_then(parse_gfx_target),
         cmake: run("cmake", &["--version"]).is_some(),
+        persistence_mode: run(
+            "nvidia-smi",
+            &["--query-gpu=persistence_mode", "--format=csv,noheader"],
+        )
+        .as_deref()
+        .and_then(parse_persistence_mode),
         current_build,
         server_bin: server_bin.clone(),
         ..Default::default()
@@ -346,6 +365,15 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
                 "Install ROCm for the native AMD backend — or build Vulkan instead.".into(),
             ));
         }
+    }
+    if c.persistence_mode == Some(false) {
+        out.push((
+            "GPU persistence mode is off".into(),
+            "The driver re-initializes on every model load, adding latency. Enable once \
+             with: sudo nvidia-smi -pm 1 (resets on reboot; a udev rule or service makes \
+             it stick)."
+                .into(),
+        ));
     }
     if c.dirty == Some(true) {
         out.push((
@@ -597,6 +625,13 @@ mod tests {
             default_backends(&c),
             BackendSelection { cuda: false, vulkan: false, hip: true }
         );
+    }
+
+    #[test]
+    fn parses_persistence_mode() {
+        assert_eq!(parse_persistence_mode("Enabled\n"), Some(true));
+        assert_eq!(parse_persistence_mode("Disabled"), Some(false));
+        assert_eq!(parse_persistence_mode("garbage"), None);
     }
 
     #[test]

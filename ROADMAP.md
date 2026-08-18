@@ -185,12 +185,37 @@ quantized KV, belong in the Advisor's advanced section someday.)
    for the 27Bs), MTP self-speculation when upstream lands the flag —
    each as try → measured verdict → keep/discard.
 
+## Optimization tiers (discussed with user, 2026-08-17 night session)
+
+**Tier A — shipped as defaults:** `cache-reuse = 256` (mid-prompt KV reuse:
+the biggest agent prefill win — edits in the middle of a resent prompt no
+longer reprocess everything after them) and `cache-ram = 24576` in the
+preset `[*]`; Build Advisor now flags GPU persistence mode off (driver
+re-init latency on every load; `sudo nvidia-smi -pm 1`).
+
+**Tier B — measured-trial menu (feeds M7):** speculative decoding with a
+same-family draft model (Qwen3.5-4B drafting the 27Bs — tokenizer
+compatibility is itself a measurement); `-ub` physical batch 512→1024/2048
+(prefill speed vs a small VRAM/context cost); asymmetric KV quant
+(ctk q8_0 + ctv q4_0) for more context, quality-checked; **MoE-aware
+offload** (`--cpu-moe` / `-ot 'exps=CPU'`) — advise automatically when a
+detected MoE model exceeds VRAM: attention on GPU, expert weights in RAM.
+
+**Tier C — niche/delightful:** slot persistence (`--slot-save-path` +
+save/restore API) so a router restart doesn't cost a full agent-session
+reprocess; LAN serving (`--host 0.0.0.0` + `--api-key`) as Connections
+phase 2 with a proper security warning.
+
+Deliberately rejected: `--context-shift` (silent truncation is
+anti-honesty; OpenCode compacts properly), sampling tuning (client's job),
+blanket `--mlock`.
+
 ## M7 — Performance lab
 
 llama-bench integration: baseline pp/tg per model stored beside
 measurements; A/B any preset change with measured verdict; one-click
 speculative-decoding trial (`--spec-draft-model` + small draft model);
-results shown next to every recommendation.
+results shown next to every recommendation. Trial menu: see Tier B above.
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 

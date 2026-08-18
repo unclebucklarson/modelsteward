@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<!-- saved from url=(0253)https://431d09c7-c39f-4cbd-bc70-82f75cb0566a.frame.claudeusercontent.com/_f/1787021239-211e/?__frame_t=ua0lDatVhInFYPM-ek_lo9d3.5a5c2c4e-96ca-48f6-a625-65fe18946e9b.4ff0f898-dfb3-4b9c-b7b4-20d2e41fea53.1787025036&__frame_v=manifest.adf4d434a4a8615f.json -->
+<html><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8"><!-- frame-runtime --><!--<base href="/_f/1787021239-211e/">--><base href="."><script>window.__FRAME_PREAMBLE={"capabilities":{"artifact":"artifact.BWD0CGLd.js","assets":"assets.BkxVItX2.js","comments":"comments.CqCXYViZ.js","db":"db.5PgiKS-2.js","downloads":"downloads.C3GSvEDP.js","mcp":"mcp.D3B2EyQu.js","permissions":"permissions.BNySkLV5.js","room":"room.BgXZkiYR.js","sample":"sample.B5DdHYz7.js","self":"artifact.BWD0CGLd.js","user":"user.BpKav-Rf.js"},"transforms":"_transforms.BI3gXbbT.js","comments":"_comments.DOfpa5nr.js","translate":"_translate.5HCW4BJh.js"}</script><script>(function(){"use strict";var ce=["light","dark","system"],ue=/^[A-Za-z0-9_-]{1,64}$/,V=/^[a-zA-Z_:][a-zA-Z0-9_:.-]{0,127}$/,fe=new Set(["class","hidden","value","checked"]);function de(e){const t=e.toLowerCase();return t.startsWith("data-")||t.startsWith("aria-")||fe.has(t)}var pe="http://www.w3.org/1999/xhtml",me="http://www.w3.org/2000/svg",ge=new Set(["script","style","iframe","noscript","noframes","noembed","xmp","plaintext","template","title","textarea","object","embed"]),_e=new Set(["script","style"]);function ve(e){const t=e.localName.toLowerCase();return e.namespaceURI===pe?!ge.has(t):e.namespaceURI===me?!_e.has(t):!1}function he(e){if(e===null||typeof e!="object")return!1;const t=e.__frame_patch;if(t===null||typeof t!="object")return!1;const{seq:n,elements:a}=t;if(typeof n!="number"||!Number.isSafeInteger(n)||!Array.isArray(a)||a.length===0||a.length>64)return!1;for(const i of a){if(i===null||typeof i!="object")return!1;const r=i;if(typeof r.target!="string"||!ue.test(r.target)||r.text!==void 0&&typeof r.text!="string")return!1;if(r.attrsSet!==void 0){if(r.attrsSet===null||typeof r.attrsSet!="object")return!1;for(const[l,c]of Object.entries(r.attrsSet))if(!V.test(l)||typeof c!="string")return!1}if(r.attrsRemoved!==void 0){if(!Array.isArray(r.attrsRemoved))return!1;for(const l of r.attrsRemoved)if(typeof l!="string"||!V.test(l))return!1}}return!0}function ye(e){if(e===null||typeof e!="object")return!1;const t=e.__frame_init;return t!==null&&typeof t=="object"}function be(e){return e!==null&&typeof e=="object"&&e.__frame_size_poke===!0}function Ee(e){if(e===null||typeof e!="object")return!1;const t=e.__frame_theme;if(t===null||typeof t!="object")return!1;const n=t.theme;return typeof n=="string"&&ce.includes(n)}function we(e){try{typeof reportError=="function"?reportError(e):setTimeout(()=>{throw e},0)}catch{}}var X=["#62744c","#b04e72","#5b7596","#a3651f","#7a6ba8","#3f7a75"];function J(e){let t=0;for(let n=0;n<e.length;n++)t=t*31+e.charCodeAt(n)>>>0;return X[t%X.length]??"#788c5d"}var Z="#c7c9d1",Ae=["data:image","/svg+xml,"].join("");function Q(e){return Ae+"%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 2 2'%3E%3Ccircle cx='1' cy='1' r='1' fill='"+encodeURIComponent(e)+"'/%3E%3C/svg%3E"}var Se=Object.freeze({id:null,name:"",avatarUrl:Q(Z),color:Z,email:null,isOwner:!1,canEdit:!1});function je(...e){const t=e[0],n=typeof t=="string"?[t]:Array.isArray(t)?t.filter(i=>typeof i=="string"):[],a=Object.create(null);for(const i of n)a[i]={id:i,name:"",avatarUrl:Q(J(i)),color:J(i),email:null,isMe:!1};return a}var ee=Object.freeze(Object.assign(Object.create(null),{user:Object.freeze(Object.assign(Object.create(null),{id:null,isOwner:!1,canEdit:!1,me:Se,profiles:je,name:"",avatarUrl:null,search:Object.freeze([]),email:null}))})),Re={sample:"sample"};function te(){const e=new Uint8Array(20);try{crypto.getRandomValues(e)}catch{for(let n=0;n<e.length;n++)e[n]=Math.floor(Math.random()*256)}let t="";for(const n of e)t+=(n%36).toString(36);return t}function Oe(e,t){const n=r=>{const l={path:r},c=r.split("/");return{id:c[c.length-1],path:r,get:()=>t("get",[l]),set:d=>t("set",[l,d]),update:d=>t("update",[l,d]),delete:()=>t("delete",[l]),acquire:d=>t("acquire",[l,d]),onSnapshot:(d,E)=>t("subscribe",[l,d,E]),collection:d=>i(r+"/"+String(d))}},a=r=>({where:(l,c,d)=>a({...r,where:[...r.where??[],{f:String(l),op:String(c),v:d}]}),orderBy:(l,c)=>a({...r,orderBy:{f:String(l),dir:c===void 0?"asc":String(c)}}),limit:l=>a({...r,limit:Number(l)}),get:()=>t("query",[r]),onSnapshot:(l,c)=>t("subscribe",[r,l,c])}),i=r=>({...a({collection:r}),path:r,doc:l=>n(r+"/"+(l===void 0?te():String(l))),add:l=>{const c=n(r+"/"+te());return Promise.resolve(c.set(l)).then(()=>c)}});e.doc=r=>n(String(r)),e.collection=r=>i(String(r))}var Pe=Object.freeze([]);function Te(e,t){let n=null,a=null;const i=()=>e.__settled;e.peers=()=>Pe,e.connected=()=>!1,e.emit=()=>i()?.()??Promise.resolve(),e.presence=r=>{const l=i();if(l)return l();let c=null;if(r!==null&&typeof r=="object")try{Array.isArray(r)||(c={...r})}catch{}return c===null?Promise.reject({code:"invalid_argument",message:"presence takes an object"}):(n===null&&(n=Object.create(null),a=Promise.resolve(t("presence",[n]))),Object.assign(n,c),a)}}var B="__frame_scroll",Me=150,Le=310,ke=160,Ce=3e4;function Ne(){let e=0,t=!1,n=!1,a=!1,i=0,r=null;const l=u=>{try{sessionStorage.setItem(B,JSON.stringify({y:u}))}catch{}},c=()=>{if(clearTimeout(e),r===null)return;const u=r;r=null,l(u)},d=()=>{if(t){t=!1;return}n=!0,r=scrollY,clearTimeout(e),e=setTimeout(c,Me)};try{addEventListener("scroll",d,{passive:!0}),addEventListener("pagehide",c)}catch{}const E=()=>{let u;try{u=sessionStorage.getItem(B)}catch{return null}if(u===null)return null;let g;try{g=JSON.parse(u)}catch{g=null}const f=g?.y;if(!(typeof f=="number"&&Number.isFinite(f)&&f>=0)){try{sessionStorage.removeItem(B)}catch{}return null}return f};let T=!1;const h=u=>{try{const g=scrollY;scrollTo({top:u,left:0,behavior:"instant"}),i=u,a=!0,clearTimeout(e),r=null,l(u);const f=scrollY;f!==g&&(t=!0),f!==u&&!T&&(T=!0,addEventListener("load",()=>{try{if(scrollY===f){const p=E();h(p!==null?p:i)}}catch{}},{once:!0}))}catch{}},R=()=>{try{return!!location.hash}catch{return!0}};let A=!1;const O=()=>{try{if(A||innerWidth>Le||innerHeight>ke)return;A=!0;const u=Date.now(),g=()=>{try{removeEventListener("resize",g)}catch{}if(Date.now()-u>Ce||n||R())return;const f=E();h(f!==null?f:i)};addEventListener("resize",g)}catch{}};let M=!1,o=!1;return{restore(){if(M||(M=!0,R()))return;const u=E();u!==null&&(h(u),O())},promoted(){if(o||(o=!0,R()))return;const u=E();u!==null?(h(u),O()):a&&h(i)}}}var Ye="modulepreload",We=function(e){return"/"+e},Ke={},Ue=function(t,n,a){let i=Promise.resolve();function r(l){const c=new Event("vite:preloadError",{cancelable:!0});if(c.payload=l,window.dispatchEvent(c),!c.defaultPrevented)throw l}return i.then(l=>{for(const c of l||[])c.status==="rejected"&&r(c.reason);return t().catch(r)})};(function(){const e=Object.defineProperty,t=globalThis,n=["RTCPeerConnection","webkitRTCPeerConnection","RTCDataChannel","RTCIceCandidate","RTCSessionDescription","RTCRtpSender","RTCRtpReceiver"];let a=0;for(let i=0;i<n.length;i++){const r=n[i];try{e(t,r,{value:void 0,writable:!1,configurable:!1})}catch{try{delete t[r]}catch{}try{e(t,r,{value:void 0,writable:!1,configurable:!0})}catch{}}typeof t[r]=="function"&&a++}if(a&&window!==top)try{parent.postMessage({__frame_rtc_lockdown_failed:a},"*")}catch{}})();var qe=1e4,Ie=Object.freeze([...window.__FRAME_PREAMBLE?.origins??["https://claude.ai","https://preview.claude.ai"]]);function re(e){for(const t of Ie)if(t.endsWith(":*"))try{const n=new URL(e);if(`${n.protocol}//${n.hostname}:*`===t)return!0}catch{}else if(e===t)return!0;return!1}var k=Object.freeze({...window.__FRAME_PREAMBLE?.capabilities}),x=window.__FRAME_PREAMBLE?.transforms,$=window.__FRAME_PREAMBLE?.comments,z=window.__FRAME_PREAMBLE?.translate,q=/^[\w.-]+\.js$/,De=/^[a-z][a-z0-9_-]{0,63}$/;function I(e){return Ue(()=>import("/_runtime/"+e),void 0)}function Be(e,t){return{contract:e.contract,changes:new Set(e.changes??[]),flags:new Set(e.flags??[]),capabilities:e.capabilities??{},capBudgets:e.capBudgets??{},transforms:new Map,shellOrigin:t,mount:Y,pipe:()=>({wrap:(n,a)=>(...i)=>{try{return a(...i)}catch(r){return Promise.reject(r)}}})}}var ne=null,C=null;function F(e,t,n){try{Object.defineProperty(e,t,{value:n,writable:!1,configurable:!1,enumerable:!0})}catch{try{Object.defineProperty(e,t,{value:n,writable:!1,configurable:!0,enumerable:!0})}catch{}}}var H=!1;function xe(e,t){const n=[];for(const a of e.elements){const i=document.querySelector(`[data-id="${a.target}"]`);if(!i){parent.postMessage({__frame_patch_miss:{seq:e.seq}},t);return}if([...Object.keys(a.attrsSet??{}),...a.attrsRemoved??[]].some(r=>!de(r))){parent.postMessage({__frame_patch_miss:{seq:e.seq}},t);return}if(a.text!==void 0&&!ve(i)){parent.postMessage({__frame_patch_miss:{seq:e.seq}},t);return}for(const[r,l]of Object.entries(a.attrsSet??{}))if(!oe(i,r)){try{i.setAttribute(r,l)}catch{}se(i,r,l)}for(const r of a.attrsRemoved??[])oe(i,r)||(i.removeAttribute(r),se(i,r,null));typeof a.text=="string"&&(i.textContent=a.text),n.push(a.target)}try{document.dispatchEvent(new CustomEvent("claude:edit",{detail:{seq:e.seq,targets:n}}))}catch{}}function se(e,t,n){if(!(e instanceof HTMLInputElement))return;const a=t.toLowerCase();a==="checked"?e.checked=n!==null:a==="value"&&e.type!=="file"&&(e.value=n??"")}function oe(e,t){const n=t.toLowerCase(),a=e;return n==="data-id"||(n==="value"||n==="checked")&&(a.__artifactSecret===!0||/^(password|hidden|file)$/.test(a.type??"")||/(^|\s)(cc-|one-time-code|current-password|new-password)/i.test(`${e.getAttribute("autocomplete")??""} ${a.autocomplete??""}`))}function ae(e){const t=document.documentElement;e==="light"||e==="dark"?(t.dataset.theme=e,t.style.colorScheme=e,H=!0):H&&(delete t.dataset.theme,t.style.colorScheme="",H=!1)}var ie=256,N=Object.assign(Object.create(null),{mcp:Object.assign(Object.create(null),{watchTool:{handlerArg:3}}),db:Object.assign(Object.create(null),{subscribe:{handlerArg:1,errArg:2}}),room:Object.assign(Object.create(null),{on:{handlerArg:1,errArg:2},onPeers:{handlerArg:0,errArg:1},onConnection:{handlerArg:0,errArg:1}})}),$e=Object.assign(Object.create(null),{db:(e,t)=>Oe(e,t),room:(e,t,n)=>Te(e,n)}),j=new Map;function Y(e,t){const n=j.get(e);if(!n)return;const a=Object.assign(Object.create(null),t);Object.assign(n.impl,a),n.r(n.ns),n.impl.__settled=()=>Promise.reject({code:"capability_removed",message:`${e}: method not in this runtime`});const i=n.queue;n.queue=[];for(const r of i){const l=a[r.method];if(l)if(N[e]?.[r.method])try{r.resolve(l(...r.args))}catch{U(r,N[e][r.method],{code:"transform_error",message:`${e}.${r.method} rejected its arguments`})}else l(...r.args).then(r.resolve,r.reject);else{const c={code:"capability_removed",message:`${e}.${r.method} is not in this runtime`},d=N[e]?.[r.method];if(d){U(r,d,c);continue}r.reject(c)}}}function ze(e,t){const n=j.get(e);if(!n)return;n.impl.__settled=()=>Promise.reject(t),n.r(null);const a=n.queue;n.queue=[];for(const i of a){const r=N[e]?.[i.method];if(r){U(i,r,t);continue}i.reject(t)}}function le(e,t){if(typeof e=="function")try{return e(...t)}catch{return Object.create(null)}return Array.isArray(e)?[...e]:e!==null&&typeof e=="object"?{...e}:e}function D(e,t){const n=ee[e];if(!n){ze(e,t);return}j.get(e)?.r(null),Y(e,Object.fromEntries(Object.entries(n).map(([a,i])=>[a,(...r)=>Promise.resolve(le(i,r))])))}function U(e,t,n){if(e.syncState?.dead)return;const a=t.errArg===void 0?void 0:e.args[t.errArg],i=t.errArg===void 0?e.args[t.handlerArg]:a;typeof i=="function"&&queueMicrotask(()=>{if(!e.syncState?.dead)try{i(t.errArg===void 0?{type:"error",error:n}:n)}catch(r){we(r)}})}var W=Object.getOwnPropertyDescriptor(window,"claude");if(window!==top&&!(W&&W.writable===!1)){const e=x&&q.test(x)?I(x).catch(()=>{}):Promise.resolve(void 0),t=o=>{if(o.type==="auxclick"&&o.button!==1)return;const u=o.target,g=u&&u.closest?u.closest("a[href],area[href]"):null;if(!g)return;const f=g.getAttribute("href");if(!f)return;let p,P;try{p=new URL(f,document.baseURI),P=new URL(document.baseURI).origin}catch{return}if((p.protocol==="http:"||p.protocol==="https:")&&p.origin!==P){o.preventDefault();const w=(g.getAttribute("target")??"").toLowerCase(),y=o.type==="auxclick"||o.metaKey||o.ctrlKey||o.shiftKey||o.altKey||!["","_self","_top","_parent"].includes(w);parent.postMessage({__frame_nav:!0,url:p.href,newTab:y},"*")}};addEventListener("click",t,!0),addEventListener("auxclick",t,!0);const n={},a=o=>{o.isTrusted&&(n.pointer=!0)},i=o=>{o.isTrusted&&(n.click=!0)};addEventListener("pointermove",a,{capture:!0,passive:!0}),addEventListener("click",i,{capture:!0,passive:!0}),e.then(o=>{o?.wireNav&&(o.wireNav(),removeEventListener("click",t,!0),removeEventListener("auxclick",t,!0),removeEventListener("pointermove",a,!0),removeEventListener("click",i,!0),o.wireEngagement?.(n))});let r=null;try{r=Ne()}catch{}const l=W?.value??{};F(window,"claude",l);const c=o=>{let u;const g=new Promise(v=>{u=v}),f={impl:Object.create(null),queue:[],u:g,r:u,ns:null};j.set(o,f);const p=f.impl,P=v=>({code:"queue_overflow",message:`${o}.${v}: pre-init call queue is full`}),w=(v,s)=>{if(f.queue.length>=ie){const m=ee[o];return m&&v in m?Promise.resolve(le(m[v],s)):Promise.reject(P(v))}return new Promise((m,_)=>{f.queue.push({method:v,args:s,resolve:m,reject:_})})},y=Re[o],L=new Proxy(y===void 0?p:(()=>{}),{apply:(v,s,m)=>{const _=y,b=p[_]??p.__settled;return b?b(...m):w(_,m)},get:(v,s)=>{if(typeof s!="string"||s==="then"||s==="toJSON"||s==="valueOf")return;if(s==="toString")return Object.prototype.toString;if(y!==void 0&&(s==="call"||s==="apply"||s==="bind"))return Function.prototype[s];const m=N[o]?.[s];return m?(..._)=>{if(typeof _[m.handlerArg]!="function")throw new TypeError(`${o}.${s} requires a handler function`);const b=p[s];if(b)return b(..._);if(p.__settled){const S={dead:!1},Fe={args:[..._],syncState:S};return p.__settled().catch(He=>U(Fe,m,He)),()=>{S.dead=!0}}if(f.queue.length>=ie){const S={dead:!1};return U({args:[..._],syncState:S},m,P(s)),()=>{S.dead=!0}}let K=null;const G={dead:!1};return f.queue.push({method:s,args:_,resolve:S=>{K=typeof S=="function"?S:null,G.dead&&K?.()},reject:()=>{},syncState:G}),()=>{G.dead=!0,K?.()}}:(..._)=>{const b=p[s]??p.__settled;return b?b(..._):w(s,_)}},set:()=>!1});$e[o]?.(p,(v,s)=>L[v](...s),w),f.ns=L,F(l,o,L)};for(const o of Object.keys(k)){if(l[o]!==void 0){F(l,o,l[o]);continue}c(o)}if(l.use===void 0){const o=u=>{if(typeof u!="string"||!Object.hasOwn(k,u))return Promise.resolve(null);const g=j.get(u);return g?g.u:Promise.resolve(l[u]??null)};try{Object.defineProperty(l,"use",{value:o,writable:!0,configurable:!0,enumerable:!1})}catch{}}let d=null,E=null,T=0;const h=o=>{o.source!==parent||!re(o.origin)||ye(o.data)&&(d=o.data.__frame_init,C=o.origin,removeEventListener("message",h),clearTimeout(T),E?.())};addEventListener("message",h),parent.postMessage({__frame_connect:!0},"*");const R=new Promise(o=>{E=o,T=setTimeout(()=>{removeEventListener("message",h),o()},qe)}),A=document.readyState==="loading"?new Promise(o=>document.addEventListener("DOMContentLoaded",()=>o(),{once:!0})):Promise.resolve();A.then(()=>{try{r?.restore()}catch{}});const O={cb:null},M=o=>{if(!(o.source!==parent||!re(o.origin))&&be(o.data)){try{r?.promoted()}catch{}O.cb?.()}};addEventListener("message",M),R.then(async()=>{if(!d||!C){for(const s of j.keys())D(s,{code:"not_granted",message:"frame initialization did not arrive - capability unavailable"});return}ae(d.theme);const o=C;let u=!1,g=!1;addEventListener("message",s=>{if(s.source!==parent||s.origin!==o)return;Ee(s.data)&&ae(s.data.__frame_theme.theme),he(s.data)&&xe(s.data.__frame_patch,o);const m=s.data?.__fc_mode;m&&typeof m=="object"&&!u&&$&&q.test($)&&(u=!0,I($).then(b=>b.install?.(o,m.on===!0)).catch(()=>{}));const _=s.data?.__ft_cmd;_&&typeof _=="object"&&!g&&z&&q.test(z)&&(g=!0,I(z).then(b=>b.install?.(o,_)).catch(()=>{}))});const f=Object.keys(d.capabilities??{});for(const s of f)Object.hasOwn(k,s)||De.test(s)&&l[s]===void 0&&(c(s),D(s,{code:"capability_disabled",message:"capability not in this runtime generation"}));const p=f.filter(s=>Object.hasOwn(k,s)).map(s=>[s,k[s]]).filter(s=>typeof s[1]=="string"&&q.test(s[1])),P=await Promise.allSettled(p.map(([,s])=>I(s))),w=await e,y=C;w?.buildBoot||parent.postMessage({__frame_cap_telemetry:{kind:"cap-load-error",cap:"_transforms"}},y),ne=w?.buildBoot?w.buildBoot(d,w.TRANSFORMS??{},{shellOrigin:y,mount:Y},s=>parent.postMessage({__frame_cap_telemetry:s},y)):Be(d,y);const L=s=>parent.postMessage({__frame_cap_telemetry:{kind:"cap-load-error",cap:s}},y),v=ne;P.forEach((s,m)=>{const _=p[m][0];if(s.status!=="fulfilled"){L(_);return}try{s.value?.install?.(v)}catch{L(_)}});for(const[s,m]of j)if(m.impl.__settled===void 0){if(f.includes(s)){D(s,{code:"capability_disabled",message:"capability not available in this session"});continue}D(s,{code:"not_granted",message:"capability not available in this session"})}await A,parent.postMessage({__frame_ready:!0},C),e.then(s=>s?.installSizeReporter?.(y,O))})}})();</script><!-- /frame-runtime --><meta name="viewport" content="width=device-width,initial-scale=1"><style>:root{color-scheme:light}body{margin:0;padding:0;font:14px -apple-system,BlinkMacSystemFont,sans-serif;background:#faf9f5;color:#141413}img{max-width:100%}</style></head><body>
+<title>llamacppCodeConf</title>
+<style>
+  :root {
+    --paper: #FAFAF7;
+    --ink: #1D2420;
+    --muted: #5C6862;
+    --accent: #1B7A4E;
+    --rule: #DFE4DF;
+    --tile: #F1F3EF;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #151A17;
+      --ink: #E7ECE8;
+      --muted: #97A29B;
+      --accent: #52C48C;
+      --rule: #2B332E;
+      --tile: #1C221E;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #151A17;
+    --ink: #E7ECE8;
+    --muted: #97A29B;
+    --accent: #52C48C;
+    --rule: #2B332E;
+    --tile: #1C221E;
+  }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: Charter, "Bitstream Charter", "Iowan Old Style", Georgia, serif;
+    line-height: 1.62;
+    margin: 0;
+    font-size: 17px;
+  }
+  .page {
+    max-width: 42rem;
+    margin: 0 auto;
+    padding: 4.5rem 1.5rem 5rem;
+  }
+  .eyebrow {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.72rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 1rem;
+  }
+  h1 {
+    font-size: 2.3rem;
+    line-height: 1.15;
+    margin: 0 0 0.75rem;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .standfirst {
+    font-size: 1.16rem;
+    line-height: 1.55;
+    color: var(--muted);
+    margin: 0 0 1.5rem;
+    text-wrap: balance;
+  }
+  .meta {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.78rem;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.4rem;
+    padding: 0.9rem 0;
+    border-top: 1px solid var(--rule);
+    border-bottom: 1px solid var(--rule);
+    margin-bottom: 2.75rem;
+  }
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--rule);
+    border: 1px solid var(--rule);
+    margin: 0 0 3rem;
+  }
+  .stat {
+    background: var(--tile);
+    padding: 1rem 1.1rem 0.9rem;
+  }
+  .stat b {
+    display: block;
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+    font-size: 1.35rem;
+    font-weight: 600;
+    color: var(--accent);
+    margin-bottom: 0.2rem;
+  }
+  .stat span {
+    font-size: 0.8rem;
+    color: var(--muted);
+    line-height: 1.4;
+    display: block;
+  }
+  h2 {
+    font-size: 1.28rem;
+    margin: 2.8rem 0 0.9rem;
+    padding-top: 1.6rem;
+    border-top: 1px solid var(--rule);
+    font-weight: 700;
+    letter-spacing: -0.005em;
+    text-wrap: balance;
+  }
+  p { margin: 0 0 1rem; }
+  ul { margin: 0 0 1rem; padding-left: 1.2rem; }
+  li { margin-bottom: 0.55rem; }
+  li::marker { color: var(--accent); }
+  .m {
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.88em;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  em { font-style: italic; }
+  .foot {
+    margin-top: 3.2rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--rule);
+    font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.75rem;
+    color: var(--muted);
+  }
+  @media (max-width: 560px) {
+    .stats { grid-template-columns: 1fr; }
+    h1 { font-size: 1.9rem; }
+    .page { padding-top: 3rem; }
+  }
+</style>
+
+<div class="page">
+  <p class="eyebrow">Project brief</p>
+  <h1>llamacppCodeConf</h1>
+  <p class="standfirst">A desktop manager for local AI model serving — it finds
+  the models on a machine, serves them through one hot-swapping server,
+  measures what each one can actually do on the available hardware, and keeps
+  client applications configured with numbers that are true.</p>
+  <div class="meta">
+    <span>Rust · egui</span>
+    <span>Linux desktop + CLI</span>
+    <span>Personal project</span>
+    <span>August 2026</span>
+  </div>
+
+  <div class="stats">
+    <div class="stat"><b>~12 s</b><span>to hot-swap a 27-billion-parameter
+      model between requests, measured on the development machine</span></div>
+    <div class="stat"><b>≈2×</b><span>usable context gained by one measured
+      default (KV-cache quantization) most users never find</span></div>
+    <div class="stat"><b>88</b><span>unit tests, most added alongside the bug
+      or behavior they pin</span></div>
+  </div>
+
+  <h2>The problem it addresses</h2>
+  <p>Running large language models locally is attractive — private, free
+  per-token, offline — but the tooling around it punishes non-experts:</p>
+  <ul>
+    <li><strong>Models scatter.</strong> Ollama keeps them in a
+    content-addressed blob store, HuggingFace tools keep a revision-pointer
+    cache, manual downloads land wherever. A machine can hold
+    <span class="m">200+&nbsp;GB</span> of models with no single answer to
+    “what do I have, and is it usable?” During development, the app’s own
+    scanner surfaced a <span class="m">20&nbsp;GB</span> model the owner
+    didn’t know was there — and one that was on disk but unreachable because
+    a cache pointer had silently moved.</li>
+    <li><strong>Configuration runs on folklore.</strong> Client apps need each
+    model’s context window. The number in the model file is the
+    <em>training</em> figure; what actually fits after GPU memory allocation
+    is routinely a third of that. Configs written from file headers cause
+    silent truncation and mid-session failures that are miserable to
+    debug.</li>
+    <li><strong>The expertise barrier is real.</strong> llama.cpp exposes
+    dozens of flags with meaningful performance consequences. Most users never
+    find them; the knowledge lives in forum threads.</li>
+    <li><strong>Version skew breaks things cryptically.</strong> Model formats
+    evolve faster than installed binaries; a failed load reports an error deep
+    in a server log, actionable only if you already know the answer.</li>
+  </ul>
+
+  <h2>The approach: measured, not guessed</h2>
+  <p>The core design decision: <strong>the app never writes a number it
+  hasn’t measured.</strong> Loading a model <em>is</em> measuring it — the app
+  records the context size the server actually settled on for this machine
+  and probes whether the model produces well-formed tool calls, then writes
+  client configuration from those measurements, with a small safety margin.
+  Measurements are fingerprinted against the server build, GPU set, and
+  per-model flags, so they refresh automatically when anything relevant
+  changes; stale numbers are labeled stale rather than silently trusted.</p>
+  <p>The same philosophy extends to diagnostics. Every unavailable model has a
+  “Why?” button giving a plain-language cause, the single relevant error line
+  as evidence, and remedy buttons — because “see the logs” is not an answer a
+  general user can act on. A built-in Build Advisor compares the installed
+  llama.cpp against its source checkout and upstream, reports in outcomes
+  (“rebuilding would unlock 3 models you own”) rather than compiler flags,
+  and runs the guided rebuild itself. In live use it correctly distinguished
+  “your checkout was updated but never rebuilt” from “you need to pull” —
+  and after the rebuild, re-measurement confirmed one previously unloadable
+  model working while honestly reclassifying three others as
+  incompatible-by-design, updating its own advice accordingly.</p>
+
+  <h2>What it does today</h2>
+  <ul>
+    <li>Discovers llama.cpp installations (version, GPU visibility per binary)
+    and every GGUF model across user directories, the Ollama store, and the
+    HuggingFace cache, deduplicated by file identity.</li>
+    <li>Runs llama-server in router mode: one server, all models, on-demand
+    hot-swap.</li>
+    <li>Generates server configuration with performance defaults measured on
+    real hardware; per-model overrides survive regeneration and open
+    pre-filled with the optimized values, with a reset-to-optimized escape
+    hatch.</li>
+    <li>Detects per-model capabilities from the files themselves — vision
+    components (paired automatically), multi-token-prediction layers,
+    embedding architectures — and configures serving accordingly.</li>
+    <li>Syncs the OpenCode coding agent’s config through a comment-preserving
+    JSONC editor: hand edits survive, removals are reversible comment-outs,
+    every write gets a numbered backup with one-click restore.</li>
+    <li>Offers a Connections panel for any other OpenAI-compatible app: base
+    URL, the measured model list, copy-paste client snippets.</li>
+    <li>Coexists safely with other tools: a server it didn’t start is
+    observed, never signaled; model files are never deleted by the app,
+    period.</li>
+  </ul>
+
+  <h2>Engineering notes</h2>
+  <ul>
+    <li><strong>Architecture:</strong> a headless, fully-testable core under a
+    thin GUI shell; the same engine drives the desktop app and a scriptable
+    CLI.</li>
+    <li><strong>Verify before building:</strong> the project began with a
+    spike day validating every load-bearing assumption against the real
+    server binary before application code depended on it; findings are
+    documented in the repository.</li>
+    <li><strong>Bugs found by use, fixed at the root:</strong> live testing
+    surfaced four identity/truth bugs — including a quantization label the
+    model file itself misstated, confirmed by reading the tensor table
+    directly. Each fix removed the <em>class</em> of error (a single source
+    of truth for naming) rather than patching the instance, with a
+    regression test citing the incident.</li>
+    <li><strong>Safety invariants held throughout:</strong> never touch a
+    process the app didn’t start (ownership handshakes robust to PID
+    recycling); never destroy user data (comment-out over delete, backup
+    before write, refuse to overwrite).</li>
+    <li>Built in Rust with a minimal dependency footprint, developed in an
+    AI-pair-programming workflow with design decisions, testing discipline,
+    and the roadmap maintained as first-class artifacts in the repo.</li>
+  </ul>
+
+  <h2>Current state, honestly</h2>
+  <p>Working daily on its development machine (Linux, single NVIDIA GPU),
+  where it manages <span class="m">15+</span> models across three stores and
+  keeps two client apps configured. Limitations worth stating: Linux-only
+  today; multi-GPU support is designed in (GPU state is a list everywhere)
+  but untested on real multi-GPU hardware; ROCm build support is implemented
+  against documentation and simulated tests, not yet validated on AMD
+  hardware; and it is a personal-scale project — one machine, one primary
+  user — not yet hardened by a wider install base.</p>
+  <p>Planned next: a performance lab (benchmark-verified A/B of configuration
+  changes, speculative-decoding trials) and a sibling project for model
+  inventory and backup with content-hash identity.</p>
+
+  <p class="foot">llamacppCodeConf · project brief · prepared August 2026</p>
+</div>
+
+</body></html>
