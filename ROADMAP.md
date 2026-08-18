@@ -80,6 +80,12 @@ The tabs now match how a user thinks:
 
 ## Smaller items (fold in opportunistically)
 
+- **Router start options** (user request 2026-08-17): user prefers manual
+  start for now — Start Router button already covers it. Down the road:
+  a Settings toggle "start router when the app opens", and a first-run
+  hint on the Server tab explaining the three ways to start (button,
+  `--start`/`--setup` CLI, systemd unit).
+
 - **Cache-source models are now calibrated/synced** (found by user: a
   `llama-server -hf` download appeared on the Server tab but could never
   reach OpenCode). Remaining gap: the Library tab doesn't list cache
