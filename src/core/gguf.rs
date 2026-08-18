@@ -28,6 +28,11 @@ pub struct GgufMeta {
     pub quantization: Option<String>,
     /// `general.size_label` when present ("27B", "8x7B", …).
     pub size_label: Option<String>,
+    /// Multi-token-prediction layers present (tensor names containing
+    /// ".nextn."). Capability shipped in the file — whether the installed
+    /// llama.cpp exploits it is a separate (build-version) question.
+    #[serde(default)]
+    pub has_mtp: bool,
 }
 
 /// Hard ceiling on how much header we're willing to read. Real metadata
@@ -91,6 +96,28 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
         }
     }
     meta.context_length = arch_ctx.or(generic_ctx);
+
+    // Tensor infos follow the KVs: name, dims, type, offset. We only want
+    // the names — feature tensors announce themselves there (MTP layers
+    // are blk.N.nextn.*). Bounded by the same header ceiling.
+    for _ in 0.._tensor_count {
+        let name = read_string(&mut r)?;
+        if name.contains(".nextn.") {
+            meta.has_mtp = true;
+        }
+        let n_dims = read_u32(&mut r)?;
+        if n_dims > 8 {
+            bail!("implausible tensor rank {n_dims}");
+        }
+        for _ in 0..n_dims {
+            let _ = read_u64(&mut r)?;
+        }
+        let _ty = read_u32(&mut r)?;
+        let _offset = read_u64(&mut r)?;
+        if r.read > MAX_HEADER_BYTES {
+            bail!("tensor table exceeded {MAX_HEADER_BYTES} bytes; refusing to read further");
+        }
+    }
     Ok(meta)
 }
 
@@ -256,10 +283,19 @@ pub(crate) mod tests {
 
     /// Build a tiny synthetic GGUF header for tests.
     pub(crate) fn synthetic_gguf(arch: &str, ctx: u64, file_type: u64) -> Vec<u8> {
+        synthetic_gguf_with_tensors(arch, ctx, file_type, &[])
+    }
+
+    pub(crate) fn synthetic_gguf_with_tensors(
+        arch: &str,
+        ctx: u64,
+        file_type: u64,
+        tensor_names: &[&str],
+    ) -> Vec<u8> {
         let mut b = Vec::new();
         b.extend(0x4655_4747u32.to_le_bytes()); // "GGUF"
         b.extend(3u32.to_le_bytes()); // version
-        b.extend(0u64.to_le_bytes()); // tensor count
+        b.extend((tensor_names.len() as u64).to_le_bytes()); // tensor count
         b.extend(5u64.to_le_bytes()); // kv count
 
         let kv_str = |b: &mut Vec<u8>, k: &str, v: &str| {
@@ -291,6 +327,15 @@ pub(crate) mod tests {
         }
         kv_u32(&mut b, &format!("{arch}.context_length"), ctx as u32);
         kv_u32(&mut b, "general.file_type", file_type as u32);
+        // Tensor infos: name, n_dims=1, dim, type, offset.
+        for name in tensor_names {
+            b.extend((name.len() as u64).to_le_bytes());
+            b.extend(name.as_bytes());
+            b.extend(1u32.to_le_bytes());
+            b.extend(64u64.to_le_bytes());
+            b.extend(0u32.to_le_bytes());
+            b.extend(0u64.to_le_bytes());
+        }
         b
     }
 
@@ -312,6 +357,26 @@ pub(crate) mod tests {
         assert_eq!(meta.name.as_deref(), Some("Synthetic Test Model"));
         assert_eq!(meta.context_length, Some(262_144));
         assert_eq!(meta.quantization.as_deref(), Some("Q5_K_M"));
+    }
+
+    #[test]
+    fn detects_mtp_tensors_by_name() {
+        let (_d, path) = write_temp(&synthetic_gguf_with_tensors(
+            "qwen3",
+            8192,
+            17,
+            &["blk.0.attn_q.weight", "blk.64.nextn.eh_proj.weight"],
+        ));
+        let meta = read_meta(&path).unwrap();
+        assert!(meta.has_mtp);
+
+        let (_d2, path2) = write_temp(&synthetic_gguf_with_tensors(
+            "qwen3",
+            8192,
+            17,
+            &["blk.0.attn_q.weight"],
+        ));
+        assert!(!read_meta(&path2).unwrap().has_mtp);
     }
 
     #[test]

@@ -37,6 +37,23 @@ pub struct ModelFile {
     /// `None` when the header couldn't be read; the file is still listed so
     /// a broken download is visible rather than invisible.
     pub meta: Option<GgufMeta>,
+    /// Vision projector sitting next to this model (mmproj*.gguf in the
+    /// same directory) — paired at scan time, served via the preset.
+    pub mmproj: Option<PathBuf>,
+}
+
+/// Embedding-model architectures: served with `--embedding` (RAG/search
+/// workloads), never synced as chat/agent models.
+pub fn is_embedding(meta: Option<&GgufMeta>) -> bool {
+    meta.and_then(|m| m.architecture.as_deref())
+        .is_some_and(|a| {
+            matches!(a, "bert" | "nomic-bert" | "nomic-bert-moe" | "jina-bert-v2" | "gte" | "xlm-roberta")
+        })
+}
+
+fn is_mmproj_file(path: &Path) -> bool {
+    path.file_stem()
+        .is_some_and(|s| s.to_string_lossy().to_lowercase().contains("mmproj"))
 }
 
 impl ModelFile {
@@ -136,16 +153,11 @@ pub fn hf_hub_models(hub: &Path) -> Vec<ModelFile> {
             };
             for f in files.flatten() {
                 let path = f.path();
-                // *mmproj*.gguf are vision projectors that ride along with a
-                // main model — companions, not servable models themselves.
-                // (Naming varies: "mmproj-F16.gguf", "<model>-mmproj.gguf".)
-                let is_mmproj = path
-                    .file_stem()
-                    .is_some_and(|s| s.to_string_lossy().to_lowercase().contains("mmproj"));
-                if !is_mmproj
-                    && path
-                        .extension()
-                        .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
+                // mmproj companions are collected too — scan() pairs them
+                // to the model in the same snapshot instead of listing them.
+                if path
+                    .extension()
+                    .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
                 {
                     // Snapshot entries are usually symlinks into blobs/;
                     // metadata() follows them for the real size.
@@ -155,6 +167,7 @@ pub fn hf_hub_models(hub: &Path) -> Vec<ModelFile> {
                         path,
                         file_size,
                         source: Source::HfHub { repo: repo.clone() },
+                        mmproj: None,
                     });
                 }
             }
@@ -182,6 +195,21 @@ pub fn scan(
     }
     if let Some(hub) = hf_hub {
         out.extend(hf_hub_models(hub));
+    }
+    // Vision pairing: mmproj*.gguf files aren't models — they're the vision
+    // half of a model in the same directory. Pair, then drop them as rows.
+    let mmproj_by_dir: std::collections::HashMap<PathBuf, PathBuf> = out
+        .iter()
+        .filter(|m| is_mmproj_file(&m.path))
+        .filter_map(|m| Some((m.path.parent()?.to_path_buf(), m.path.clone())))
+        .collect();
+    out.retain(|m| !is_mmproj_file(&m.path));
+    for m in &mut out {
+        if let Some(dir) = m.path.parent()
+            && let Some(proj) = mmproj_by_dir.get(dir)
+        {
+            m.mmproj = Some(proj.clone());
+        }
     }
     // Dedupe by inode, not path: an archived model hardlinked into the
     // shelf is the SAME file as its cache original and must appear once.
@@ -230,6 +258,7 @@ fn walk_gguf(dir: &Path, depth: usize, out: &mut Vec<ModelFile>) {
                 path,
                 file_size,
                 source: Source::Shelf,
+                mmproj: None,
             });
         }
     }
@@ -292,6 +321,7 @@ fn ollama_model_from_manifest(
         path: blob,
         file_size,
         source: Source::Ollama { name },
+        mmproj: None,
     })
 }
 
@@ -482,6 +512,7 @@ mod tests {
                 repo: "unsloth/Qwen3.8-27B-GGUF".into(),
             },
             meta: None,
+            mmproj: None,
         };
         let dest = archive_to_shelf(&m, shelf.path()).unwrap();
         assert!(dest.ends_with("Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf"));
@@ -503,6 +534,7 @@ mod tests {
                 name: "ornith:35b".into(),
             },
             meta: None,
+            mmproj: None,
         };
         let odest = archive_to_shelf(&om, shelf.path()).unwrap();
         assert!(odest.ends_with("ornith-35b/ornith-35b.gguf"));
@@ -513,6 +545,7 @@ mod tests {
             file_size: 0,
             source: Source::Shelf,
             meta: None,
+            mmproj: None,
         };
         assert!(archive_to_shelf(&sm, shelf.path()).is_err());
     }
@@ -542,6 +575,34 @@ mod tests {
     }
 
     #[test]
+    fn mmproj_files_pair_instead_of_listing() {
+        let shelf = shelf_with(&[
+            ("Gemma/gemma-it.gguf", &synthetic_gguf("gemma3", 8192, 15)[..]),
+            ("Gemma/mmproj-F16.gguf", &synthetic_gguf("clip", 0, 1)[..]),
+            ("Plain/plain.gguf", &synthetic_gguf("llama", 4096, 15)[..]),
+        ]);
+        let models = scan(&[shelf.path().to_path_buf()], &[], None);
+        assert_eq!(models.len(), 2, "mmproj is not a row");
+        let gemma = models.iter().find(|m| m.display_name() == "gemma-it").unwrap();
+        assert!(
+            gemma.mmproj.as_ref().unwrap().ends_with("Gemma/mmproj-F16.gguf"),
+            "paired with its directory-mate"
+        );
+        let plain = models.iter().find(|m| m.display_name() == "plain").unwrap();
+        assert!(plain.mmproj.is_none());
+    }
+
+    #[test]
+    fn embedding_architectures_are_recognized() {
+        let mut meta = crate::core::gguf::GgufMeta::default();
+        meta.architecture = Some("nomic-bert".into());
+        assert!(is_embedding(Some(&meta)));
+        meta.architecture = Some("qwen3".into());
+        assert!(!is_embedding(Some(&meta)));
+        assert!(!is_embedding(None));
+    }
+
+    #[test]
     fn alias_suggestions_are_shell_and_config_safe() {
         let shelf = shelf_with(&[(
             "Qwen3.6-27B/Qwen3.6-27B-UD-Q5_K_XL.gguf",
@@ -557,6 +618,7 @@ mod tests {
                 name: "rafw007/qwen36 coder:q4_K_M".into(),
             },
             meta: None,
+            mmproj: None,
         };
         assert_eq!(alias_suggestion(&ollama), "rafw007-qwen36-coder-q4_k_m");
     }

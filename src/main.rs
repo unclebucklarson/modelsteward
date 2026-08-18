@@ -141,7 +141,8 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
         ),
     }
     let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
-    let results = router::calibrate(&dir, cfg.port, &env_fp, force, &mut |line| {
+    let embed = router::embedding_ids_in_preset(&system::preset_path());
+    let results = router::calibrate(&dir, cfg.port, &env_fp, force, &embed, &mut |line| {
         eprintln!("{line}");
     })?;
     for (id, m) in &results {
@@ -156,7 +157,11 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
 }
 
 fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredModel> {
+    // Embedding models serve /v1/embeddings — they don't belong in the
+    // chat/agent config.
+    let embed = router::embedding_ids_in_preset(&system::preset_path());
     m.iter()
+        .filter(|(id, _)| !embed.contains(id.as_str()))
         .filter_map(|(id, m)| {
             m.n_ctx.map(|ctx| opencode::DesiredModel {
                 id: id.clone(),

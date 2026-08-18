@@ -561,6 +561,7 @@ pub fn calibrate(
     port: u16,
     env_fp: &str,
     force: bool,
+    no_tool_probe: &std::collections::HashSet<String>,
     progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
     // Preset models AND the router's own HF cache downloads ("cache" source
@@ -606,8 +607,15 @@ pub fn calibrate(
             Ok(n_ctx) => {
                 // While it's loaded, measure tool-calling too — the other
                 // half of "is this model actually useful to OpenCode".
+                let tool_call = if no_tool_probe.contains(&m.id) {
+                    progress(format!(
+                        "[{n}/{total}] {}: ctx {n_ctx}; embedding model — tool probe skipped",
+                        m.id
+                    ));
+                    Some(false)
+                } else {
                 progress(format!("[{n}/{total}] {}: ctx {n_ctx}; probing tool calls…", m.id));
-                let tool_call = match probe_tool_call(port, &m.id) {
+                match probe_tool_call(port, &m.id) {
                     Ok(v) => {
                         progress(format!(
                             "[{n}/{total}] {}: tool calls {}",
@@ -620,6 +628,7 @@ pub fn calibrate(
                         progress(format!("[{n}/{total}] {}: tool probe inconclusive: {e:#}", m.id));
                         None
                     }
+                }
                 };
                 Measurement {
                     n_ctx: Some(n_ctx),
@@ -738,6 +747,28 @@ fn wait_until_not_loaded(port: u16, model: &str, timeout: std::time::Duration) {
     }
 }
 
+/// Section names in the preset carrying `embedding = true` — models served
+/// for embeddings, to be excluded from chat sync and tool probes.
+pub fn embedding_ids_in_preset(preset: &Path) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    let Ok(text) = std::fs::read_to_string(preset) else {
+        return out;
+    };
+    let mut current: Option<String> = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
+            current = Some(name.to_string());
+        } else if line.replace(' ', "") == "embedding=true"
+            && let Some(sec) = &current
+            && sec != "*"
+        {
+            out.insert(sec.clone());
+        }
+    }
+    out
+}
+
 /// Ask a running router to re-read its model sources (`/models?reload=1`,
 /// verified in spike 1) — how preset edits land without a restart.
 pub fn reload(port: u16) -> Result<Vec<RouterModel>> {
@@ -760,6 +791,7 @@ mod tests {
             file_size: 0,
             source: Source::Shelf,
             meta: Some(Default::default()),
+            mmproj: None,
         }
     }
 

@@ -168,16 +168,19 @@ the Build Advisor's "stay current" already owns that lever. (Small truth
 kept: a few global perf cmake knobs, e.g. extended FA kernel coverage for
 quantized KV, belong in the Advisor's advanced section someday.)
 
-1. **Detect & show**: `features.rs` — per-model feature set from gguf +
-   siblings + logs: vision (mmproj sibling), MTP (`nextn` tensors — the
-   Qwen3.8 load log already proves "unused tensor blk.64.nextn.*", i.e.
-   capability present but unexploited by the build), embedding models
-   (bge-small in the hub), thinking/reasoning, SWA family. Library badges;
-   "your models carry features your build ignores" card in Build Advisor.
-2. **Safe auto-enablement**: preset generator pairs mmproj automatically
-   (and stops hiding mmproj files → pair instead of exclude), sets
-   embedding mode for embed models, reasoning-format where applicable;
-   OpenCode entries get image modality when vision is paired.
+1. ✔ **Detect & show** (DONE 2026-08-17): gguf reader scans tensor names
+   → `has_mtp`; scan pairs mmproj siblings per directory (all sources);
+   embedding archs recognized. Library "Feat" column: 👁 vision, ⚡ MTP,
+   🧬 embed with explanatory hovers. Live: 4 MTP models, 3 vision, one
+   both (Qwen3.5-4B). Still open: Advisor card "features your build
+   ignores".
+2. ✔ **Safe auto-enablement** (DONE, first slice): preset gains `mmproj =`
+   for shelf vision models (hub-cache vision models: the router pairs
+   mmproj itself) and `embedding = true` for embed archs — feature keys
+   applied after user overrides so overrides can't strip them. Embedding
+   models are excluded from OpenCode chat sync and skip the tool probe
+   (recorded tool_call=false). Open: archive-to-shelf should carry the
+   mmproj companion along; OpenCode image modality for vision entries.
 3. **Measured trials** (merges into M7): draft-model pairing for
    speculative decoding (same-family small model, e.g. Qwen3.5-4B drafting
    for the 27Bs), MTP self-speculation when upstream lands the flag —

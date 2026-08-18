@@ -49,6 +49,11 @@ pub struct Row {
     pub path: Option<std::path::PathBuf>,
     /// Archivable = lives in a store some other tool owns/prunes.
     pub archivable: bool,
+    /// Feature badges: vision projector paired, MTP tensors present,
+    /// embedding architecture.
+    pub vision: bool,
+    pub mtp: bool,
+    pub embedding: bool,
 }
 
 /// Hardware picture for advice. `vram_mib` is the largest single device
@@ -262,6 +267,20 @@ pub fn assemble(
                 hw,
             )
         };
+        let vision = m.mmproj.is_some();
+        let mtp = m.meta.as_ref().is_some_and(|x| x.has_mtp);
+        let embedding = library::is_embedding(m.meta.as_ref());
+        let (advice_level, advice) = if embedding {
+            (
+                AdviceLevel::Good,
+                format!(
+                    "embedding model — serves /v1/embeddings for RAG/search (e.g. a notes app){}; not a chat/agent model",
+                    measured_ctx.map(|c| format!(", measured {c} ctx")).unwrap_or_default()
+                ),
+            )
+        } else {
+            (advice_level, advice)
+        };
         let is_dup = m
             .path
             .file_name()
@@ -311,6 +330,9 @@ pub fn assemble(
             server_status,
             advice_level,
             advice,
+            vision,
+            mtp,
+            embedding,
         });
     }
 
@@ -354,6 +376,9 @@ pub fn assemble(
             server_status: Some(rm.status.clone()),
             advice_level,
             advice,
+            vision: false,
+            mtp: false,
+            embedding: false,
         });
     }
 
@@ -377,7 +402,28 @@ mod tests {
             file_size: gb * 1024 * 1024 * 1024,
             source,
             meta: meta.then(GgufMeta::default),
+            mmproj: None,
         }
+    }
+
+    #[test]
+    fn feature_flags_flow_into_rows() {
+        let mut vision = file("gemma-it.gguf", Source::Shelf, 10, true);
+        vision.mmproj = Some(PathBuf::from("/m/mmproj-F16.gguf"));
+        let mut mtp = file("qwen-mtp.gguf", Source::Shelf, 10, true);
+        mtp.meta.as_mut().unwrap().has_mtp = true;
+        let mut embed = file("bge-small.gguf", Source::Shelf, 1, true);
+        embed.meta.as_mut().unwrap().architecture = Some("nomic-bert".into());
+
+        let rows = assemble(&[vision, mtp, embed], &[], &Measurements::new(), &[], HW);
+        assert!(rows[0].vision && !rows[0].mtp && !rows[0].embedding);
+        assert!(rows[1].mtp && !rows[1].vision);
+        assert!(rows[2].embedding);
+        assert!(
+            rows[2].advice.contains("embedding model"),
+            "embed advice replaces chat-centric advice: {}",
+            rows[2].advice
+        );
     }
 
     fn rm(id: &str, status: &str, source: &str) -> RouterModel {

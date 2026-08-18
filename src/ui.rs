@@ -880,8 +880,8 @@ impl App {
                 .min_col_width(48.0)
                 .show(ui, |ui| {
                     for h in [
-                        "Model", "Source", "Size", "Quant", "Measured ctx", "Server", "OpenCode",
-                        "", "", "", "Advice", "",
+                        "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Server",
+                        "OpenCode", "", "", "", "Advice", "",
                     ] {
                         ui.strong(h);
                     }
@@ -915,6 +915,21 @@ impl App {
                         } else {
                             "—".into()
                         });
+                        {
+                            let mut badges = String::new();
+                            if r.vision { badges.push('👁'); }
+                            if r.mtp { badges.push('⚡'); }
+                            if r.embedding { badges.push('🧬'); }
+                            if badges.is_empty() {
+                                ui.label("");
+                            } else {
+                                let mut notes: Vec<&str> = Vec::new();
+                                if r.vision { notes.push("👁 vision: mmproj paired — served with image support"); }
+                                if r.mtp { notes.push("⚡ MTP: multi-token-prediction layers present in the file (llama.cpp support pending upstream)"); }
+                                if r.embedding { notes.push("🧬 embedding model: serves /v1/embeddings, excluded from the chat config"); }
+                                ui.label(badges).on_hover_text(notes.join("\n"));
+                            }
+                        }
                         {
                             let resp = ui.label(&r.quant);
                             if let Some(h) = &r.quant_header_disagrees {
@@ -2026,12 +2041,14 @@ fn run_calibration(
     tx: &Sender<Msg>,
 ) -> anyhow::Result<router::Measurements> {
     let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let embed = router::embedding_ids_in_preset(&system::preset_path());
     let progress_tx = tx.clone();
     router::calibrate(
         &router::state_dir(),
         cfg.port,
         &env_fp,
         force,
+        &embed,
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));
         },
@@ -2042,8 +2059,10 @@ fn run_sync(
     cfg: &settings::AppConfig,
     measurements: &router::Measurements,
 ) -> anyhow::Result<opencode::SyncReport> {
+    let embed = router::embedding_ids_in_preset(&system::preset_path());
     let desired: Vec<_> = measurements
         .iter()
+        .filter(|(id, _)| !embed.contains(id.as_str()))
         .filter_map(|(id, m)| {
             m.n_ctx.map(|ctx| opencode::DesiredModel {
                 id: id.clone(),

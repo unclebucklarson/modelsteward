@@ -174,9 +174,21 @@ pub fn write_preset(
     // Apply the user's per-model overrides (stored in config.json so preset
     // regeneration keeps them). Overrides keyed to ids that aren't preset
     // aliases (cache models) become bare sections configuring those ids.
-    for (alias, _, ov) in &mut entries {
+    for (alias, m, ov) in &mut entries {
         if let Some(user_ov) = cfg.overrides.get(alias) {
             *ov = user_ov.clone();
+        }
+        // Feature keys ride along AFTER user overrides so they survive them
+        // (a user override shouldn't silently strip a model's vision half).
+        if let Some(proj) = &m.mmproj
+            && !ov.extra.iter().any(|(k, _)| k == "mmproj")
+        {
+            ov.extra.push(("mmproj".into(), proj.display().to_string()));
+        }
+        if library::is_embedding(m.meta.as_ref())
+            && !ov.extra.iter().any(|(k, _)| k == "embedding")
+        {
+            ov.extra.push(("embedding".into(), "true".into()));
         }
     }
     let aliases: std::collections::HashSet<&str> =
