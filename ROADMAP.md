@@ -76,7 +76,9 @@ The tabs now match how a user thinks:
    when GPU #2 exists.
 7. ~~Model downloads~~ → moved to the modelwarden sibling project
    (acquisition is storage-side; see boundary contract).
-8. **Log viewer + Tools menu**: tail router.log in-app; open preset/config.
+8. ✔ **Log viewer + Tools menu** (DONE): router.log tail on the Server tab;
+   Tools menu opens preset/config/opencode.json/log and restores the last
+   opencode.json backup (swap semantics).
 
 ## Smaller items (fold in opportunistically)
 
@@ -92,22 +94,19 @@ The tabs now match how a user thinks:
   models (this llama-server build doesn't expose their file paths via
   /models) — consider merging the router's model list into the Library
   view when the router is up.
-- GUI should reload measurements.json when it changes on disk (stale
-  OpenCode tab after CLI calibration) and show display-name + alias
-  consistently across panes (found by user).
+- ✔ GUI reloads measurements.json on disk change (DONE). Still open:
+  display-name + alias shown consistently across panes.
 - **Migrate measurements on archive**: archiving a cache model gives it a
   new preset alias, so its old measurement (keyed by the cache id) shows
   on a leftover router-only row while the shelf row reads "not measured".
   Copy n_ctx/tool_call to the new alias (fingerprints cleared → re-measures
   next calibrate) and consider suppressing the stale cache-id row.
 
-- Numbered backups (cap ~5) or "Undo last config change" (.bak swap).
-- **Measured-ctx variance policy**: settled ctx varies a few percent with
-  desktop VRAM at load time (observed 83k–94k across runs for the same
-  model). llama-server's own 1GiB fit margin absorbs moderate drift; decide
-  whether sync should apply an additional haircut (e.g. round down 5%).
-- Status-bar VRAM refreshed on the poll cycle, not scan-time.
-- Contention warning names the remedy (`ollama stop <model>`).
+- ✔ Numbered backups (5) + Tools → Restore From Last Backup (DONE).
+- ✔ Measured-ctx variance policy: DECIDED (user) — sync writes measured
+  minus 5%, floored to a 256 multiple (`opencode::safety_context`).
+- ✔ Status-bar VRAM live on the 2s poll (DONE).
+- ✔ Contention warning names the remedy (DONE).
 - `limit.output` exposed in the override editor (crude ctx/2 cap today).
 - Library staleness badge driven by fingerprint mismatch.
 

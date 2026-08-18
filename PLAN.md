@@ -1,16 +1,23 @@
-# llamacppCodeConf — Plan
+# llamacppCodeConf — Plan (founding design, kept as history)
 
-One Rust + egui desktop app for Linux that manages the whole local-LLM-for-OpenCode
-stack: discovers llama.cpp installs and GGUF models, runs llama-server in **router
-mode** (one long-lived, multi-model, hot-swapping server), and keeps
+> **Status 2026-08-17:** M0–M5.7, M6 phase 1, M6.5 phase 1, and the
+> Connections pivot are DONE — see [ROADMAP.md](ROADMAP.md) for the live
+> tracking. One scope evolution since this plan was written: the app is a
+> **llama.cpp server manager for any OpenAI-compatible app** (Connections
+> tab), with OpenCode as its first-class synced connector rather than its
+> only purpose. Everything else here held up.
+
+One Rust + egui desktop app for Linux that manages the whole local-LLM
+stack: discovers llama.cpp installs and GGUF models, runs llama-server in
+**router mode** (one long-lived, multi-model, hot-swapping server), keeps
 `~/.config/opencode/opencode.json` correct and in sync with what is actually
-servable.
+servable, and hands any other app a measured, ready-to-paste connection.
 
 ## North star
 
-**Squeeze maximum performance out of local models for AI coding, without the
-user needing to be a llama.cpp or OpenCode expert.** The app encodes the
-expertise. Four consequences:
+**Squeeze maximum performance out of local models — for AI coding and any
+other local-AI app — without the user needing to be a llama.cpp expert.**
+The app encodes the expertise. Four consequences:
 
 1. **Opinionated coding-agent defaults.** Agentic coding is prefill-heavy:
    OpenCode resends large, mostly-identical prompts every turn. So defaults
