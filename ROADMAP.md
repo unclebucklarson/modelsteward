@@ -147,6 +147,31 @@ call out near-misses (GPU present, toolchain missing → suggest Vulkan).
   serves) for build-log diagnosis and tradeoff explanations — picks from
   the rules engine's flag allowlist, never invents flags.
 
+## M6.5 — Feature-aware serving (discussed 2026-08-17)
+
+Load every model with the options its features deserve. Detection is
+deterministic (GGUF metadata + file siblings + load-log mining), enablement
+is rules in the preset generator, benefit is measured. NOT per-model-type
+llama.cpp builds — architecture support is source version, not cmake flags;
+the Build Advisor's "stay current" already owns that lever. (Small truth
+kept: a few global perf cmake knobs, e.g. extended FA kernel coverage for
+quantized KV, belong in the Advisor's advanced section someday.)
+
+1. **Detect & show**: `features.rs` — per-model feature set from gguf +
+   siblings + logs: vision (mmproj sibling), MTP (`nextn` tensors — the
+   Qwen3.8 load log already proves "unused tensor blk.64.nextn.*", i.e.
+   capability present but unexploited by the build), embedding models
+   (bge-small in the hub), thinking/reasoning, SWA family. Library badges;
+   "your models carry features your build ignores" card in Build Advisor.
+2. **Safe auto-enablement**: preset generator pairs mmproj automatically
+   (and stops hiding mmproj files → pair instead of exclude), sets
+   embedding mode for embed models, reasoning-format where applicable;
+   OpenCode entries get image modality when vision is paired.
+3. **Measured trials** (merges into M7): draft-model pairing for
+   speculative decoding (same-family small model, e.g. Qwen3.5-4B drafting
+   for the 27Bs), MTP self-speculation when upstream lands the flag —
+   each as try → measured verdict → keep/discard.
+
 ## M7 — Performance lab
 
 llama-bench integration: baseline pp/tg per model stored beside
