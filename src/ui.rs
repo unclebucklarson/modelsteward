@@ -1159,7 +1159,12 @@ impl App {
                 ui.separator();
                 let loaded: Vec<_> = models
                     .iter()
-                    .filter(|m| matches!(m.status.as_str(), "loaded" | "loading" | "sleeping"))
+                    .filter(|m| {
+                        matches!(
+                            m.status.as_str(),
+                            "loaded" | "loading" | "sleeping" | "downloading" | "downloaded"
+                        )
+                    })
                     .cloned()
                     .collect();
                 if loaded.is_empty() {

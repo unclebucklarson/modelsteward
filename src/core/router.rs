@@ -230,7 +230,8 @@ pub enum RouterState {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RouterModel {
     pub id: String,
-    /// "loaded" | "loading" | "unloaded" | "sleeping"; failed loads become
+    /// "loaded" | "loading" | "unloaded" | "sleeping" | "downloading" |
+    /// "downloaded" (HF-repo presets fetch first); failed loads become
     /// "failed(<exit>)" so the UI never mistakes them for merely-unloaded.
     pub status: String,
     /// Where the router got this model: "preset" (ours) or "cache"
@@ -504,7 +505,8 @@ pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
 /// with autoload off.
 pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
     load_model(port, model)?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(600);
+    const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
+    let mut deadline = std::time::Instant::now() + LOAD_BUDGET;
     loop {
         let status = fetch_models(port)?
             .into_iter()
@@ -515,6 +517,14 @@ pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
             "loaded" | "sleeping" => break,
             s if s.starts_with("failed") => {
                 bail!("{model} did not load: {s} (see router.log)")
+            }
+            // HF-repo presets download before they load; a 20GB pull can
+            // outlast any sane load budget. The router owns download pacing
+            // and flips status on failure, so the budget only starts once
+            // the download is over.
+            "downloading" | "downloaded" => {
+                deadline = std::time::Instant::now() + LOAD_BUDGET;
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
             _ if std::time::Instant::now() > deadline => {
                 let _ = unload_model(port, model); // don't leave it wedged
