@@ -183,6 +183,34 @@ fn router_ids_by_path(
     out
 }
 
+/// For a router cache entry ("org/repo:TAG") no scanned file claimed, find a
+/// scanned file that carries the same model: an HF-hub file of the same repo,
+/// or any file whose name contains the repo's base name — same quant tag
+/// either way. Loading the cache entry downloads from HuggingFace; a match
+/// here means those bytes (or a prior revision of them) are already on disk.
+fn local_equivalent<'a>(models: &'a [ModelFile], cache_id: &str) -> Option<&'a ModelFile> {
+    let (repo, tag) = cache_id.rsplit_once(':')?;
+    let tag = tag.to_uppercase();
+    let mut base = repo.rsplit('/').next()?.to_uppercase();
+    if let Some(stripped) = base.strip_suffix("-GGUF") {
+        base = stripped.to_string();
+    }
+    models.iter().find(|m| {
+        if library::quant_token_from_filename(&m.path) != Some(tag.clone()) {
+            return false;
+        }
+        if let Source::HfHub { repo: r } = &m.source {
+            return r == repo;
+        }
+        let stem = m
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_uppercase())
+            .unwrap_or_default();
+        !base.is_empty() && stem.contains(&base)
+    })
+}
+
 pub fn assemble(
     models: &[ModelFile],
     router_models: &[RouterModel],
@@ -345,6 +373,14 @@ pub fn assemble(
         let measurement = measurements.get(&rm.id);
         let measured_ctx = measurement.and_then(|mm| mm.n_ctx);
         let failure = measurement.and_then(|mm| mm.error.clone());
+        // A "cache" entry no scanned file claimed means Load fetches from
+        // HuggingFace first — a 20GB-class pull, and a *re*-download whenever
+        // the repo moved past what was cached. Say so before the click, and
+        // point at a local file carrying the same model when one exists.
+        let is_hf_fetch = rm.source.as_deref() == Some("cache");
+        let twin = is_hf_fetch
+            .then(|| local_equivalent(models, &rm.id))
+            .flatten();
         let (advice_level, advice) = match (&measured_ctx, &failure) {
             (Some(ctx), _) if *ctx >= AGENT_MIN_CTX => (
                 AdviceLevel::Good,
@@ -355,10 +391,23 @@ pub fn assemble(
                 format!("runs, but measured context ({ctx}) is small for agentic coding"),
             ),
             (None, Some(err)) => (AdviceLevel::Bad, failure_hint(err)),
+            (None, None) if is_hf_fetch => (
+                AdviceLevel::Warn,
+                "no file on disk matches this entry — Load downloads it from HuggingFace \
+                 first (20GB-class models take many minutes)"
+                    .into(),
+            ),
             (None, None) => (
                 AdviceLevel::Unknown,
                 "offered by the router (file location unknown) — Load to measure".into(),
             ),
+        };
+        let advice = match twin {
+            Some(t) => format!(
+                "{advice}; '{}' looks like the same model already on disk — prefer that row to avoid the download",
+                t.display_name()
+            ),
+            None => advice,
         };
         rows.push(Row {
             display: rm.id.clone(),
@@ -609,6 +658,48 @@ mod tests {
         let rows = assemble(&[], &routers, &Measurements::new(), &[], HW);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].source, "cache");
-        assert!(rows[0].advice.contains("Load to measure"));
+        // Cache entries with no file behind them download on Load — the row
+        // must say so, and grade as a caveat rather than a blank unknown.
+        assert_eq!(rows[0].advice_level, AdviceLevel::Warn);
+        assert!(rows[0].advice.contains("downloads it from HuggingFace"), "{}", rows[0].advice);
+    }
+
+    #[test]
+    fn cache_row_points_at_local_twin() {
+        // The user's real incident: the shelf holds the exact quant the
+        // router's HF cache entry names, but the entry (stale revision)
+        // would re-download 20GB. The row must steer to the shelf copy.
+        let models = vec![file("Qwen3.8-27B-UD-Q5_K_XL.gguf", Source::Shelf, 20, true)];
+        let routers = vec![rm("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL", "unloaded", "cache")];
+        let rows = assemble(&models, &routers, &Measurements::new(), &[], HW);
+        let cache_row = rows
+            .iter()
+            .find(|r| r.router_id.as_deref() == Some("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL"))
+            .expect("cache entry keeps its own row");
+        assert_eq!(cache_row.advice_level, AdviceLevel::Warn);
+        assert!(cache_row.advice.contains("downloads it from HuggingFace"), "{}", cache_row.advice);
+        assert!(
+            cache_row.advice.contains("'Qwen3.8-27B-UD-Q5_K_XL'"),
+            "must name the on-disk twin: {}",
+            cache_row.advice
+        );
+    }
+
+    #[test]
+    fn twin_match_requires_the_same_quant() {
+        // A Q4 on the shelf is NOT a stand-in for the cache entry's Q5.
+        let models = vec![file("Qwen3.8-27B-UD-Q4_K_XL.gguf", Source::Shelf, 18, true)];
+        let routers = vec![rm("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL", "unloaded", "cache")];
+        let rows = assemble(&models, &routers, &Measurements::new(), &[], HW);
+        let cache_row = rows
+            .iter()
+            .find(|r| r.router_id.as_deref() == Some("unsloth/Qwen3.8-27B-GGUF:Q5_K_XL"))
+            .unwrap();
+        assert!(cache_row.advice.contains("downloads it from HuggingFace"), "{}", cache_row.advice);
+        assert!(
+            !cache_row.advice.contains("same model already on disk"),
+            "different quant must not be offered as a twin: {}",
+            cache_row.advice
+        );
     }
 }
