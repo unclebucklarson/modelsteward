@@ -451,6 +451,14 @@ pub struct Measurement {
     pub args_fp: Option<String>,
     /// Fingerprint of the environment (server build + devices).
     pub env_fp: Option<String>,
+    /// Baseline prompt-processing tokens/sec (llama-bench pp512, M7).
+    pub pp_tps: Option<f64>,
+    /// Baseline generation tokens/sec (llama-bench tg128).
+    pub tg_tps: Option<f64>,
+    /// llama.cpp build the bench numbers came from — a rebuild shifts
+    /// throughput without touching any model file, so this is the bench
+    /// half's staleness signal.
+    pub bench_build: Option<u64>,
 }
 
 impl Default for Measurement {
@@ -461,6 +469,9 @@ impl Default for Measurement {
             error: None,
             args_fp: None,
             env_fp: None,
+            pp_tps: None,
+            tg_tps: None,
+            bench_build: None,
         }
     }
 }
@@ -490,6 +501,22 @@ pub fn read_measurements(dir: &Path) -> Measurements {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default()
+}
+
+/// Insert a (re)measurement, carrying over bench baselines taken under the
+/// same config + environment — re-measuring ctx must not wipe them. A
+/// changed fingerprint means the old numbers describe a different setup,
+/// so they drop with it.
+pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) {
+    if let Some(old) = all.get(id)
+        && old.args_fp == m.args_fp
+        && old.env_fp == m.env_fp
+    {
+        m.pp_tps = old.pp_tps;
+        m.tg_tps = old.tg_tps;
+        m.bench_build = old.bench_build;
+    }
+    all.insert(id.to_string(), m);
 }
 
 pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
@@ -662,6 +689,7 @@ pub fn calibrate(
                     error: None,
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
+                    ..Default::default()
                 }
             }
             Err(e) => {
@@ -676,10 +704,11 @@ pub fn calibrate(
                     error: Some(detail),
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
+                    ..Default::default()
                 }
             }
         };
-        out.insert(m.id.clone(), measurement);
+        upsert_measurement(&mut out, &m.id, measurement);
         write_measurements(dir, &out)?; // persist per model — a mid-run
         // failure keeps everything measured so far
         let _ = unload_model(port, &m.id);
@@ -755,7 +784,7 @@ pub fn mine_load_error(dir: &Path) -> Option<String> {
 /// Block until the router no longer reports `model` as loaded/loading —
 /// i.e. its VRAM is actually back. Measurements taken without this race
 /// the previous model's teardown and come out low (or fail outright).
-fn wait_until_not_loaded(port: u16, model: &str, timeout: std::time::Duration) {
+pub fn wait_until_not_loaded(port: u16, model: &str, timeout: std::time::Duration) {
     let deadline = std::time::Instant::now() + timeout;
     while std::time::Instant::now() < deadline {
         match fetch_models(port) {
@@ -962,6 +991,7 @@ mod tests {
             error: None,
             args_fp: Some("aaaa".into()),
             env_fp: Some("eeee".into()),
+            ..Default::default()
         };
         assert!(m.is_fresh(Some("aaaa"), "eeee"));
         assert!(!m.is_fresh(Some("bbbb"), "eeee"), "args changed → stale");
@@ -974,6 +1004,7 @@ mod tests {
             error: Some("boom".into()),
             args_fp: Some("aaaa".into()),
             env_fp: Some("eeee".into()),
+            ..Default::default()
         };
         assert!(failed.is_fresh(Some("aaaa"), "eeee"), "failures are remembered");
     }

@@ -54,6 +54,10 @@ pub struct Row {
     pub vision: bool,
     pub mtp: bool,
     pub embedding: bool,
+    /// Baseline throughput (llama-bench, M7): prompt-processing and
+    /// generation tokens/sec, when benched on this machine.
+    pub pp_tps: Option<f64>,
+    pub tg_tps: Option<f64>,
 }
 
 /// Hardware picture for advice. `vram_mib` is the largest single device
@@ -164,8 +168,9 @@ fn advice_for(
 /// Router ids for library files, computed with the SAME logic the preset
 /// generator uses — including duplicate-alias suffixing ("-2"). Predicting
 /// aliases independently glued two same-named files onto one router entry
-/// while the real "-2" entry showed as a phantom row (user-found).
-fn router_ids_by_path(
+/// while the real "-2" entry showed as a phantom row (user-found). Public
+/// because the bench CLI needs the same id → file mapping.
+pub fn router_ids_by_path(
     models: &[ModelFile],
 ) -> std::collections::HashMap<std::path::PathBuf, String> {
     let mut out: std::collections::HashMap<std::path::PathBuf, String> =
@@ -275,6 +280,10 @@ pub fn assemble(
         let measured_ctx = measurement.and_then(|mm| mm.n_ctx);
         let tool_call = measurement.and_then(|mm| mm.tool_call);
         let failure = measurement.and_then(|mm| mm.error.clone());
+        let (pp_tps, tg_tps) = (
+            measurement.and_then(|mm| mm.pp_tps),
+            measurement.and_then(|mm| mm.tg_tps),
+        );
         let (advice_level, advice) = if !router_models.is_empty()
             && router_id.is_some()
             && server_status.is_none()
@@ -361,6 +370,8 @@ pub fn assemble(
             vision,
             mtp,
             embedding,
+            pp_tps,
+            tg_tps,
         });
     }
 
@@ -373,6 +384,10 @@ pub fn assemble(
         let measurement = measurements.get(&rm.id);
         let measured_ctx = measurement.and_then(|mm| mm.n_ctx);
         let failure = measurement.and_then(|mm| mm.error.clone());
+        let (pp_tps, tg_tps) = (
+            measurement.and_then(|mm| mm.pp_tps),
+            measurement.and_then(|mm| mm.tg_tps),
+        );
         // A "cache" entry no scanned file claimed means Load fetches from
         // HuggingFace first — a 20GB-class pull, and a *re*-download whenever
         // the repo moved past what was cached. Say so before the click, and
@@ -428,6 +443,8 @@ pub fn assemble(
             vision: false,
             mtp: false,
             embedding: false,
+            pp_tps,
+            tg_tps,
         });
     }
 
@@ -527,6 +544,7 @@ mod tests {
                 error: None,
                 args_fp: None,
                 env_fp: None,
+                ..Default::default()
             },
         );
         let rows = assemble(&models, &routers, &meas, &["a".into()], HW);

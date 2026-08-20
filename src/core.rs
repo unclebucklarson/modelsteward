@@ -2,6 +2,7 @@
 //! (M4) renders over it and must never be a dependency of it.
 
 pub mod advisor;
+pub mod bench;
 pub mod diagnose;
 pub mod discover;
 pub mod gguf;

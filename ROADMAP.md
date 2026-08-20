@@ -212,10 +212,20 @@ blanket `--mlock`.
 
 ## M7 — Performance lab
 
-llama-bench integration: baseline pp/tg per model stored beside
-measurements; A/B any preset change with measured verdict; one-click
-speculative-decoding trial (`--spec-draft-model` + small draft model);
-results shown next to every recommendation. Trial menu: see Tier B above.
+**Phase 1 DONE (2026-08-20) — baselines:** `core/bench.rs` runs llama-bench
+(pp512 + tg128 ×3, at the model's serving KV types incl. overrides), parsed
+from `-o json`; results stored in measurements.json (`pp_tps`/`tg_tps` +
+`bench_build` as the staleness signal — re-calibration under unchanged
+fingerprints preserves them via `upsert_measurement`). CLI `--bench [id]
+[force]`: sweeps every measured, non-embedding model missing a current-build
+baseline; unloads our router's models first (never touches a foreign
+server). Library gains a Speed column (pp/tg t/s). First live numbers:
+Qwen3.5-4B Q4_K_XL — pp 6034 t/s, tg 163 t/s (build 10454).
+
+**Phase 2 remaining:** A/B any preset change with measured verdict;
+one-click speculative-decoding trial (`--spec-draft-model` + same-family
+draft, e.g. Qwen3.5-4B drafting the 27Bs); GUI Bench action + showing
+results next to every recommendation. Trial menu: see Tier B above.
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 

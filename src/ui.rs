@@ -880,8 +880,8 @@ impl App {
                 .min_col_width(48.0)
                 .show(ui, |ui| {
                     for h in [
-                        "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Server",
-                        "OpenCode", "", "", "", "Advice", "",
+                        "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Speed",
+                        "Server", "OpenCode", "", "", "", "Advice", "",
                     ] {
                         ui.strong(h);
                     }
@@ -947,6 +947,24 @@ impl App {
                                 .map(|c| c.to_string())
                                 .unwrap_or_else(|| "—".into()),
                         );
+                        match (r.pp_tps, r.tg_tps) {
+                            (None, None) => {
+                                ui.label("—").on_hover_text(
+                                    "No throughput baseline yet — run `llamacppcodeconf \
+                                     --bench` with the GPU idle to measure it.",
+                                );
+                            }
+                            (pp, tg) => {
+                                let fmt = |v: Option<f64>| {
+                                    v.map(|t| format!("{t:.0}")).unwrap_or_else(|| "?".into())
+                                };
+                                ui.label(format!("{}/{}", fmt(pp), fmt(tg))).on_hover_text(
+                                    "Measured baseline, tokens per second: prompt processing \
+                                     (pp512) / generation (tg128), benched at the serving KV \
+                                     cache types via llama-bench.",
+                                );
+                            }
+                        }
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
 
                         // "In OpenCode" checkbox — the whole make-it-usable flow.
@@ -2147,14 +2165,16 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                 }
             };
             let mut all = router::read_measurements(&dir);
-            all.insert(
-                id.to_string(),
+            router::upsert_measurement(
+                &mut all,
+                id,
                 router::Measurement {
                     n_ctx: Some(ctx),
                     tool_call,
                     error: None,
                     args_fp,
                     env_fp: Some(env_fp),
+                    ..Default::default()
                 },
             );
             let _ = router::write_measurements(&dir, &all);
@@ -2186,14 +2206,16 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                 None => format!("{e:#}"),
             };
             let mut all = router::read_measurements(&dir);
-            all.insert(
-                id.to_string(),
+            router::upsert_measurement(
+                &mut all,
+                id,
                 router::Measurement {
                     n_ctx: None,
                     tool_call: None,
                     error: Some(detail.clone()),
                     args_fp,
                     env_fp: Some(env_fp),
+                    ..Default::default()
                 },
             );
             let _ = router::write_measurements(&dir, &all);
