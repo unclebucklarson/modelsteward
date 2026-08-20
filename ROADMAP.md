@@ -227,6 +227,37 @@ one-click speculative-decoding trial (`--spec-draft-model` + same-family
 draft, e.g. Qwen3.5-4B drafting the 27Bs); GUI Bench action + showing
 results next to every recommendation. Trial menu: see Tier B above.
 
+## ⏸ RESUME HERE (session ended 2026-08-20, HEAD 14130a8, 94 tests green)
+
+Stopped mid-M7 with phase 1 landed and proven (Qwen3.5-4B: pp 6034 / tg
+163 t/s). Pick up in this order:
+
+1. **Run the full baseline sweep**: `llamacppcodeconf --bench` with the GPU
+   idle (~10–15 min for the 11 loadable models). Only the 4B is benched so
+   far; the sweep's numbers are the "before" every phase-2 trial compares
+   against.
+2. **M7 phase 2 — speculative-decoding trial**: bench a 27B with
+   Qwen3.5-4B as draft, compare to the stored baseline, keep/discard by
+   measured verdict. Then generalize the A/B mechanic to the other Tier B
+   knobs (`-ub` 1024/2048, ctv q4_0, `--cpu-moe`), then a GUI Bench/Trial
+   action per Library row.
+3. After that: M6 phase 2 (post-rebuild verification loop + local-AI
+   advisor layer), Connections phase 2.
+
+Session context worth knowing on resume:
+
+- Fixed this session: load-timeout no longer kills in-flight HF downloads
+  (`downloading`/`downloaded` refresh the 600s budget); Library warns
+  before cache-entry HF downloads and points at on-disk twins.
+- The GUI instance running before shutdown was an OLD binary — anyone
+  starting the app fresh gets all of this automatically.
+- Housekeeping: a ~18.6GB partial download may still sit at
+  `~/.cache/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/
+  *.downloadInProgress` — resume it by loading the cache entry, or delete
+  it and use the shelf copy (`qwen3.8-27b-ud-q5_k_xl`, same weights,
+  prior revision). The bench live-test also unloaded
+  `qwen3.8-27b-ud-q4_k_xl` from the router; reload if wanted.
+
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 
 Inventory / backup / archival for model files lives in its own project —
