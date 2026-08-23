@@ -802,9 +802,23 @@ pub fn wait_until_not_loaded(port: u16, model: &str, timeout: std::time::Duratio
     }
 }
 
+/// Section names in the preset carrying an `mmproj =` line — models
+/// actually SERVED with a vision projector (not merely having one on
+/// disk), so their opencode.json entries may declare image input.
+pub fn vision_ids_in_preset(preset: &Path) -> std::collections::HashSet<String> {
+    ids_with_key_in_preset(preset, |line| line.starts_with("mmproj="))
+}
+
 /// Section names in the preset carrying `embedding = true` — models served
 /// for embeddings, to be excluded from chat sync and tool probes.
 pub fn embedding_ids_in_preset(preset: &Path) -> std::collections::HashSet<String> {
+    ids_with_key_in_preset(preset, |line| line == "embedding=true")
+}
+
+fn ids_with_key_in_preset(
+    preset: &Path,
+    matches: impl Fn(&str) -> bool,
+) -> std::collections::HashSet<String> {
     let mut out = std::collections::HashSet::new();
     let Ok(text) = std::fs::read_to_string(preset) else {
         return out;
@@ -814,7 +828,7 @@ pub fn embedding_ids_in_preset(preset: &Path) -> std::collections::HashSet<Strin
         let line = line.trim();
         if let Some(name) = line.strip_prefix('[').and_then(|l| l.strip_suffix(']')) {
             current = Some(name.to_string());
-        } else if line.replace(' ', "") == "embedding=true"
+        } else if matches(&line.replace(' ', ""))
             && let Some(sec) = &current
             && sec != "*"
         {

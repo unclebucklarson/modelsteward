@@ -178,6 +178,7 @@ fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredM
     // Embedding models serve /v1/embeddings — they don't belong in the
     // chat/agent config.
     let embed = router::embedding_ids_in_preset(&system::preset_path());
+    let vision = router::vision_ids_in_preset(&system::preset_path());
     m.iter()
         .filter(|(id, _)| !embed.contains(id.as_str()))
         .filter_map(|(id, m)| {
@@ -186,6 +187,7 @@ fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredM
                 display_name: format!("{id} (llama.cpp)"),
                 context: ctx,
                 tool_call: m.tool_call,
+                vision: vision.contains(id.as_str()),
             })
         })
         .collect()

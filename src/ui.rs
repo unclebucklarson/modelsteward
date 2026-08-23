@@ -2131,6 +2131,7 @@ fn run_sync(
     measurements: &router::Measurements,
 ) -> anyhow::Result<opencode::SyncReport> {
     let embed = router::embedding_ids_in_preset(&system::preset_path());
+    let vision = router::vision_ids_in_preset(&system::preset_path());
     let desired: Vec<_> = measurements
         .iter()
         .filter(|(id, _)| !embed.contains(id.as_str()))
@@ -2140,6 +2141,7 @@ fn run_sync(
                 display_name: format!("{id} (llama.cpp)"),
                 context: ctx,
                 tool_call: m.tool_call,
+                vision: vision.contains(id.as_str()),
             })
         })
         .collect();
@@ -2169,6 +2171,7 @@ fn sync_single(
         display_name: format!("{id} (llama.cpp)"),
         context: m.n_ctx.unwrap(),
         tool_call: m.tool_call,
+        vision: router::vision_ids_in_preset(&system::preset_path()).contains(id),
     };
     opencode::sync_file(
         &opencode::default_config_path(),

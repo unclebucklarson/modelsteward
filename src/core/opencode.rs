@@ -37,6 +37,11 @@ pub struct DesiredModel {
     pub context: u64,
     /// Measured tool-calling verdict; `None` = probe inconclusive.
     pub tool_call: Option<bool>,
+    /// Served with a vision projector (the preset carries `mmproj =` for
+    /// it), so the entry may declare image input. A projector merely on
+    /// disk doesn't count — OpenCode would send images to a text-only
+    /// server.
+    pub vision: bool,
 }
 
 /// The context we WRITE for a measurement: 5% safety haircut (user
@@ -56,14 +61,18 @@ impl DesiredModel {
     /// model from OpenCode's agent picker on no evidence.
     fn entry(&self) -> serde_json::Value {
         let ctx = safety_context(self.context);
-        json!({
+        let mut e = json!({
             "name": self.display_name,
             "tool_call": self.tool_call.unwrap_or(true),
             "limit": {
                 "context": ctx,
                 "output": ctx.div_euclid(2).min(32_768),
             }
-        })
+        });
+        if self.vision {
+            e["modalities"] = json!({ "input": ["text", "image"], "output": ["text"] });
+        }
+        e
     }
 
     /// The patch for an entry that already exists: always the measured
@@ -71,10 +80,13 @@ impl DesiredModel {
     /// the key yet (`fill_tool_call`). A hand-set value is never overwritten
     /// in either direction — a probe false-negative must not clobber a
     /// deliberate `true`, nor vice versa.
-    fn patch(&self, fill_tool_call: bool) -> serde_json::Value {
+    fn patch(&self, fill_tool_call: bool, fill_modalities: bool) -> serde_json::Value {
         let mut p = json!({ "limit": { "context": safety_context(self.context) } });
         if fill_tool_call && let Some(tc) = self.tool_call {
             p["tool_call"] = json!(tc);
+        }
+        if fill_modalities && self.vision {
+            p["modalities"] = json!({ "input": ["text", "image"], "output": ["text"] });
         }
         p
     }
@@ -108,18 +120,21 @@ pub fn sync_source(
 
     let existing = existing_model_ids(&source)?;
     // Which existing entries already carry a tool_call key (hand-set or
-    // previously written) — those are never patched.
+    // previously written) — those are never patched. Same rule for
+    // modalities: only filled where absent.
     let has_tool_call: std::collections::HashSet<String> = configured_from_source(&source)?
         .into_iter()
         .filter(|c| c.tool_call.is_some())
         .map(|c| c.id)
         .collect();
+    let has_modalities = model_ids_with_key(&source, "modalities")?;
     let mut report = SyncReport::default();
 
     for d in desired {
         if existing.contains(&d.id) {
             let fill = !has_tool_call.contains(&d.id);
-            source = jsonc::merge_model(&source, PROVIDER_ID, &d.id, &d.patch(fill))
+            let fill_mod = !has_modalities.contains(&d.id);
+            source = jsonc::merge_model(&source, PROVIDER_ID, &d.id, &d.patch(fill, fill_mod))
                 .with_context(|| format!("updating {}", d.id))?;
             report.updated.push(d.id.clone());
         } else {
@@ -136,6 +151,23 @@ pub fn sync_source(
         .collect();
 
     Ok((source, report))
+}
+
+/// Model ids whose entry already carries `key` — used to fill-not-overwrite.
+fn model_ids_with_key(source: &str, key: &str) -> Result<std::collections::HashSet<String>> {
+    let value = jsonc_parser::parse_to_serde_value(source, &Default::default())
+        .map_err(|e| anyhow::anyhow!("parsing opencode.json: {e}"))?
+        .unwrap_or(serde_json::Value::Null);
+    Ok(value
+        .pointer(&format!("/provider/{PROVIDER_ID}/models"))
+        .and_then(|m| m.as_object())
+        .map(|m| {
+            m.iter()
+                .filter(|(_, v)| v.get(key).is_some())
+                .map(|(k, _)| k.clone())
+                .collect()
+        })
+        .unwrap_or_default())
 }
 
 /// Model ids currently under `provider.llamacpp.models` (empty when the
@@ -311,7 +343,44 @@ mod tests {
             display_name: format!("{id} (llama.cpp)"),
             context: ctx,
             tool_call: None,
+            vision: false,
         }
+    }
+
+    #[test]
+    fn vision_writes_image_modality_but_never_overwrites() {
+        // Fresh entry for a vision-served model → image input declared.
+        let d = DesiredModel { vision: true, ..desired("looker", 90_000) };
+        let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
+        let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.pointer("/provider/llamacpp/models/looker/modalities/input"),
+            Some(&serde_json::json!(["text", "image"]))
+        );
+
+        // Existing entry with NO modalities key → filled in on update.
+        let d = DesiredModel { vision: true, ..desired("stale-model", 90_000) };
+        let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
+        let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            parsed.pointer("/provider/llamacpp/models/stale-model/modalities/input"),
+            Some(&serde_json::json!(["text", "image"])),
+            "absent modalities gets the measured truth"
+        );
+
+        // Non-vision model → no modalities key invented.
+        let d = desired("plain", 90_000);
+        let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
+        let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
+            .unwrap()
+            .unwrap();
+        assert!(parsed
+            .pointer("/provider/llamacpp/models/plain/modalities")
+            .is_none());
     }
 
     #[test]

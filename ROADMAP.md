@@ -178,8 +178,15 @@ quantized KV, belong in the Advisor's advanced section someday.)
    mmproj itself) and `embedding = true` for embed archs — feature keys
    applied after user overrides so overrides can't strip them. Embedding
    models are excluded from OpenCode chat sync and skip the tool probe
-   (recorded tool_call=false). Open: archive-to-shelf should carry the
-   mmproj companion along; OpenCode image modality for vision entries.
+   (recorded tool_call=false). ✔ OpenCode image modality (DONE 2026-08-22):
+   sync writes `modalities.input ["text","image"]` for models the preset
+   actually serves with `mmproj =` (vision_ids_in_preset — served truth,
+   not on-disk truth), fill-not-overwrite like tool_call. Open:
+   archive-to-shelf should carry the mmproj companion along (user's
+   Qwen3.8 shelf dir was missing its projector — fixed by hand via
+   hardlink from the hub snapshot's blob; NOTE the snapshot entries are
+   relative symlinks, so archive must link the resolved blob, not the
+   symlink).
 3. **Measured trials** (merges into M7): draft-model pairing for
    speculative decoding (same-family small model, e.g. Qwen3.5-4B drafting
    for the 27Bs), MTP self-speculation when upstream lands the flag —
