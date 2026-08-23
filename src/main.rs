@@ -24,9 +24,7 @@
 //!
 //! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
 
-use llamacppcodeconf::core::{
-    advisor, bench, discover, library, opencode, router, rows, settings, system,
-};
+use llamacppcodeconf::core::{advisor, bench, discover, opencode, router, settings, system};
 use std::path::PathBuf;
 
 fn main() {
@@ -109,118 +107,14 @@ fn main() {
 }
 
 /// M7 baselines: run llama-bench (pp512 + tg128) per model and store the
-/// tokens/sec beside the context measurements. llama-bench loads the model
-/// itself, so the GPU must be free first — our router gets its loaded models
-/// unloaded; a server we didn't start is never touched, only reported.
+/// tokens/sec beside the context measurements. The logic lives in
+/// core::bench::run_baselines, shared with the GUI's Server → Bench items.
 fn bench_baselines(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let force = rest.iter().any(|a| a == "force");
     let target = rest.iter().find(|a| *a != "force").cloned();
-
-    let server = system::pick_server(cfg)?;
-    let bench_bin = bench::bench_bin(&server);
-    let current_build = discover::build_of(&server);
-
-    let dir = router::state_dir();
-    match router::status(&dir, &system::router_config(cfg)) {
-        router::RouterState::Down => {}
-        router::RouterState::Ours { models } => {
-            for m in models
-                .iter()
-                .filter(|m| matches!(m.status.as_str(), "loaded" | "loading" | "sleeping"))
-            {
-                println!("unloading {} to free the GPU for benching…", m.id);
-                router::unload_model(cfg.port, &m.id)?;
-                router::wait_until_not_loaded(
-                    cfg.port,
-                    &m.id,
-                    std::time::Duration::from_secs(30),
-                );
-            }
-        }
-        other => anyhow::bail!(
-            "port {} is running a server this app doesn't own ({other:?}); \
-             benching needs the GPU free, and that server is not ours to unload",
-            cfg.port
-        ),
-    }
-
-    // The same id → file mapping the Library rows use.
-    let models = system::scan_models(cfg, &[]);
-    let ids_by_path = rows::router_ids_by_path(&models);
-    let mut by_id: std::collections::BTreeMap<String, &library::ModelFile> =
-        std::collections::BTreeMap::new();
-    for m in &models {
-        if let Some(id) = ids_by_path.get(&m.path) {
-            by_id.insert(id.clone(), m);
-        }
-    }
-
-    let mut measurements = router::read_measurements(&dir);
-    let targets: Vec<String> = match target {
-        Some(id) => {
-            anyhow::ensure!(
-                by_id.contains_key(&id),
-                "unknown model id {id:?} — --bench needs an id that maps to a file on disk \
-                 (preset alias or hub-cache id; see --status)"
-            );
-            vec![id]
-        }
-        // Default sweep: every model proven loadable (measured ctx) whose
-        // baseline is missing or from another build. Embedding models are
-        // skipped — llama-bench's text baseline doesn't describe them.
-        None => by_id
-            .iter()
-            .filter(|(id, file)| {
-                let m = measurements.get(*id);
-                let loadable = m.is_some_and(|m| m.n_ctx.is_some());
-                let fresh = m.is_some_and(|m| {
-                    m.pp_tps.is_some() && m.tg_tps.is_some() && m.bench_build == current_build
-                });
-                loadable
-                    && !library::is_embedding(file.meta.as_ref())
-                    && (force || !fresh)
-            })
-            .map(|(id, _)| id.clone())
-            .collect(),
-    };
-    if targets.is_empty() {
-        println!(
-            "nothing to bench — every measured model already has a baseline from this \
-             build (re-run with `force`, or name a model id)"
-        );
-        return Ok(());
-    }
-
-    let total = targets.len();
-    for (i, id) in targets.iter().enumerate() {
-        let n = i + 1;
-        let file = by_id[id];
-        let kv = cfg
-            .overrides
-            .get(id)
-            .and_then(|o| o.cache_type_kv.clone())
-            .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string());
-        let extra = vec!["-ctk".to_string(), kv.clone(), "-ctv".to_string(), kv];
-        println!(
-            "[{n}/{total}] benching {id} (pp512 + tg128 ×3 — a 27B takes about a minute)…"
-        );
-        match bench::run(&bench_bin, &file.path, &extra) {
-            Ok(b) => {
-                let fmt = |v: Option<f64>| v.map(|t| format!("{t:.1}")).unwrap_or("?".into());
-                println!(
-                    "[{n}/{total}] {id}: pp {} t/s, tg {} t/s",
-                    fmt(b.pp_tps),
-                    fmt(b.tg_tps)
-                );
-                let mut entry = measurements.get(id).cloned().unwrap_or_default();
-                entry.pp_tps = b.pp_tps;
-                entry.tg_tps = b.tg_tps;
-                entry.bench_build = b.build;
-                measurements.insert(id.clone(), entry);
-                router::write_measurements(&dir, &measurements)?; // persist per model
-            }
-            Err(e) => eprintln!("[{n}/{total}] {id}: bench failed: {e:#}"),
-        }
+    let n = bench::run_baselines(cfg, target, force, &mut |line| println!("{line}"))?;
+    if n > 0 {
+        println!("{n} model(s) benched — Speed column and measurements.json updated");
     }
     Ok(())
 }

@@ -11,7 +11,9 @@
 //! Every slow operation runs on a worker thread reporting over a channel;
 //! the UI thread never blocks on the network or a model load.
 
-use crate::core::{advisor, diagnose, discover, ollama, opencode, router, rows, settings, system};
+use crate::core::{
+    advisor, bench, diagnose, discover, ollama, opencode, router, rows, settings, system,
+};
 use eframe::egui;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -282,6 +284,28 @@ impl App {
         self.log(format!("{label}…"));
         let tx = self.tx.clone();
         std::thread::spawn(move || job(&tx));
+    }
+
+    fn action_bench(&mut self, force: bool) {
+        let cfg = self.cfg.clone();
+        let label = if force {
+            "re-benching ALL models (speed)"
+        } else {
+            "benching new/stale models (speed)"
+        };
+        self.spawn(label, move |tx| {
+            let tx2 = tx.clone();
+            let mut progress = move |line: String| {
+                let _ = tx2.send(Msg::Progress(line));
+            };
+            let _ = tx.send(match bench::run_baselines(&cfg, None, force, &mut progress) {
+                Ok(0) => Msg::Finished("bench: nothing to do — all baselines current".into()),
+                Ok(n) => Msg::Finished(format!(
+                    "benched {n} model(s) — Speed column updated (pp/tg tokens per second)"
+                )),
+                Err(e) => Msg::Error(format!("bench: {e:#}")),
+            });
+        });
     }
 
     fn action_regen_preset(&mut self) {
@@ -776,6 +800,30 @@ impl App {
             }
             if ui.button("Re-measure ALL (force)").clicked() {
                 self.action_calibrate(true);
+                ui.close();
+            }
+            ui.separator();
+            if ui
+                .button("Bench New/Stale Models (speed)")
+                .on_hover_text(
+                    "llama-bench baseline (prompt-processing + generation tokens/sec) for \
+                     every measured model missing a current one. Unloads the router's models \
+                     first; a 27B takes about a minute each. Fills the Speed column.",
+                )
+                .clicked()
+            {
+                self.action_bench(false);
+                ui.close();
+            }
+            if ui
+                .button("Re-bench ALL (force)")
+                .on_hover_text(
+                    "Re-measure every model's speed baseline even if current — e.g. after \
+                     a driver update or to double-check a number.",
+                )
+                .clicked()
+            {
+                self.action_bench(true);
                 ui.close();
             }
             ui.separator();

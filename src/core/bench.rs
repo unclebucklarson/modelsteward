@@ -89,6 +89,130 @@ pub fn run(bench: &Path, model: &Path, extra_args: &[String]) -> Result<Baseline
     Ok(b)
 }
 
+/// The full baseline sweep, shared by the CLI (`--bench`) and the GUI
+/// (Server → Bench). Unloads OUR router's models to free the GPU (a server
+/// we didn't start is never touched — it errors instead), then benches
+/// `target` if given, else every measured, non-embedding model whose
+/// baseline is missing or from another build. Returns how many were benched;
+/// per-model failures are narrated and skipped, not fatal.
+pub fn run_baselines(
+    cfg: &crate::core::settings::AppConfig,
+    target: Option<String>,
+    force: bool,
+    progress: &mut dyn FnMut(String),
+) -> Result<usize> {
+    use crate::core::{discover, library, router, rows, system};
+
+    let server = system::pick_server(cfg)?;
+    let bin = bench_bin(&server);
+    let current_build = discover::build_of(&server);
+    let dir = router::state_dir();
+
+    // The same id → file mapping the Library rows use.
+    let models = system::scan_models(cfg, &[]);
+    let ids_by_path = rows::router_ids_by_path(&models);
+    let mut by_id: std::collections::BTreeMap<String, &library::ModelFile> =
+        std::collections::BTreeMap::new();
+    for m in &models {
+        if let Some(id) = ids_by_path.get(&m.path) {
+            by_id.insert(id.clone(), m);
+        }
+    }
+
+    let mut measurements = router::read_measurements(&dir);
+    let targets: Vec<String> = match target {
+        Some(id) => {
+            anyhow::ensure!(
+                by_id.contains_key(&id),
+                "unknown model id {id:?} — benching needs an id that maps to a file on disk \
+                 (preset alias or hub-cache id)"
+            );
+            vec![id]
+        }
+        None => by_id
+            .iter()
+            .filter(|(id, file)| {
+                let m = measurements.get(*id);
+                let loadable = m.is_some_and(|m| m.n_ctx.is_some());
+                let fresh = m.is_some_and(|m| {
+                    m.pp_tps.is_some() && m.tg_tps.is_some() && m.bench_build == current_build
+                });
+                loadable
+                    && !library::is_embedding(file.meta.as_ref())
+                    && (force || !fresh)
+            })
+            .map(|(id, _)| id.clone())
+            .collect(),
+    };
+    if targets.is_empty() {
+        progress(
+            "nothing to bench — every measured model already has a baseline from this build"
+                .into(),
+        );
+        return Ok(0);
+    }
+
+    // Only now, with real work ahead, free the GPU: our router's resident
+    // models get unloaded; a server we didn't start is never touched.
+    match router::status(&dir, &system::router_config(cfg)) {
+        router::RouterState::Down => {}
+        router::RouterState::Ours { models } => {
+            for m in models
+                .iter()
+                .filter(|m| matches!(m.status.as_str(), "loaded" | "loading" | "sleeping"))
+            {
+                progress(format!("unloading {} to free the GPU for benching…", m.id));
+                router::unload_model(cfg.port, &m.id)?;
+                router::wait_until_not_loaded(
+                    cfg.port,
+                    &m.id,
+                    std::time::Duration::from_secs(30),
+                );
+            }
+        }
+        other => anyhow::bail!(
+            "port {} is running a server this app doesn't own ({other:?}); \
+             benching needs the GPU free, and that server is not ours to unload",
+            cfg.port
+        ),
+    }
+
+    let total = targets.len();
+    let mut benched = 0;
+    for (i, id) in targets.iter().enumerate() {
+        let n = i + 1;
+        let file = by_id[id];
+        let kv = cfg
+            .overrides
+            .get(id)
+            .and_then(|o| o.cache_type_kv.clone())
+            .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string());
+        let extra = vec!["-ctk".to_string(), kv.clone(), "-ctv".to_string(), kv];
+        progress(format!(
+            "[{n}/{total}] benching {id} (pp512 + tg128 ×3 — a 27B takes about a minute)…"
+        ));
+        match run(&bin, &file.path, &extra) {
+            Ok(b) => {
+                let fmt = |v: Option<f64>| v.map(|t| format!("{t:.1}")).unwrap_or("?".into());
+                progress(format!(
+                    "[{n}/{total}] {id}: pp {} t/s, tg {} t/s",
+                    fmt(b.pp_tps),
+                    fmt(b.tg_tps)
+                ));
+                let mut entry = measurements.get(id).cloned().unwrap_or_default();
+                entry.pp_tps = b.pp_tps;
+                entry.tg_tps = b.tg_tps;
+                entry.bench_build = b.build;
+                measurements.insert(id.clone(), entry);
+                router::write_measurements(&dir, &measurements)?; // persist per model
+                benched += 1;
+            }
+            Err(e) => progress(format!("[{n}/{total}] {id}: bench failed: {e:#}")),
+        }
+    }
+    Ok(benched)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

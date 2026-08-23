@@ -222,10 +222,16 @@ baseline; unloads our router's models first (never touches a foreign
 server). Library gains a Speed column (pp/tg t/s). First live numbers:
 Qwen3.5-4B Q4_K_XL — pp 6034 t/s, tg 163 t/s (build 10454).
 
+**GUI Bench action (DONE 2026-08-22):** Server → "Bench New/Stale Models
+(speed)" / "Re-bench ALL (force)", sharing `bench::run_baselines` with the
+CLI; narrated in the activity log, Speed column live-updates per model via
+the measurements watcher. GPU is only freed once there's real work to do
+(a bad id or nothing-to-bench never unloads anything).
+
 **Phase 2 remaining:** A/B any preset change with measured verdict;
 one-click speculative-decoding trial (`--spec-draft-model` + same-family
-draft, e.g. Qwen3.5-4B drafting the 27Bs); GUI Bench action + showing
-results next to every recommendation. Trial menu: see Tier B above.
+draft, e.g. Qwen3.5-4B drafting the 27Bs); showing bench results next to
+every recommendation. Trial menu: see Tier B above.
 
 ## ⏸ RESUME HERE (session ended 2026-08-20, HEAD 14130a8, 94 tests green)
 
