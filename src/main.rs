@@ -20,11 +20,16 @@
 //!                                        llama-bench baseline (pp/tg t/s)
 //!                                        for one model, or every measured
 //!                                        model missing a current baseline
+//!   llamacppcodeconf --trial <id> [keep <variant>|keep baseline]
+//!                                        measured speculative-decoding
+//!                                        trial: baseline + ngram variants,
+//!                                        server-timed A/B with a verdict;
+//!                                        `keep` persists a winner
 //!   llamacppcodeconf --install-service   write the systemd user unit
 //!
 //! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
 
-use llamacppcodeconf::core::{advisor, bench, discover, opencode, router, settings, system};
+use llamacppcodeconf::core::{advisor, bench, discover, opencode, router, settings, system, trial};
 use std::path::PathBuf;
 
 fn main() {
@@ -87,6 +92,7 @@ fn main() {
             Ok(())
         }
         Some("--bench") => bench_baselines(&cfg, &args[1..]),
+        Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--install-service") => system::install_systemd_unit(&cfg).map(|path| {
             println!("unit written: {}", path.display());
             println!(
@@ -95,7 +101,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --advise | --install-service | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }
@@ -115,6 +121,33 @@ fn bench_baselines(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result
     let n = bench::run_baselines(cfg, target, force, &mut |line| println!("{line}"))?;
     if n > 0 {
         println!("{n} model(s) benched — Speed column and measurements.json updated");
+    }
+    Ok(())
+}
+
+/// M7 phase 2: measured speculative-decoding trial for one model.
+/// `--trial <id>` runs baseline + the ngram variants and prints the
+/// verdict; `--trial <id> keep <variant>` persists a winner into
+/// config.json (or `keep baseline` to strip the knob).
+fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
+    let Some(model) = rest.first().filter(|a| *a != "keep") else {
+        anyhow::bail!("--trial needs a model id (a router alias or cache id)");
+    };
+    let variants = trial::spec_decode_variants();
+    if let Some(pos) = rest.iter().position(|a| a == "keep") {
+        let label = rest
+            .get(pos + 1)
+            .ok_or_else(|| anyhow::anyhow!("keep what? name a variant or `baseline`"))?;
+        trial::keep_variant(&system::config_file(), cfg, model, &variants, label)?;
+        println!("{model}: kept {label} — config.json updated, preset regenerated, router reloaded");
+        return Ok(());
+    }
+    let v = trial::run_trial(cfg, model, &variants, &mut |line| println!("{line}"))?;
+    match &v.winner {
+        Some(w) => println!(
+            "verdict: {w} wins — apply with: llamacppcodeconf --trial {model} keep {w}"
+        ),
+        None => println!("verdict: keep baseline"),
     }
     Ok(())
 }
