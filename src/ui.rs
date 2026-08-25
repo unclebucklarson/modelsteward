@@ -12,7 +12,7 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, bench, diagnose, discover, ollama, opencode, router, rows, settings, system,
+    advisor, bench, diagnose, discover, ollama, opencode, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -47,6 +47,16 @@ enum Msg {
     /// Terminates the busy state with a final line.
     Finished(String),
     Error(String),
+    /// trials.json changed on disk.
+    Trials(trial::Trials),
+    /// A measured trial finished; opens the verdict dialog.
+    TrialDone {
+        model: String,
+        winner: Option<String>,
+        reason: String,
+    },
+    /// config.json was rewritten by a background action (e.g. trial keep).
+    CfgReloaded(settings::AppConfig),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -68,6 +78,8 @@ enum RowAction {
     Archive(PathBuf),
     /// Open the per-model override editor.
     EditOverrides(String),
+    /// Run the measured speculation trial (baseline + ngram variants).
+    Trial(String),
 }
 
 struct App {
@@ -101,6 +113,15 @@ struct App {
     build_check: Option<advisor::BuildCheck>,
     backend_sel: Option<advisor::BackendSelection>,
     diagnosis: Option<DiagnosisView>,
+    trials: trial::Trials,
+    trial_verdict: Option<TrialVerdictView>,
+}
+
+/// A finished trial's verdict, shown as a dialog with an Apply action.
+struct TrialVerdictView {
+    model: String,
+    winner: Option<String>,
+    reason: String,
 }
 
 /// A diagnosis being shown for one model row.
@@ -136,6 +157,8 @@ impl App {
             router_state: None,
             ollama: Default::default(),
             measurements: router::read_measurements(&router::state_dir()),
+            trials: trial::read_trials(&router::state_dir()),
+            trial_verdict: None,
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -249,7 +272,9 @@ impl App {
         let tx = self.tx.clone();
         std::thread::spawn(move || {
             let meas_path = router::state_dir().join("measurements.json");
+            let trials_path = router::state_dir().join("trials.json");
             let mut last_meas_mtime = None;
+            let mut last_trials_mtime = None;
             loop {
                 let cfg = system::load_config();
                 let state = router::status(&router::state_dir(), &system::router_config(&cfg));
@@ -267,6 +292,11 @@ impl App {
                     let _ = tx.send(Msg::Measurements(router::read_measurements(
                         &router::state_dir(),
                     )));
+                }
+                let mtime = std::fs::metadata(&trials_path).and_then(|m| m.modified()).ok();
+                if mtime != last_trials_mtime {
+                    last_trials_mtime = mtime;
+                    let _ = tx.send(Msg::Trials(trial::read_trials(&router::state_dir())));
                 }
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -515,6 +545,26 @@ impl App {
                     };
                 });
             }
+            RowAction::Trial(id) => {
+                self.spawn(
+                    &format!("measured trial: {id} (baseline + ngram variants, ~10 min)"),
+                    move |tx| {
+                        let variants = trial::spec_decode_variants();
+                        let tx2 = tx.clone();
+                        let mut progress = move |line: String| {
+                            let _ = tx2.send(Msg::Progress(line));
+                        };
+                        let _ = match trial::run_trial(&cfg, &id, &variants, &mut progress) {
+                            Ok(v) => tx.send(Msg::TrialDone {
+                                model: id,
+                                winner: v.winner,
+                                reason: v.reason,
+                            }),
+                            Err(e) => tx.send(Msg::Error(format!("trial: {e:#}"))),
+                        };
+                    },
+                );
+            }
             RowAction::EditOverrides(id) => {
                 let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
                 let optimized_ctx = self.measurements.get(&id).and_then(|m| m.n_ctx);
@@ -710,6 +760,24 @@ impl App {
                 // Operations end with Finished/Error/SyncDone.
                 Msg::Measurements(m) => {
                     self.measurements = m;
+                    rebuild = true;
+                }
+                Msg::Trials(t) => self.trials = t,
+                Msg::TrialDone {
+                    model,
+                    winner,
+                    reason,
+                } => {
+                    self.log(format!("trial {model}: {reason}"));
+                    self.trial_verdict = Some(TrialVerdictView {
+                        model,
+                        winner,
+                        reason,
+                    });
+                    self.busy = None;
+                }
+                Msg::CfgReloaded(c) => {
+                    self.cfg = c;
                     rebuild = true;
                 }
                 Msg::PresetWritten(path, n) => {
@@ -922,6 +990,29 @@ impl App {
         let mut pending: Option<RowAction> = None;
         let mut why: Option<DiagnosisView> = None;
         let rows = self.rows.clone();
+        // Hover summaries for the 🧪 button, built outside the grid closure.
+        let trial_hints: std::collections::HashMap<String, String> = self
+            .trials
+            .iter()
+            .map(|(model, table)| {
+                let mut lines: Vec<String> = table
+                    .iter()
+                    .map(|(label, r)| match &r.error {
+                        Some(e) => format!("{label}: FAILED — {e}"),
+                        None => format!(
+                            "{label}: novel {:.1} / rewrite {:.1} t/s{}",
+                            r.tg_novel.unwrap_or(0.0),
+                            r.tg_rewrite.unwrap_or(0.0),
+                            r.accept_rewrite
+                                .map(|a| format!(" ({:.0}% accepted)", a * 100.0))
+                                .unwrap_or_default()
+                        ),
+                    })
+                    .collect();
+                lines.insert(0, "Measured trial results — click to re-run:".into());
+                (model.clone(), lines.join("\n"))
+            })
+            .collect();
         egui::ScrollArea::both().show(ui, |ui| {
             egui::Grid::new("library")
                 .striped(true)
@@ -929,7 +1020,7 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Speed",
-                        "Server", "OpenCode", "", "", "", "Advice", "",
+                        "Server", "OpenCode", "", "", "", "", "Advice", "",
                     ] {
                         ui.strong(h);
                     }
@@ -1078,7 +1169,22 @@ impl App {
                             {
                                 pending = Some(RowAction::EditOverrides(id.clone()));
                             }
+                            let hint = trial_hints.get(id).cloned().unwrap_or_else(|| {
+                                "Measured speculation trial: times this model's generation \
+                                 with each ngram speculative-decoding mode vs baseline \
+                                 (same prompts, ~10 min, loads the model repeatedly) and \
+                                 offers to keep a measured winner. Not yet trialed."
+                                    .into()
+                            });
+                            if ui
+                                .add_enabled(router_up && !r.embedding, egui::Button::new("🧪"))
+                                .on_hover_text(hint)
+                                .clicked()
+                            {
+                                pending = Some(RowAction::Trial(id.clone()));
+                            }
                         } else {
+                            ui.label("");
                             ui.label("");
                         }
 
@@ -2344,6 +2450,72 @@ impl eframe::App for App {
                     ui.label("Manages llama.cpp (router mode) + OpenCode config.");
                     ui.label("Measured, not guessed.");
                 });
+        }
+
+        if let Some(tv) = &self.trial_verdict {
+            let model = tv.model.clone();
+            let winner = tv.winner.clone();
+            let reason = tv.reason.clone();
+            let mut apply = false;
+            let mut close = false;
+            egui::Window::new(format!("Trial verdict — {model}"))
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(&reason);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        match &winner {
+                            Some(w) => {
+                                if ui
+                                    .button(format!("Keep {w}"))
+                                    .on_hover_text(
+                                        "Writes the winning config into this model's override \
+                                         (visible in ⚙), regenerates the preset, reloads the \
+                                         router.",
+                                    )
+                                    .clicked()
+                                {
+                                    apply = true;
+                                }
+                                if ui.button("Keep baseline instead").clicked() {
+                                    close = true;
+                                }
+                            }
+                            None => {
+                                if ui.button("OK (baseline kept)").clicked() {
+                                    close = true;
+                                }
+                            }
+                        }
+                    });
+                });
+            if apply && let Some(w) = winner {
+                let cfg = self.cfg.clone();
+                let m = model.clone();
+                self.spawn(&format!("keeping {w} for {m}"), move |tx| {
+                    let variants = trial::spec_decode_variants();
+                    let _ = match trial::keep_variant(
+                        &system::config_file(),
+                        &cfg,
+                        &m,
+                        &variants,
+                        &w,
+                    ) {
+                        Ok(()) => {
+                            let _ = tx.send(Msg::CfgReloaded(system::load_config()));
+                            tx.send(Msg::Finished(format!(
+                                "{m}: {w} kept — override saved, preset regenerated, router \
+                                 reloaded"
+                            )))
+                        }
+                        Err(e) => tx.send(Msg::Error(format!("keep: {e:#}"))),
+                    };
+                });
+                self.trial_verdict = None;
+            } else if close {
+                self.trial_verdict = None;
+            }
         }
     }
 }
