@@ -1040,7 +1040,8 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Speed",
-                        "Server", "OpenCode", "", "", "", "", "Advice", "",
+                        "Server", "OpenCode", "Load", "Tune", "Trial", "Archive", "Advice",
+                        "Why",
                     ] {
                         ui.strong(h);
                     }
@@ -1197,7 +1198,7 @@ impl App {
                                     .into()
                             });
                             if ui
-                                .add_enabled(router_up && !r.embedding, egui::Button::new("🧪"))
+                                .add_enabled(router_up && !r.embedding, egui::Button::new("Run"))
                                 .on_hover_text(hint)
                                 .clicked()
                             {
@@ -1214,7 +1215,7 @@ impl App {
                             && let Some(path) = &r.path
                         {
                             if ui
-                                .button("→ shelf")
+                                .button("to shelf")
                                 .on_hover_text(
                                     "Copies (hardlinks when free) this file into your models \
                                      directory. It becomes a normal shelf model: served by the \
