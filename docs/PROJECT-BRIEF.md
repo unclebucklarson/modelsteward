@@ -118,6 +118,12 @@ documentation and simulated tests, not yet validated on AMD hardware; and
 it is a personal-scale project — one machine, one primary user — not yet
 hardened by a wider install base.
 
-Planned next: a performance lab (benchmark-verified A/B of configuration
-changes, speculative-decoding trials) and a sibling project for model
-inventory/backup with content-hash identity.
+The performance lab has begun paying off: every servable model carries a
+measured speed baseline (llama-bench, re-run only when the build changes),
+and the first measured trial adopted ngram speculative decoding (zero
+VRAM, ~2x generation on edit-heavy agent work) while rejecting the
+classic draft-model pairing that conventional wisdom recommended — on a
+single 24GB card it costs 96% of usable context. Planned next: the
+generalized trial harness (A/B any config change with a measured verdict)
+and a sibling project for model inventory/backup with content-hash
+identity.

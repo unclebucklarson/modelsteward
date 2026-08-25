@@ -33,9 +33,19 @@ downstream from those measurements.
   new or stale models get re-measured; failures are remembered with their
   reasons. Synced limits carry a 5% safety margin.
 - **Feature-aware**: reads each model's actual capabilities from the file —
-  vision (mmproj companions are paired automatically), MTP layers, embedding
+  vision (mmproj companions are paired automatically, and vision-served
+  models get the image modality in OpenCode), MTP layers, embedding
   architectures (served via `/v1/embeddings`, kept out of chat configs) —
   and shows them as Library badges.
+- **Benchmarks what it serves** (Server → Bench New/Stale Models, or
+  `--bench`): llama-bench baselines — prompt-processing and generation
+  tokens/sec at the real serving KV types — stored beside the measurements
+  and shown in the Library's Speed column, re-measured only when the build
+  changes. Config changes are then judged by measured trials, not folklore:
+  the first trial adopted `ngram-simple` speculative decoding (zero VRAM,
+  ~2x generation on edit-heavy agent work) and rejected a classic
+  draft-model pairing that folklore said would win (on a single 24GB card
+  it costs 96% of your context and is 6x slower — see `docs/spikes.md`).
 - **Connects your apps** (🔌 Connections tab): OpenCode gets full config
   sync through a comment-preserving JSONC editor (hand-edits survive,
   removals are comment-outs, every write has numbered backups + a restore
@@ -69,6 +79,7 @@ llamacppcodeconf --scan        # what's on this machine (JSON)
 llamacppcodeconf --preset      # write ~/.config/llamacppcodeconf/router.ini
 llamacppcodeconf --start       # router on :8080
 llamacppcodeconf --calibrate   # measure new/stale models (add `force` for all)
+llamacppcodeconf --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
 llamacppcodeconf --sync        # write measured limits into opencode.json
 llamacppcodeconf --advise      # build advisor report
 llamacppcodeconf --status      # router + per-model state (JSON)

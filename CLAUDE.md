@@ -22,7 +22,8 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
 - Run GUI: `cargo run` (no args)
 - CLI: `--setup` (one-shot start+measure+sync), `--scan`, `--preset`,
   `--start/--status/--reload/--stop`, `--calibrate [port] [force]`
-  (incremental; skips fingerprint-fresh measurements), `--sync`,
+  (incremental; skips fingerprint-fresh measurements), `--bench [id] [force]`
+  (llama-bench pp/tg baselines; skips current-build-fresh ones), `--sync`,
   `--install-service`. App config lives at
   `~/.config/llamacppcodeconf/config.json` (see core/settings.rs);
   measurements at `~/.local/state/llamacppcodeconf/measurements.json`.

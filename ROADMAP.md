@@ -88,12 +88,10 @@ The tabs now match how a user thinks:
   hint on the Server tab explaining the three ways to start (button,
   `--start`/`--setup` CLI, systemd unit).
 
-- **Cache-source models are now calibrated/synced** (found by user: a
-  `llama-server -hf` download appeared on the Server tab but could never
-  reach OpenCode). Remaining gap: the Library tab doesn't list cache
-  models (this llama-server build doesn't expose their file paths via
-  /models) — consider merging the router's model list into the Library
-  view when the router is up.
+- ✔ **Cache-source models are calibrated/synced AND listed** (DONE): the
+  Library shows router-only cache entries as their own rows (nothing
+  servable is invisible), warns that loading one downloads from
+  HuggingFace, and points at an on-disk twin when one exists.
 - ✔ GUI reloads measurements.json on disk change (DONE). Still open:
   display-name + alias shown consistently across panes.
 - **Migrate measurements on archive**: archiving a cache model gives it a
@@ -243,36 +241,29 @@ one-click speculative-decoding trial (`--spec-draft-model` + same-family
 draft, e.g. Qwen3.5-4B drafting the 27Bs); showing bench results next to
 every recommendation. Trial menu: see Tier B above.
 
-## ⏸ RESUME HERE (session ended 2026-08-20, HEAD 14130a8, 94 tests green)
+## Where things stand (2026-08-24, HEAD f173732, 95 tests green)
 
-Stopped mid-M7 with phase 1 landed and proven (Qwen3.5-4B: pp 6034 / tg
-163 t/s). Pick up in this order:
+M7 is real: baselines swept (10 models, build 10454), GUI Bench action
+landed, and the first Tier B trial ran end to end (spike 5) — ngram-simple
+speculative decoding ADOPTED on the daily driver, classic 4B draft
+REJECTED on single-24GB hardware. Also landed since the 08-20 marker:
+HF-download timeout fix, ghost-alias cleanup (opencode.json `-2` entry),
+vision serving for the Qwen3.8 shelf models (mmproj re-linked + measured
+ctx correction) and OpenCode image-modality sync.
 
-1. **Run the full baseline sweep**: `llamacppcodeconf --bench` with the GPU
-   idle (~10–15 min for the 11 loadable models). Only the 4B is benched so
-   far; the sweep's numbers are the "before" every phase-2 trial compares
-   against.
-2. **M7 phase 2 — speculative-decoding trial**: bench a 27B with
-   Qwen3.5-4B as draft, compare to the stored baseline, keep/discard by
-   measured verdict. Then generalize the A/B mechanic to the other Tier B
-   knobs (`-ub` 1024/2048, ctv q4_0, `--cpu-moe`), then a GUI Bench/Trial
-   action per Library row.
-3. After that: M6 phase 2 (post-rebuild verification loop + local-AI
-   advisor layer), Connections phase 2.
+Next, in rough order:
 
-Session context worth knowing on resume:
-
-- Fixed this session: load-timeout no longer kills in-flight HF downloads
-  (`downloading`/`downloaded` refresh the 600s budget); Library warns
-  before cache-entry HF downloads and points at on-disk twins.
-- The GUI instance running before shutdown was an OLD binary — anyone
-  starting the app fresh gets all of this automatically.
-- Housekeeping: a ~18.6GB partial download may still sit at
-  `~/.cache/huggingface/hub/models--unsloth--Qwen3.8-27B-GGUF/blobs/
-  *.downloadInProgress` — resume it by loading the cache entry, or delete
-  it and use the shelf copy (`qwen3.8-27b-ud-q5_k_xl`, same weights,
-  prior revision). The bench live-test also unloaded
-  `qwen3.8-27b-ud-q4_k_xl` from the router; reload if wanted.
+1. **M7 phase 2 — the trial harness**: generalize spike 5's methodology
+   (same-prompts server-timed A/B, acceptance rate, ctx delta, verdict)
+   into core + a per-row Trial action. First candidates: the other ngram
+   variants (ngram-map-k/k4v/mod/cache), `-ub` 1024/2048, ctv q4_0,
+   `--cpu-moe` advice for MoE-over-VRAM.
+2. **Alias-death migration** (small, fresh pain): measurements + config
+   entries should follow a model when its alias changes; ghosts get
+   commented out by the app, not by hand.
+3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor layer.
+4. Connections phase 2; Tier C (slot persistence, LAN serving);
+   archive-to-shelf carrying mmproj (link the resolved blob!).
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 
