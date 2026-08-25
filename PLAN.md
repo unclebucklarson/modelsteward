@@ -1,11 +1,12 @@
 # llamacppCodeConf — Plan (founding design, kept as history)
 
-> **Status 2026-08-24:** M0–M5.7, M6 phase 1, M6.5 phases 1–2, the
-> Connections pivot, and M7 phase 1 (llama-bench baselines, swept) are
-> DONE, plus the first Tier B trial (spike 5: ngram speculative decoding
-> adopted) — see [ROADMAP.md](ROADMAP.md) "Where things stand" for the
-> live tracking. One scope evolution since this plan was written: the app
-> is a **llama.cpp server manager for any OpenAI-compatible app**
+> **Status 2026-08-25:** M0–M5.7, M6 phase 1, M6.5 phases 1–2, the
+> Connections pivot, M7 phases 1–2 (baselines + the measured-trial
+> harness, campaigned: ngram speculation adopted fleet-wide where it
+> earned its keep), and the wild-readiness pass are DONE — see
+> [ROADMAP.md](ROADMAP.md) "Where things stand" for the live tracking.
+> One scope evolution since this plan was written: the app is a
+> **llama.cpp server manager for any OpenAI-compatible app**
 > (Connections tab), with OpenCode as its first-class synced connector
 > rather than its only purpose. Everything else here held up.
 

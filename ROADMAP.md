@@ -242,7 +242,16 @@ one-click speculative-decoding trial (`--spec-draft-model` + same-family
 draft, e.g. Qwen3.5-4B drafting the 27Bs); showing bench results next to
 every recommendation. Trial menu: see Tier B above.
 
-## Where things stand (2026-08-24, HEAD f173732, 95 tests green)
+## Where things stand (2026-08-25, HEAD 8c35866, 103 tests green)
+
+Since the 08-24 stamp below: M7 phase 2 core landed and campaigned
+(ngram-simple kept on 4 models; north-mini also kept ub-2048 via the new
+tradeoff flow), the wild-readiness pass closed the babysitter gaps
+(near-miss choices, contention-aware measuring, trial-fed limits),
+archive now migrates measurements + carries mmproj, action columns got
+headers, and the daily upstream freshness check landed. User rebuilt to
+b10630 — the four format-locked models await re-measurement (M6p2's
+verification loop is next).
 
 M7 is real: baselines swept (10 models, build 10454), GUI Bench action
 landed, and the first Tier B trial ran end to end (spike 5) — ngram-simple

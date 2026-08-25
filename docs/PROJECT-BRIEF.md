@@ -118,12 +118,14 @@ documentation and simulated tests, not yet validated on AMD hardware; and
 it is a personal-scale project — one machine, one primary user — not yet
 hardened by a wider install base.
 
-The performance lab has begun paying off: every servable model carries a
-measured speed baseline (llama-bench, re-run only when the build changes),
-and the first measured trial adopted ngram speculative decoding (zero
-VRAM, ~2x generation on edit-heavy agent work) while rejecting the
-classic draft-model pairing that conventional wisdom recommended — on a
+The performance lab is delivering: every servable model carries a
+measured speed baseline, and the generalized trial harness A/Bs any
+config change with a measured verdict — winners apply in one click,
+rule-rejected tradeoffs are surfaced for human judgment rather than
+swallowed. Its first campaigns adopted ngram speculative decoding
+fleet-wide where it earned its keep (up to +118% generation on
+edit-heavy agent work, zero VRAM) while measuring and rejecting the
+classic draft-model pairing conventional wisdom recommended — on a
 single 24GB card it costs 96% of usable context. Planned next: the
-generalized trial harness (A/B any config change with a measured verdict)
-and a sibling project for model inventory/backup with content-hash
-identity.
+post-rebuild verification loop ("this rebuild unlocked N models ✓") and
+a sibling project for model inventory/backup with content-hash identity.

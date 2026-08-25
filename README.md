@@ -41,11 +41,21 @@ downstream from those measurements.
   `--bench`): llama-bench baselines — prompt-processing and generation
   tokens/sec at the real serving KV types — stored beside the measurements
   and shown in the Library's Speed column, re-measured only when the build
-  changes. Config changes are then judged by measured trials, not folklore:
-  the first trial adopted `ngram-simple` speculative decoding (zero VRAM,
-  ~2x generation on edit-heavy agent work) and rejected a classic
-  draft-model pairing that folklore said would win (on a single 24GB card
-  it costs 96% of your context and is 6x slower — see `docs/spikes.md`).
+  changes.
+- **Trials config changes instead of trusting folklore** (each row's
+  Trial → Run, or `--trial <id> [spec|ub]`): baseline vs candidates,
+  server-timed on fixed prompts, ending in a verdict dialog with the full
+  measured table. Strict rules pick winners that cost nothing; tradeoffs
+  the rules reject (say, +50% prefill for context you'd never use) are
+  surfaced as explicit "your call" choices instead of dying silently.
+  Keeping a winner writes the override, reloads the router, and syncs the
+  honest new limits in one step. First campaigns: `ngram-simple`
+  speculation adopted on four models (up to +118% generation on
+  edit-heavy agent work, zero VRAM) while the folklore-favorite classic
+  draft model was measured and rejected (on a single 24GB card it costs
+  96% of your context and is 6x slower — `docs/spikes.md`). Measurements
+  that collide with your own coding session are skipped as "server busy",
+  never recorded as model failures.
 - **Connects your apps** (🔌 Connections tab): OpenCode gets full config
   sync through a comment-preserving JSONC editor (hand-edits survive,
   removals are comment-outs, every write has numbered backups + a restore
@@ -55,7 +65,9 @@ downstream from those measurements.
   language, the exact error line as evidence, and remedy buttons. No "see
   logs".
 - **Advises on your build** (Server → Check My llama.cpp): compares your
-  binary against your checkout and upstream, detects your toolchains
+  binary against your checkout and upstream (plus one quiet daily fetch so
+  the Server tab always knows when a newer build exists — it observes your
+  checkout, never modifies it), detects your toolchains
   (CUDA / Vulkan / ROCm with per-backend checkboxes), names the models a
   rebuild would unlock, and runs the guided rebuild itself — fast-forward
   pull only, every backend passed to cmake explicitly so stale caches can't
@@ -80,6 +92,7 @@ llamacppcodeconf --preset      # write ~/.config/llamacppcodeconf/router.ini
 llamacppcodeconf --start       # router on :8080
 llamacppcodeconf --calibrate   # measure new/stale models (add `force` for all)
 llamacppcodeconf --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
+llamacppcodeconf --trial <id>  # measured config trial ([spec|ub]; `keep <variant>` applies)
 llamacppcodeconf --sync        # write measured limits into opencode.json
 llamacppcodeconf --advise      # build advisor report
 llamacppcodeconf --status      # router + per-model state (JSON)
