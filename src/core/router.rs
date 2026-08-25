@@ -413,15 +413,22 @@ pub fn stop(dir: &Path, preset: &Path) -> Result<()> {
     if !ok {
         bail!("kill {pid} failed");
     }
-    // Give it a moment; router children get llama-server's stop-timeout.
-    for _ in 0..50 {
+    // Router children get llama-server's own stop-timeout, and a router
+    // with a loaded model can take well over 5s to wind down. Waiting too
+    // short is worse than waiting long: the SIGTERM stays in flight, the
+    // router dies AFTER the error, and the caller walks away believing it
+    // is still up (live failure 2026-08-25 during --verify-rebuild).
+    for _ in 0..300 {
         if find_preset_process(preset).is_none() {
             clear_marker(dir);
             return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    bail!("router (pid {pid}) did not exit within 5s; not escalating automatically")
+    bail!(
+        "router (pid {pid}) still running 30s after SIGTERM; not escalating \
+         automatically — it may exit late, so check --status before restarting"
+    )
 }
 
 // ─── calibration ─────────────────────────────────────────────────────────────

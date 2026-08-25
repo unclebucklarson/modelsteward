@@ -444,66 +444,7 @@ impl App {
     fn action_setup(&mut self) {
         let cfg = self.cfg.clone();
         self.spawn("setting up everything", move |tx| {
-            let step = |m: &str| {
-                let _ = tx.send(Msg::Progress(format!("setup: {m}")));
-            };
-            let rcfg = system::router_config(&cfg);
-            let dir = router::state_dir();
-            match router::status(&dir, &rcfg) {
-                router::RouterState::Ours { .. } => step("router already running"),
-                router::RouterState::Down => {
-                    step("starting router");
-                    if let Err(e) = start_router(&cfg) {
-                        let _ = tx.send(Msg::Error(format!("setup/start: {e:#}")));
-                        return;
-                    }
-                    let mut up = false;
-                    for _ in 0..30 {
-                        std::thread::sleep(std::time::Duration::from_secs(1));
-                        if matches!(router::status(&dir, &rcfg), router::RouterState::Ours { .. })
-                        {
-                            up = true;
-                            break;
-                        }
-                    }
-                    if !up {
-                        let _ = tx.send(Msg::Error(
-                            "setup: router did not come up within 30s — see router.log".into(),
-                        ));
-                        return;
-                    }
-                    step("router is up");
-                }
-                other => {
-                    let _ = tx.send(Msg::Error(format!(
-                        "setup: port {} is not ours: {other:?}",
-                        cfg.port
-                    )));
-                    return;
-                }
-            }
-            step("measuring anything new or stale");
-            let measurements = match run_calibration(&cfg, false, tx) {
-                Ok(m) => m,
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("setup/calibrate: {e:#}")));
-                    return;
-                }
-            };
-            let _ = tx.send(Msg::Measurements(measurements.clone()));
-            step("syncing opencode.json");
-            match run_sync(&cfg, &measurements) {
-                Ok(report) => {
-                    let _ = tx.send(Msg::SyncDone(report));
-                    send_configured(tx);
-                    let _ = tx.send(Msg::Progress(
-                        "setup complete — OpenCode is ready to use these models".into(),
-                    ));
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("setup/sync: {e:#}")));
-                }
-            }
+            setup_flow(&cfg, tx);
         });
     }
 
@@ -725,24 +666,55 @@ impl App {
         let sel = self
             .backend_sel
             .unwrap_or_else(|| advisor::default_backends(&check));
+        let cfg = self.cfg.clone();
         self.spawn(
-            "updating + rebuilding llama.cpp (this takes many minutes)",
+            "updating + rebuilding llama.cpp, then verifying (this takes many minutes)",
             move |tx| {
                 let progress_tx = tx.clone();
                 let result = advisor::run_rebuild(&check, sel, &mut |line| {
                     let _ = progress_tx.send(Msg::Progress(line));
                 });
-                let _ = tx.send(match result {
-                    Ok(()) => Msg::Finished(
-                        "rebuild complete ✓ — now: Stop Router, Start Router, then Set Up \
-                         Everything (a new build makes every measurement stale, so it \
-                         re-measures and re-checks the previously locked models)"
-                            .into(),
-                    ),
-                    Err(e) => Msg::Error(format!(
-                        "rebuild failed: {e:#} — your existing binaries are untouched"
-                    )),
-                });
+                match result {
+                    Ok(()) => {
+                        // M6 phase 2: the verification loop. A running
+                        // router keeps serving the OLD binary (children
+                        // exec whatever is on disk — a subtle mix worth
+                        // ending), so restart, then measure + sync, then
+                        // report what the rebuild actually changed.
+                        let _ = tx.send(Msg::Progress(
+                            "rebuild complete ✓ — verifying what it changed…".into(),
+                        ));
+                        let dir = router::state_dir();
+                        let before = router::read_measurements(&dir);
+                        if matches!(
+                            router::status(&dir, &system::router_config(&cfg)),
+                            router::RouterState::Ours { .. }
+                        ) {
+                            let _ = tx.send(Msg::Progress(
+                                "restarting router onto the new binary".into(),
+                            ));
+                            let _ = router::stop(&dir, &system::preset_path());
+                        }
+                        if setup_flow(&cfg, tx) {
+                            let after = router::read_measurements(&dir);
+                            for line in advisor::verify_summary(&advisor::verify_outcome(
+                                &before, &after,
+                            )) {
+                                let _ = tx.send(Msg::Progress(format!("verification: {line}")));
+                            }
+                            let _ = tx.send(Msg::Finished(
+                                "rebuild verified — the verification lines above are the \
+                                 measured outcome"
+                                    .into(),
+                            ));
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(Msg::Error(format!(
+                            "rebuild failed: {e:#} — your existing binaries are untouched"
+                        )));
+                    }
+                }
             },
         );
     }
@@ -2371,6 +2343,74 @@ fn sync_single(
         &[desired],
     )?;
     Ok(())
+}
+
+/// The setup sequence shared by Set Up Everything and the post-rebuild
+/// verification: start if down → wait healthy → incremental calibrate →
+/// sync. Narrates via tx; on failure it reports (Msg::Error) and returns
+/// false so callers stop there.
+fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
+    let step = |m: &str| {
+        let _ = tx.send(Msg::Progress(format!("setup: {m}")));
+    };
+    let rcfg = system::router_config(cfg);
+    let dir = router::state_dir();
+    match router::status(&dir, &rcfg) {
+        router::RouterState::Ours { .. } => step("router already running"),
+        router::RouterState::Down => {
+            step("starting router");
+            if let Err(e) = start_router(cfg) {
+                let _ = tx.send(Msg::Error(format!("setup/start: {e:#}")));
+                return false;
+            }
+            let mut up = false;
+            for _ in 0..30 {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if matches!(router::status(&dir, &rcfg), router::RouterState::Ours { .. }) {
+                    up = true;
+                    break;
+                }
+            }
+            if !up {
+                let _ = tx.send(Msg::Error(
+                    "setup: router did not come up within 30s — see router.log".into(),
+                ));
+                return false;
+            }
+            step("router is up");
+        }
+        other => {
+            let _ = tx.send(Msg::Error(format!(
+                "setup: port {} is not ours: {other:?}",
+                cfg.port
+            )));
+            return false;
+        }
+    }
+    step("measuring anything new or stale");
+    let measurements = match run_calibration(cfg, false, tx) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = tx.send(Msg::Error(format!("setup/calibrate: {e:#}")));
+            return false;
+        }
+    };
+    let _ = tx.send(Msg::Measurements(measurements.clone()));
+    step("syncing opencode.json");
+    match run_sync(cfg, &measurements) {
+        Ok(report) => {
+            let _ = tx.send(Msg::SyncDone(report));
+            send_configured(tx);
+            let _ = tx.send(Msg::Progress(
+                "setup complete — OpenCode is ready to use these models".into(),
+            ));
+            true
+        }
+        Err(e) => {
+            let _ = tx.send(Msg::Error(format!("setup/sync: {e:#}")));
+            false
+        }
+    }
 }
 
 fn send_configured(tx: &Sender<Msg>) {

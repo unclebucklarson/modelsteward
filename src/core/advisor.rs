@@ -128,6 +128,126 @@ pub fn upstream_probe(server_bin: &Path, current_build: Option<u64>) -> Upstream
     s
 }
 
+/// What a rebuild actually changed, measured — the honest answer to "did
+/// that rebuild help?". Computed from before/after measurement snapshots
+/// (live case 2026-08-25: b10454→b10630 unlocked nothing, confirmed four
+/// Ollama-only conversions, and cost ~9% context across the board).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct VerifyReport {
+    /// Errored before, measured now — the rebuild's wins.
+    pub unlocked: Vec<String>,
+    /// Errored before and after — confirmed not-a-build-problem.
+    pub still_locked: Vec<String>,
+    /// Measured before, errored now — a rebuild REGRESSION, lead with it.
+    pub newly_locked: Vec<String>,
+    /// (id, ctx_before, ctx_after) where both measured and differ — new
+    /// builds shift VRAM use, and synced limits follow the measurement.
+    pub ctx_shifts: Vec<(String, u64, u64)>,
+}
+
+pub fn verify_outcome(before: &Measurements, after: &Measurements) -> VerifyReport {
+    let mut r = VerifyReport::default();
+    for (id, b) in before {
+        let Some(a) = after.get(id) else { continue };
+        match (b.error.is_some(), a.error.is_some()) {
+            (true, false) if a.n_ctx.is_some() => r.unlocked.push(id.clone()),
+            (true, true) => r.still_locked.push(id.clone()),
+            (false, true) => r.newly_locked.push(id.clone()),
+            _ => {}
+        }
+        if let (Some(bc), Some(ac)) = (b.n_ctx, a.n_ctx)
+            && bc != ac
+        {
+            r.ctx_shifts.push((id.clone(), bc, ac));
+        }
+    }
+    r
+}
+
+#[cfg(test)]
+mod verify_tests {
+    use super::*;
+
+    fn m(ctx: Option<u64>, err: Option<&str>) -> crate::core::router::Measurement {
+        crate::core::router::Measurement {
+            n_ctx: ctx,
+            error: err.map(String::from),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn verify_outcome_classifies_the_b10630_case() {
+        // The live 2026-08-25 shape: nothing unlocked, locks persist,
+        // context dropped everywhere.
+        let mut before = Measurements::new();
+        let mut after = Measurements::new();
+        before.insert("locked".into(), m(None, Some("rope sections")));
+        after.insert("locked".into(), m(None, Some("rope sections")));
+        before.insert("fine".into(), m(Some(120_064), None));
+        after.insert("fine".into(), m(Some(111_872), None));
+        before.insert("wins".into(), m(None, Some("old format")));
+        after.insert("wins".into(), m(Some(90_000), None));
+        before.insert("regresses".into(), m(Some(50_000), None));
+        after.insert("regresses".into(), m(None, Some("boom")));
+        let r = verify_outcome(&before, &after);
+        assert_eq!(r.unlocked, vec!["wins"]);
+        assert_eq!(r.still_locked, vec!["locked"]);
+        assert_eq!(r.newly_locked, vec!["regresses"]);
+        assert_eq!(r.ctx_shifts, vec![("fine".to_string(), 120_064, 111_872)]);
+        let text = verify_summary(&r).join("\n");
+        assert!(text.contains("REGRESSION"), "{text}");
+        assert!(text.contains("unlocked ✓"), "{text}");
+        assert!(text.contains("-7%") || text.contains("−7%"), "{text}");
+    }
+}
+
+/// The report in sentences (shared by CLI and GUI log lines).
+pub fn verify_summary(r: &VerifyReport) -> Vec<String> {
+    let mut out = Vec::new();
+    if !r.newly_locked.is_empty() {
+        out.push(format!(
+            "⚠ REGRESSION: {} loaded before this rebuild but fail now — consider \
+             rebuilding an older tag: {}",
+            r.newly_locked.len(),
+            r.newly_locked.join(", ")
+        ));
+    }
+    if !r.unlocked.is_empty() {
+        out.push(format!(
+            "{} model(s) unlocked ✓: {}",
+            r.unlocked.len(),
+            r.unlocked.join(", ")
+        ));
+    }
+    if !r.still_locked.is_empty() {
+        out.push(format!(
+            "still locked ({}): {} — see each row's Why? (a current build that \
+             still rejects a file usually means an Ollama-only conversion)",
+            r.still_locked.len(),
+            r.still_locked.join(", ")
+        ));
+    }
+    if !r.ctx_shifts.is_empty() {
+        let mean: f64 = r
+            .ctx_shifts
+            .iter()
+            .map(|(_, b, a)| *a as f64 / *b as f64 - 1.0)
+            .sum::<f64>()
+            / r.ctx_shifts.len() as f64;
+        out.push(format!(
+            "measured context shifted on {} model(s) (mean {:+.0}%) — synced \
+             limits already follow the new measurements",
+            r.ctx_shifts.len(),
+            mean * 100.0
+        ));
+    }
+    if out.is_empty() {
+        out.push("no measured changes — same locks, same contexts".into());
+    }
+    out
+}
+
 /// Locate the git checkout for a llama-server at `<repo>/build/bin/llama-server`.
 pub fn repo_of(server_bin: &Path) -> Option<PathBuf> {
     let repo = server_bin.parent()?.parent()?.parent()?;

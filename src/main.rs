@@ -26,6 +26,10 @@
 //!                                        speculation, ub = prefill batch),
 //!                                        server-timed A/B with a verdict;
 //!                                        `keep` persists a winner
+//!   llamacppcodeconf --verify-rebuild    after a rebuild: restart router,
+//!                                        re-measure stale, sync, and report
+//!                                        what changed (unlocked / still
+//!                                        locked / context shifts)
 //!   llamacppcodeconf --install-service   write the systemd user unit
 //!
 //! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
@@ -94,6 +98,7 @@ fn main() {
         }
         Some("--bench") => bench_baselines(&cfg, &args[1..]),
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
+        Some("--verify-rebuild") => verify_rebuild(&cfg),
         Some("--install-service") => system::install_systemd_unit(&cfg).map(|path| {
             println!("unit written: {}", path.display());
             println!(
@@ -102,7 +107,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --advise | --install-service | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }
@@ -299,4 +304,32 @@ fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
     }
     calibrate(cfg, false)?;
     sync(cfg)
+}
+
+/// M6 phase 2: the post-rebuild verification loop. Snapshot → restart the
+/// router (a running router keeps serving the OLD binary; children exec
+/// whatever is on disk, so the mix is subtle and worth ending) → measure
+/// everything the new environment fingerprint marked stale → sync →
+/// report what the rebuild actually changed, measured.
+fn verify_rebuild(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    let dir = router::state_dir();
+    let before = router::read_measurements(&dir);
+    match router::status(&dir, &system::router_config(cfg)) {
+        router::RouterState::Ours { .. } => {
+            println!("restarting router so it runs the new binary…");
+            router::stop(&dir, &system::preset_path())?;
+        }
+        router::RouterState::Down => {}
+        other => anyhow::bail!(
+            "port {} is not ours to restart ({other:?}) — verification needs our router",
+            cfg.port
+        ),
+    }
+    setup(cfg)?;
+    let after = router::read_measurements(&dir);
+    println!("— rebuild verification —");
+    for line in advisor::verify_summary(&advisor::verify_outcome(&before, &after)) {
+        println!("{line}");
+    }
+    Ok(())
 }
