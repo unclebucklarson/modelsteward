@@ -200,13 +200,16 @@ longer reprocess everything after them) and `cache-ram = 24576` in the
 preset `[*]`; Build Advisor now flags GPU persistence mode off (driver
 re-init latency on every load; `sudo nvidia-smi -pm 1`).
 
-**Tier B — measured-trial menu (feeds M7):** speculative decoding with a
-same-family draft model (Qwen3.5-4B drafting the 27Bs — tokenizer
-compatibility is itself a measurement); `-ub` physical batch 512→1024/2048
-(prefill speed vs a small VRAM/context cost); asymmetric KV quant
-(ctk q8_0 + ctv q4_0) for more context, quality-checked; **MoE-aware
-offload** (`--cpu-moe` / `-ot 'exps=CPU'`) — advise automatically when a
-detected MoE model exceeds VRAM: attention on GPU, expert weights in RAM.
+**Tier B — measured-trial menu (feeds M7):** ✔ speculative decoding
+TRIED (spike 5, 2026-08-24): classic 4B draft REJECTED on 24GB (context
+collapse + 6x slower), **ngram-simple adopted** on the daily driver (zero
+VRAM, +121% on rewrite work; `spec-type = ngram-simple` override) — the
+M7 harness should trial ngram variants per model and a classic draft
+again when a second GPU exists. Still to trial: `-ub` physical batch
+512→1024/2048 (prefill speed vs a small VRAM/context cost); asymmetric
+KV quant (ctk q8_0 + ctv q4_0) for more context, quality-checked;
+**MoE-aware offload** (`--cpu-moe` / `-ot 'exps=CPU'`) — advise
+automatically when a detected MoE model exceeds VRAM.
 
 **Tier C — niche/delightful:** slot persistence (`--slot-save-path` +
 save/restore API) so a router restart doesn't cost a full agent-session

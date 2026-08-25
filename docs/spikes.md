@@ -92,3 +92,30 @@ Real-model run: Qwen3.6-27B quants on the 24GB RTX 3090 Ti, via the router.
   mid-arguments; don't cap output tightly in agent use.
 - Load status polling behaved as documented (async load/unload, `loading` →
   `loaded`; unloaded instance freed VRAM before the next load completed).
+
+## Spike 5 — speculative decoding on a single 24GB card (2026-08-24, b10454)
+
+Target: qwen3.8-27b-ud-q4_k_xl (17.9GB weights + mmproj). Server-timed
+generations (temperature 0, cache_prompt off), two novel-code prompts +
+one rewrite prompt (add docstrings to a 10-function module).
+
+| scenario            | baseline | 4B classic draft | ngram-simple |
+|---------------------|----------|------------------|--------------|
+| settled ctx (--fit) | 116,224  | 4,096            | 117,248      |
+| novel code tg       | 38.6 t/s | 6.4 t/s          | 40.4 t/s     |
+| rewrite tg          | 39.2 t/s | —                | 86.8 t/s     |
+
+- **Classic draft (Qwen3.5-4B) REJECTED on this hardware:** the 2.8GB
+  draft collapses `--fit` context to 4,096 and the leftover-VRAM draft
+  placement makes it 6x SLOWER (43% acceptance can't save a slow
+  drafter). Not viable until a second GPU exists.
+- **Gotcha:** a draft file carrying MTP tensors makes llama-server
+  auto-select `draft-mtp` mode, which asserts the draft's MTP width
+  matches the TARGET's hidden width (4B=2560 vs 27B=5120 → crash).
+  `spec-type = draft-simple` forces classic mode.
+- **ngram-simple ADOPTED for the daily driver:** zero VRAM, zero context
+  cost, +5% on novel code, **+121% on edit/rewrite work** (45%
+  acceptance) — the agent-workload sweet spot. Enabled via override
+  `spec-type = ngram-simple` on qwen3.8-27b-ud-q4_k_xl.
+- Untried variants for the M7 harness: ngram-map-k/k4v/mod/cache,
+  draft-eagle3/dflash/dspark (need matching aux models).
