@@ -137,10 +137,16 @@ per-backend checkboxes with detection-based defaults; all backends passed
 to cmake explicitly ON/OFF so stale caches can't drift a build; verdicts
 call out near-misses (GPU present, toolchain missing → suggest Vulkan).
 
+**Phase 2 — verification loop DONE (2026-08-25):** the guided rebuild
+now chains straight into stop → start (onto the new binary) → measure
+stale → sync → a measured report: unlocked ✓ / still locked (with the
+Ollama-only reframe) / ⚠ REGRESSION / context shifts (new builds move
+VRAM use — b10630 cost ~9% fleet-wide, limits followed honestly). CLI
+`--verify-rebuild` covers out-of-band rebuilds. Found live: stop's 5s
+wait raced llama-server's own wind-down (SIGTERM landed after the
+error) — now 30s with an honest late-exit message.
+
 **Phase 2 remaining:**
-- Post-rebuild verification loop: after a successful rebuild, offer/auto
-  run stop → start → Set Up Everything and report "N models unlocked ✓"
-  against the pre-rebuild locked list.
 - The `Advisor` AI layer (default backend: the local model this app
   serves) for build-log diagnosis and tradeoff explanations — picks from
   the rules engine's flag allowlist, never invents flags.
