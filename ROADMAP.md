@@ -284,7 +284,13 @@ limit immediately. Standing rule adopted: every hand-fix prompts
 2. **Ghost comment-out by the app**: config entries whose id a REACHABLE
    router no longer offers could be auto-commented on sync (design call:
    currently orphans are reported and removal stays a user action).
-3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor layer.
+3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor
+   layer. ✔ Daily upstream freshness (DONE 2026-08-25, user request —
+   manual checks left the checkout 167 commits stale): the status poller
+   runs one quiet `git fetch` per day (remote-tracking refs only, never
+   the working tree), persists the stamp to upstream.json, shows
+   freshness at the top of the Server tab, and logs when a newer build
+   appears.
 4. Connections phase 2; Tier C (slot persistence, LAN serving).
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
@@ -296,6 +302,18 @@ Consequence here: roadmap item 7 (HF downloads) moves to modelwarden —
 acquisition is storage-side.
 
 ## Parked / ideas
+
+- **App-managed llama.cpp checkout** (user idea 2026-08-25): the app
+  creates and owns a default checkout (e.g. `~/.local/share/
+  llamacppcodeconf/llama.cpp`), telling the user hands-off — making
+  ff-pulls, rebuilds, and freshness checks always safe (no dirty-state
+  or diverged-branch surprises). Tradeoffs to settle before building:
+  disk cost of a second checkout when `~/src/llama.cpp` already exists;
+  the observe-don't-touch principle (an app-OWNED repo is exempt, like
+  the router we start); how the Settings binary picker presents
+  "managed" vs "mine"; and whether the Build Advisor's guided rebuild
+  then defaults to the managed copy. Decide together before M6 phase 2
+  builds the verification loop on top.
 
 - **Serve unoffered HF-hub variants**: a hub file whose variant the router's
   cache index doesn't list (e.g. a second quant of the same repo) currently

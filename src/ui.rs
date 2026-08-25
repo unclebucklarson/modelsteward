@@ -57,6 +57,8 @@ enum Msg {
     },
     /// config.json was rewritten by a background action (e.g. trial keep).
     CfgReloaded(settings::AppConfig),
+    /// The daily upstream freshness probe finished.
+    Upstream(advisor::UpstreamStatus),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -115,6 +117,7 @@ struct App {
     diagnosis: Option<DiagnosisView>,
     trials: trial::Trials,
     trial_verdict: Option<TrialVerdictView>,
+    upstream: Option<advisor::UpstreamStatus>,
 }
 
 /// A finished trial's verdict, shown as a dialog: the measured table, the
@@ -160,6 +163,7 @@ impl App {
             measurements: router::read_measurements(&router::state_dir()),
             trials: trial::read_trials(&router::state_dir()),
             trial_verdict: None,
+            upstream: advisor::read_upstream_status(&router::state_dir()),
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -298,6 +302,21 @@ impl App {
                 if mtime != last_trials_mtime {
                     last_trials_mtime = mtime;
                     let _ = tx.send(Msg::Trials(trial::read_trials(&router::state_dir())));
+                }
+                // Daily upstream freshness (user request 2026-08-25): one
+                // quiet fetch per day, remote-tracking refs only. The
+                // persisted stamp keeps restarts from refetching early.
+                let due = advisor::read_upstream_status(&router::state_dir())
+                    .map(|s| {
+                        advisor::now_epoch().saturating_sub(s.checked_epoch)
+                            >= advisor::UPSTREAM_CHECK_INTERVAL_SECS
+                    })
+                    .unwrap_or(true);
+                if due && let Ok(server) = system::pick_server(&cfg) {
+                    let build = discover::build_of(&server);
+                    let s = advisor::upstream_probe(&server, build);
+                    advisor::write_upstream_status(&router::state_dir(), &s);
+                    let _ = tx.send(Msg::Upstream(s));
                 }
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -799,6 +818,17 @@ impl App {
                 Msg::CfgReloaded(c) => {
                     self.cfg = c;
                     rebuild = true;
+                }
+                Msg::Upstream(s) => {
+                    if let (Some(cur), Some(up)) = (s.current_build, s.upstream_build)
+                        && up > cur
+                    {
+                        self.log(format!(
+                            "llama.cpp upstream has b{up} (you run b{cur}) — Server → \
+                             Check My llama.cpp for the guided update"
+                        ));
+                    }
+                    self.upstream = Some(s);
                 }
                 Msg::PresetWritten(path, n) => {
                     self.log(format!("preset written: {} models → {}", n, path.display()));
@@ -1304,6 +1334,41 @@ impl App {
         if let Some(warning) = self.vram_contention() {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
             ui.separator();
+        }
+        if let Some(s) = &self.upstream {
+            let age_h = advisor::now_epoch().saturating_sub(s.checked_epoch) / 3600;
+            let age = if age_h < 1 {
+                "under an hour ago".to_string()
+            } else if age_h < 48 {
+                format!("{age_h}h ago")
+            } else {
+                format!("{}d ago", age_h / 24)
+            };
+            match (s.reachable, s.current_build, s.upstream_build) {
+                (true, Some(cur), Some(up)) if up > cur => {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!(
+                            "llama.cpp: b{up} available upstream (you run b{cur}{}) — \
+                             checked {age}. Server → Check My llama.cpp to update.",
+                            s.behind
+                                .map(|b| format!(", checkout {b} commits behind"))
+                                .unwrap_or_default()
+                        ),
+                    );
+                    ui.separator();
+                }
+                (true, Some(cur), Some(up)) => {
+                    ui.weak(format!(
+                        "llama.cpp b{cur} is current (upstream b{up}, checked {age})"
+                    ));
+                }
+                _ => {
+                    ui.weak(format!(
+                        "llama.cpp freshness unknown — upstream unreachable (checked {age})"
+                    ));
+                }
+            }
         }
         let state = self.router_state.clone();
         match &state {

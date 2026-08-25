@@ -52,6 +52,82 @@ pub struct BuildCheck {
     pub locked_models: Vec<String>,
 }
 
+/// The daily upstream freshness probe (user request 2026-08-25: manual
+/// checks left the checkout 167 commits stale). One `git fetch` — updates
+/// remote-tracking refs only, never the working tree — persisted so app
+/// restarts don't refetch inside the interval.
+#[derive(Debug, Clone, serde::Deserialize, Serialize)]
+pub struct UpstreamStatus {
+    /// Unix seconds when the probe ran.
+    pub checked_epoch: u64,
+    /// Binary build at probe time (staleness comparisons stay honest even
+    /// if the binary changes later).
+    pub current_build: Option<u64>,
+    pub upstream_build: Option<u64>,
+    /// Commits between the checkout's HEAD and origin/master.
+    pub behind: Option<u64>,
+    /// false = fetch failed (offline) — freshness is UNKNOWN, not "fine".
+    pub reachable: bool,
+}
+
+pub const UPSTREAM_CHECK_INTERVAL_SECS: u64 = 24 * 3600;
+
+fn upstream_path(dir: &Path) -> PathBuf {
+    dir.join("upstream.json")
+}
+
+pub fn read_upstream_status(dir: &Path) -> Option<UpstreamStatus> {
+    serde_json::from_str(&std::fs::read_to_string(upstream_path(dir)).ok()?).ok()
+}
+
+pub fn write_upstream_status(dir: &Path, s: &UpstreamStatus) {
+    let _ = std::fs::create_dir_all(dir);
+    if let Ok(json) = serde_json::to_string_pretty(s) {
+        let _ = std::fs::write(upstream_path(dir), json);
+    }
+}
+
+pub fn now_epoch() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Run the probe (network: one fetch; can take seconds — worker thread).
+pub fn upstream_probe(server_bin: &Path, current_build: Option<u64>) -> UpstreamStatus {
+    let mut s = UpstreamStatus {
+        checked_epoch: now_epoch(),
+        current_build,
+        upstream_build: None,
+        behind: None,
+        reachable: false,
+    };
+    let Some(repo) = repo_of(server_bin) else {
+        return s;
+    };
+    let repo_s = repo.display().to_string();
+    s.reachable = Command::new("git")
+        .args(["-C", &repo_s, "fetch", "--quiet", "origin", "master"])
+        .status()
+        .map(|st| st.success())
+        .unwrap_or(false);
+    if s.reachable {
+        s.upstream_build = run(
+            "git",
+            &["-C", &repo_s, "describe", "--tags", "--abbrev=0", "origin/master"],
+        )
+        .as_deref()
+        .and_then(parse_build_tag);
+        s.behind = run(
+            "git",
+            &["-C", &repo_s, "rev-list", "--count", "HEAD..origin/master"],
+        )
+        .and_then(|c| c.parse().ok());
+    }
+    s
+}
+
 /// Locate the git checkout for a llama-server at `<repo>/build/bin/llama-server`.
 pub fn repo_of(server_bin: &Path) -> Option<PathBuf> {
     let repo = server_bin.parent()?.parent()?.parent()?;
