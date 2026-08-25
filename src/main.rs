@@ -148,12 +148,18 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         println!("{model}: kept {label} — config.json updated, preset regenerated, router reloaded");
         return Ok(());
     }
-    let v = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
-    match &v.winner {
+    let report = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
+    match &report.verdict.winner {
         Some(w) => println!(
             "verdict: {w} wins — apply with: llamacppcodeconf --trial {model} {menu_name} keep {w}"
         ),
         None => println!("verdict: keep baseline"),
+    }
+    for nm in &report.near_misses {
+        println!(
+            "your call: {} gains {} but costs {} — apply with: llamacppcodeconf --trial {model} {menu_name} keep {}",
+            nm.label, nm.gain, nm.cost, nm.label
+        );
     }
     Ok(())
 }

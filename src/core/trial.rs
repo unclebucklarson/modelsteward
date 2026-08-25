@@ -121,6 +121,94 @@ pub struct Verdict {
     pub reason: String,
 }
 
+/// A candidate the rules rejected but a human might still want: it beat
+/// the goal metric by ≥10% and lost only on a guard. The rules stay
+/// conservative; the tradeoff is presented instead of swallowed
+/// (2026-08-25: north-mini's +50% prefill died silently on the ctx guard).
+#[derive(Debug, Clone, PartialEq)]
+pub struct NearMiss {
+    pub label: String,
+    /// The win, in plain language ("+50% prefill (3583 → 5377 t/s)").
+    pub gain: String,
+    /// What it costs, in plain language ("21% of context (255744 → 202752)").
+    pub cost: String,
+}
+
+/// Everything a trial run produced: the rule-based verdict, the raced
+/// table (baseline included), and the guard-rejected tradeoffs.
+#[derive(Debug, Clone)]
+pub struct TrialReport {
+    pub verdict: Verdict,
+    pub near_misses: Vec<NearMiss>,
+    pub raced: std::collections::BTreeMap<String, TrialResult>,
+}
+
+/// Guard-rejected-but-goal-beating candidates, with gains and costs
+/// spelled out. Pure over the raced table.
+pub fn near_misses(
+    goal: Goal,
+    baseline: &TrialResult,
+    raced: &std::collections::BTreeMap<String, TrialResult>,
+) -> Vec<NearMiss> {
+    let (Some(b_novel), Some(b_rewrite), Some(b_ctx)) =
+        (baseline.tg_novel, baseline.tg_rewrite, baseline.settled_ctx)
+    else {
+        return Vec::new();
+    };
+    let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match goal {
+        Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite generation"),
+        Goal::Prefill => (|r| r.pp_prefill, "prefill"),
+    };
+    let Some(b_primary) = primary(baseline) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (label, r) in raced {
+        if label == BASELINE {
+            continue;
+        }
+        let (Some(novel), Some(rewrite), Some(ctx), Some(p)) =
+            (r.tg_novel, r.tg_rewrite, r.settled_ctx, primary(r))
+        else {
+            continue;
+        };
+        if p < b_primary * 1.10 {
+            continue; // never beat the goal — not interesting
+        }
+        let mut costs = Vec::new();
+        if novel < b_novel * 0.97 {
+            costs.push(format!(
+                "{:.0}% of novel-code speed ({b_novel:.0} → {novel:.0} t/s)",
+                (1.0 - novel / b_novel) * 100.0
+            ));
+        }
+        if rewrite < b_rewrite * 0.97 {
+            costs.push(format!(
+                "{:.0}% of rewrite speed ({b_rewrite:.0} → {rewrite:.0} t/s)",
+                (1.0 - rewrite / b_rewrite) * 100.0
+            ));
+        }
+        if (ctx as f64) < b_ctx as f64 * 0.98 {
+            costs.push(format!(
+                "{:.0}% of context ({b_ctx} → {ctx})",
+                (1.0 - ctx as f64 / b_ctx as f64) * 100.0
+            ));
+        }
+        if costs.is_empty() {
+            continue; // it won outright — that's the verdict's business
+        }
+        out.push(NearMiss {
+            label: label.clone(),
+            gain: format!(
+                "+{:.0}% {metric} ({b_primary:.0} → {p:.0} t/s)",
+                (p / b_primary - 1.0) * 100.0
+            ),
+            cost: costs.join(" and "),
+        });
+    }
+    out
+}
+
 pub fn verdict(
     goal: Goal,
     baseline: &TrialResult,
@@ -315,7 +403,7 @@ pub fn run_trial(
     variants: &[Variant],
     goal: Goal,
     progress: &mut dyn FnMut(String),
-) -> Result<Verdict> {
+) -> Result<TrialReport> {
     let dir = router::state_dir();
     match router::status(&dir, &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
@@ -333,7 +421,14 @@ pub fn run_trial(
     let mut all = read_trials(&dir);
     let total = variants.len() + 1;
 
-    let mut round = |n: usize, label: &str, extra: &[(String, String)]| -> TrialResult {
+    // A measurement taken while another session holds the server is noise,
+    // not data: abort the whole trial rather than record it (the preset is
+    // restored below via the ? paths' caller — see the contention bails).
+    let round = |n: usize,
+                 label: &str,
+                 extra: &[(String, String)],
+                 progress: &mut dyn FnMut(String)|
+     -> Result<TrialResult> {
         progress(format!("[{n}/{total}] {model} · {label}: applying config + loading…"));
         let mut trial_cfg = cfg.clone();
         let mut ov = base_ov.clone();
@@ -364,44 +459,67 @@ pub fn run_trial(
                         .map(|a| format!(", acceptance {:.0}%", a * 100.0))
                         .unwrap_or_default()
                 ));
-                r
+                Ok(r)
             }
             Err(e) => {
+                if let Some(other) = router::loaded_other(cfg.port, model) {
+                    anyhow::bail!(
+                        "the server is busy with {other} — likely another session's \
+                         request; nothing recorded. Re-run the trial when idle"
+                    );
+                }
                 progress(format!("[{n}/{total}] {model} · {label}: FAILED — {e:#}"));
-                TrialResult {
+                Ok(TrialResult {
                     error: Some(format!("{e:#}")),
                     build,
                     ..Default::default()
-                }
+                })
             }
         }
     };
 
-    let baseline = round(1, BASELINE, &[]);
-    all.entry(model.to_string())
-        .or_default()
-        .insert(BASELINE.to_string(), baseline.clone());
-    write_trials(&dir, &all)?;
-
-    // Verdicts only compare what THIS run raced — stored results from
-    // other menus stay in trials.json for display but can't win here.
-    let mut raced = std::collections::BTreeMap::new();
-    for (i, v) in variants.iter().enumerate() {
-        let r = round(i + 2, &v.label, &v.extra);
-        raced.insert(v.label.clone(), r.clone());
+    // On any bail (contention included), restore the real preset before
+    // returning — a temp trial config must never outlive its run.
+    let body = (|| -> Result<TrialReport> {
+        let baseline = round(1, BASELINE, &[], progress)?;
         all.entry(model.to_string())
             .or_default()
-            .insert(v.label.clone(), r);
+            .insert(BASELINE.to_string(), baseline.clone());
         write_trials(&dir, &all)?;
-    }
+
+        // Verdicts only compare what THIS run raced — stored results from
+        // other menus stay in trials.json for display but can't win here.
+        let mut raced = std::collections::BTreeMap::new();
+        for (i, v) in variants.iter().enumerate() {
+            let r = round(i + 2, &v.label, &v.extra, progress)?;
+            raced.insert(v.label.clone(), r.clone());
+            all.entry(model.to_string())
+                .or_default()
+                .insert(v.label.clone(), r);
+            write_trials(&dir, &all)?;
+        }
+
+        let v = verdict(goal, &baseline, &raced);
+        let near = near_misses(goal, &baseline, &raced);
+        progress(format!("{model}: {}", v.reason));
+        for nm in &near {
+            progress(format!(
+                "{model}: rules rejected {} — {} for {} (your call)",
+                nm.label, nm.gain, nm.cost
+            ));
+        }
+        raced.insert(BASELINE.to_string(), baseline);
+        Ok(TrialReport {
+            verdict: v,
+            near_misses: near,
+            raced,
+        })
+    })();
 
     // Whatever happened, put the real config's preset back.
     system::write_preset(cfg, &[])?;
-    router::reload(cfg.port)?;
-
-    let v = verdict(goal, &baseline, &raced);
-    progress(format!("{model}: {}", v.reason));
-    Ok(v)
+    let _ = router::reload(cfg.port);
+    body
 }
 
 /// Persist a trial winner: merge its keys into the model's override in
@@ -430,6 +548,25 @@ pub fn keep_variant(
     new_cfg.save(cfg_path)?;
     system::write_preset(&new_cfg, &[])?;
     let _ = router::reload(new_cfg.port);
+    // The kept config changes what --fit settles on, and the trial already
+    // measured exactly that: carry its settled ctx into the measurement
+    // (fingerprints cleared → the normal loop re-verifies next calibrate)
+    // so synced limits stay honest without waiting for a re-measure.
+    let dir = router::state_dir();
+    if let Some(ctx) = read_trials(&dir)
+        .get(model)
+        .and_then(|t| t.get(label))
+        .and_then(|r| r.settled_ctx)
+    {
+        let mut all = router::read_measurements(&dir);
+        let mut entry = all.get(model).cloned().unwrap_or_default();
+        entry.n_ctx = Some(ctx);
+        entry.error = None;
+        entry.args_fp = None;
+        entry.env_fp = None;
+        all.insert(model.to_string(), entry);
+        router::write_measurements(&dir, &all)?;
+    }
     Ok(())
 }
 
@@ -522,6 +659,34 @@ mod tests {
             vec![("ub".to_string(), "1024".to_string())],
             "the knob under trial is stripped; unrelated extras survive"
         );
+    }
+
+    #[test]
+    fn near_misses_surface_guard_rejected_tradeoffs() {
+        // The real north-mini case: +30% prefill, rejected only on ctx.
+        let mut base = r(187.2, 249.6, 255_744);
+        base.pp_prefill = Some(3583.0);
+        let mut c = std::collections::BTreeMap::new();
+        let mut ub = r(186.4, 293.3, 237_568);
+        ub.pp_prefill = Some(4662.0);
+        c.insert("ub-1024".to_string(), ub);
+        // A variant that never beat the goal is NOT interesting.
+        let mut dud = r(187.0, 250.0, 255_000);
+        dud.pp_prefill = Some(3600.0);
+        c.insert("dud".to_string(), dud);
+        assert_eq!(verdict(Goal::Prefill, &base, &c).winner, None);
+        let nm = near_misses(Goal::Prefill, &base, &c);
+        assert_eq!(nm.len(), 1);
+        assert_eq!(nm[0].label, "ub-1024");
+        assert!(nm[0].gain.contains("+30% prefill"), "{}", nm[0].gain);
+        assert!(nm[0].cost.contains("7% of context"), "{}", nm[0].cost);
+
+        // An outright winner is the verdict's business, not a near-miss.
+        let mut clean = r(188.0, 250.0, 255_744);
+        clean.pp_prefill = Some(4700.0);
+        let mut c2 = std::collections::BTreeMap::new();
+        c2.insert("clean".to_string(), clean);
+        assert!(near_misses(Goal::Prefill, &base, &c2).is_empty());
     }
 
     #[test]

@@ -262,13 +262,25 @@ acceptance-is-a-bad-proxy finding.
 
 Next, in rough order:
 
-1. **M7 phase 2 remainder**: `ub` menu RAN (2026-08-24 night — both
-   models keep baseline under the strict ctx guard; see spikes addendum
-   for the north-mini +30–50% prefill nuance and the guard-scaling
-   idea). Still open: ctv q4_0 (needs a quality check to be honest),
-   `--cpu-moe` for MoE-over-VRAM, remaining ngram variants; trial
-   results next to Library recommendations; GUI menu picker for 🧪
-   (spec menu only today — `ub` runs via CLI).
+**Wild-readiness pass (DONE 2026-08-25, user-directed):** every manual
+Claude intervention became a feature — (1) verdict dialog v2 shows the
+full measured table and surfaces guard-rejected tradeoffs as explicit
+"Keep X anyway" choices with gains/costs in plain language (north-mini's
++50%-prefill case would have died silently); (2) contention-aware
+measuring: calibrate skips-without-recording and trials abort cleanly
+when another session's model holds the server (router::loaded_other
+evidence), and diagnose classifies legacy 500/limit records as
+ServerBusy, not model faults; (3) a trial keep carries its measured
+settled-ctx into measurements (stale-marked) and re-syncs the OpenCode
+limit immediately. Standing rule adopted: every hand-fix prompts
+"should the app do this itself?".
+
+1. **M7 phase 2 remainder**: `ub` menu RAN (2026-08-24 night — north-mini
+   user-kept ub-2048 via the new tradeoff flow). Still open: ctv q4_0
+   (needs a quality check to be honest), `--cpu-moe` for MoE-over-VRAM,
+   remaining ngram variants; trial results next to Library
+   recommendations; GUI menu picker for 🧪 (spec menu only today — `ub`
+   runs via CLI).
 2. **Ghost comment-out by the app**: config entries whose id a REACHABLE
    router no longer offers could be auto-commented on sync (design call:
    currently orphans are reported and removal stays a user action).

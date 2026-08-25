@@ -52,8 +52,8 @@ enum Msg {
     /// A measured trial finished; opens the verdict dialog.
     TrialDone {
         model: String,
-        winner: Option<String>,
-        reason: String,
+        menu: String,
+        report: trial::TrialReport,
     },
     /// config.json was rewritten by a background action (e.g. trial keep).
     CfgReloaded(settings::AppConfig),
@@ -117,11 +117,12 @@ struct App {
     trial_verdict: Option<TrialVerdictView>,
 }
 
-/// A finished trial's verdict, shown as a dialog with an Apply action.
+/// A finished trial's verdict, shown as a dialog: the measured table, the
+/// rules' pick, and any guard-rejected tradeoffs as explicit choices.
 struct TrialVerdictView {
     model: String,
-    winner: Option<String>,
-    reason: String,
+    menu: String,
+    report: trial::TrialReport,
 }
 
 /// A diagnosis being shown for one model row.
@@ -549,22 +550,18 @@ impl App {
                 self.spawn(
                     &format!("measured trial: {id} (baseline + ngram variants, ~10 min)"),
                     move |tx| {
-                        let variants = trial::spec_decode_variants();
+                        let menu = "spec";
+                        let (variants, goal) = trial::menu(menu).expect("built-in menu");
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
                         };
-                        let _ = match trial::run_trial(
-                            &cfg,
-                            &id,
-                            &variants,
-                            trial::Goal::RewriteTg,
-                            &mut progress,
-                        ) {
-                            Ok(v) => tx.send(Msg::TrialDone {
+                        let _ = match trial::run_trial(&cfg, &id, &variants, goal, &mut progress)
+                        {
+                            Ok(report) => tx.send(Msg::TrialDone {
                                 model: id,
-                                winner: v.winner,
-                                reason: v.reason,
+                                menu: menu.to_string(),
+                                report,
                             }),
                             Err(e) => tx.send(Msg::Error(format!("trial: {e:#}"))),
                         };
@@ -794,17 +791,9 @@ impl App {
                     rebuild = true;
                 }
                 Msg::Trials(t) => self.trials = t,
-                Msg::TrialDone {
-                    model,
-                    winner,
-                    reason,
-                } => {
-                    self.log(format!("trial {model}: {reason}"));
-                    self.trial_verdict = Some(TrialVerdictView {
-                        model,
-                        winner,
-                        reason,
-                    });
+                Msg::TrialDone { model, menu, report } => {
+                    self.log(format!("trial {model}: {}", report.verdict.reason));
+                    self.trial_verdict = Some(TrialVerdictView { model, menu, report });
                     self.busy = None;
                 }
                 Msg::CfgReloaded(c) => {
@@ -2485,47 +2474,103 @@ impl eframe::App for App {
 
         if let Some(tv) = &self.trial_verdict {
             let model = tv.model.clone();
-            let winner = tv.winner.clone();
-            let reason = tv.reason.clone();
-            let mut apply = false;
+            let menu = tv.menu.clone();
+            let report = tv.report.clone();
+            // The label the user chose to keep this frame, if any.
+            let mut keep: Option<String> = None;
             let mut close = false;
             egui::Window::new(format!("Trial verdict — {model}"))
                 .collapsible(false)
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
-                    ui.label(&reason);
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        match &winner {
-                            Some(w) => {
-                                if ui
-                                    .button(format!("Keep {w}"))
-                                    .on_hover_text(
-                                        "Writes the winning config into this model's override \
-                                         (visible in ⚙), regenerates the preset, reloads the \
-                                         router.",
-                                    )
-                                    .clicked()
-                                {
-                                    apply = true;
-                                }
-                                if ui.button("Keep baseline instead").clicked() {
-                                    close = true;
-                                }
+                    // The evidence first: the full measured table.
+                    egui::Grid::new("trial-table").striped(true).show(ui, |ui| {
+                        for h in ["", "novel t/s", "rewrite t/s", "prefill t/s", "context", "accepted"] {
+                            ui.strong(h);
+                        }
+                        ui.end_row();
+                        let fmt = |v: Option<f64>| {
+                            v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into())
+                        };
+                        for (label, r) in &report.raced {
+                            ui.label(label);
+                            if let Some(e) = &r.error {
+                                ui.label(format!("failed: {e}"));
+                                ui.end_row();
+                                continue;
                             }
-                            None => {
-                                if ui.button("OK (baseline kept)").clicked() {
-                                    close = true;
-                                }
-                            }
+                            ui.label(fmt(r.tg_novel));
+                            ui.label(fmt(r.tg_rewrite));
+                            ui.label(fmt(r.pp_prefill));
+                            ui.label(
+                                r.settled_ctx
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            ui.label(
+                                r.accept_rewrite
+                                    .map(|a| format!("{:.0}%", a * 100.0))
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            ui.end_row();
                         }
                     });
+                    ui.add_space(6.0);
+                    ui.label(&report.verdict.reason);
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if let Some(w) = &report.verdict.winner {
+                            if ui
+                                .button(format!("Keep {w}"))
+                                .on_hover_text(
+                                    "Writes the winning config into this model's override \
+                                     (visible in ⚙), regenerates the preset, reloads the \
+                                     router, and carries the trial's measured context into \
+                                     the synced limits.",
+                                )
+                                .clicked()
+                            {
+                                keep = Some(w.clone());
+                            }
+                        }
+                        if ui
+                            .button(if report.verdict.winner.is_some() {
+                                "Keep baseline instead"
+                            } else {
+                                "OK (baseline kept)"
+                            })
+                            .clicked()
+                        {
+                            close = true;
+                        }
+                    });
+                    // Guard-rejected tradeoffs: the rules said no, the
+                    // numbers are on the table, the choice is the user's.
+                    for nm in &report.near_misses {
+                        ui.add_space(4.0);
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(format!("Keep {} anyway", nm.label))
+                                .on_hover_text(
+                                    "The strict rules rejected this, but the tradeoff may \
+                                     suit your use — it applies exactly like a winner and \
+                                     reverses the same way.",
+                                )
+                                .clicked()
+                            {
+                                keep = Some(nm.label.clone());
+                            }
+                            ui.label(format!("{} for {}", nm.gain, nm.cost));
+                        });
+                    }
                 });
-            if apply && let Some(w) = winner {
+            if let Some(w) = keep {
                 let cfg = self.cfg.clone();
                 let m = model.clone();
                 self.spawn(&format!("keeping {w} for {m}"), move |tx| {
-                    let variants = trial::spec_decode_variants();
+                    let variants = trial::menu(&menu)
+                        .map(|(v, _)| v)
+                        .unwrap_or_else(trial::spec_decode_variants);
                     let _ = match trial::keep_variant(
                         &system::config_file(),
                         &cfg,
@@ -2535,10 +2580,25 @@ impl eframe::App for App {
                     ) {
                         Ok(()) => {
                             let _ = tx.send(Msg::CfgReloaded(system::load_config()));
-                            tx.send(Msg::Finished(format!(
-                                "{m}: {w} kept — override saved, preset regenerated, router \
-                                 reloaded"
-                            )))
+                            let _ = tx.send(Msg::Measurements(router::read_measurements(
+                                &router::state_dir(),
+                            )));
+                            match sync_single(
+                                &cfg,
+                                &router::read_measurements(&router::state_dir()),
+                                &m,
+                            ) {
+                                Ok(()) => {
+                                    send_configured(tx);
+                                    tx.send(Msg::Finished(format!(
+                                        "{m}: {w} kept — override saved, router reloaded, \
+                                         OpenCode limit updated from the trial's measurement"
+                                    )))
+                                }
+                                Err(e) => tx.send(Msg::Finished(format!(
+                                    "{m}: {w} kept (OpenCode sync deferred: {e:#})"
+                                ))),
+                            }
                         }
                         Err(e) => tx.send(Msg::Error(format!("keep: {e:#}"))),
                     };

@@ -13,6 +13,9 @@ pub enum Cause {
     BadBlob,
     /// Ran out of memory while loading.
     OutOfMemory,
+    /// The server was busy with another session's model when this was
+    /// measured — a scheduling collision, not a property of the model.
+    ServerBusy,
     /// File exists but the router doesn't currently offer this variant.
     NotOffered,
     /// Nothing wrong — just never measured.
@@ -61,6 +64,14 @@ pub fn classify(error: &str) -> Cause {
         || lower.contains("cuda_out_of_memory")
     {
         Cause::OutOfMemory
+    } else if lower.contains("model limit reached")
+        || lower.contains("/models/load: status code 500")
+        || lower.contains("/models/load: status code 400")
+    {
+        // Load rejected at the ROUTER (limit/scheduling), not by the model
+        // itself. New measurements skip these instead of recording them;
+        // this arm keeps old records honest.
+        Cause::ServerBusy
     } else {
         Cause::Unknown
     }
@@ -120,6 +131,13 @@ pub fn diagnose(
                     .to_string(),
                 vec![Remedy::UnloadOthers, Remedy::LoadAndMeasure, Remedy::ShowLog],
             ),
+            Cause::ServerBusy => (
+                "The server was busy serving something else (probably your own \
+                 coding session) when this measurement ran — the model itself is \
+                 fine. Re-measure when nothing is mid-request."
+                    .to_string(),
+                vec![Remedy::LoadAndMeasure, Remedy::ShowLog],
+            ),
             _ => (
                 "The load failed for a reason these rules don't recognize yet. The \
                  exact error is below; the router log has the full story."
@@ -171,6 +189,9 @@ pub fn short_hint(error: &str) -> String {
             "the file looks like a partial download or a multimodal blob llama.cpp can't load standalone".into()
         }
         Cause::OutOfMemory => "not enough memory to load with current settings".into(),
+        Cause::ServerBusy => {
+            "measured while the server was busy with another session — not a model fault; re-measure when idle".into()
+        }
         _ => "load failed — click Why? for the details".into(),
     }
 }

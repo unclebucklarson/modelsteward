@@ -598,6 +598,16 @@ pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("no n_ctx in /props for {model}"))
 }
 
+/// Some OTHER model currently loaded/loading on the router — the signature
+/// of another session's traffic colliding with a measurement (models_max=1
+/// makes their load our 500). Evidence for "busy", not "broken".
+pub fn loaded_other(port: u16, model: &str) -> Option<String> {
+    fetch_models(port).ok()?.into_iter().find_map(|m| {
+        (m.id != model && matches!(m.status.as_str(), "loaded" | "loading"))
+            .then_some(m.id)
+    })
+}
+
 /// Request a load (async server-side; poll `status` to watch it land).
 pub fn load_model(port: u16, model: &str) -> Result<()> {
     ureq::post(&format!("http://127.0.0.1:{port}/models/load"))
@@ -716,6 +726,17 @@ pub fn calibrate(
                 }
             }
             Err(e) => {
+                // Another session's model on the server means the failure
+                // is contention, not a property of THIS model — skip
+                // without recording so the row never goes red over it.
+                if let Some(other) = loaded_other(port, &m.id) {
+                    progress(format!(
+                        "[{n}/{total}] {}: skipped — server busy with {other} \
+                         (another session?); re-measure when idle",
+                        m.id
+                    ));
+                    continue;
+                }
                 let detail = match mine_load_error(dir) {
                     Some(cause) => format!("{e:#} — {cause}"),
                     None => format!("{e:#}"),
