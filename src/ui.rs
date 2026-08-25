@@ -554,7 +554,13 @@ impl App {
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
                         };
-                        let _ = match trial::run_trial(&cfg, &id, &variants, &mut progress) {
+                        let _ = match trial::run_trial(
+                            &cfg,
+                            &id,
+                            &variants,
+                            trial::Goal::RewriteTg,
+                            &mut progress,
+                        ) {
                             Ok(v) => tx.send(Msg::TrialDone {
                                 model: id,
                                 winner: v.winner,

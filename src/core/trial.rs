@@ -36,6 +36,38 @@ pub fn spec_decode_variants() -> Vec<Variant> {
         .collect()
 }
 
+/// The physical-batch menu: larger `-ub` speeds prefill at a VRAM (and
+/// therefore context) cost — measured, the verdict decides if the trade
+/// pays. Judged by the Prefill goal.
+pub fn ubatch_variants() -> Vec<Variant> {
+    [1024u32, 2048]
+        .into_iter()
+        .map(|n| Variant {
+            label: format!("ub-{n}"),
+            extra: vec![("ubatch-size".into(), n.to_string())],
+        })
+        .collect()
+}
+
+/// What a trial menu is optimizing for — picks the verdict rules.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Goal {
+    /// Faster generation on edit-heavy work (speculation menus).
+    RewriteTg,
+    /// Faster prompt processing (batch-size menus) — agent turns are
+    /// prefill-dominated when the context is large.
+    Prefill,
+}
+
+/// A named menu: which variants to race and how to judge them.
+pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
+    match name {
+        "spec" => Some((spec_decode_variants(), Goal::RewriteTg)),
+        "ub" => Some((ubatch_variants(), Goal::Prefill)),
+        _ => None,
+    }
+}
+
 /// Measured outcome of one configuration on one model.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
@@ -46,6 +78,8 @@ pub struct TrialResult {
     pub tg_rewrite: Option<f64>,
     /// Draft-token acceptance on the rewrite prompt, when speculation ran.
     pub accept_rewrite: Option<f64>,
+    /// Prompt-processing tokens/sec on the long prefill probe.
+    pub pp_prefill: Option<f64>,
     /// Context `--fit` settled on under this config.
     pub settled_ctx: Option<u64>,
     /// Load or generation failure — the result is still recorded so a
@@ -88,6 +122,7 @@ pub struct Verdict {
 }
 
 pub fn verdict(
+    goal: Goal,
     baseline: &TrialResult,
     candidates: &std::collections::BTreeMap<String, TrialResult>,
 ) -> Verdict {
@@ -99,40 +134,59 @@ pub fn verdict(
             reason: "baseline itself failed to measure — nothing to compare against".into(),
         };
     };
+    // The metric a candidate must improve ≥10%; everything else is a guard.
+    let primary = |r: &TrialResult| match goal {
+        Goal::RewriteTg => r.tg_rewrite,
+        Goal::Prefill => r.pp_prefill,
+    };
+    let Some(b_primary) = primary(baseline) else {
+        return Verdict {
+            winner: None,
+            reason: "baseline lacks the goal metric — re-run the trial".into(),
+        };
+    };
     let mut best: Option<(&String, f64)> = None;
     for (label, r) in candidates {
         if label == BASELINE {
             continue;
         }
-        let (Some(novel), Some(rewrite), Some(ctx)) =
-            (r.tg_novel, r.tg_rewrite, r.settled_ctx)
+        let (Some(novel), Some(rewrite), Some(ctx), Some(p)) =
+            (r.tg_novel, r.tg_rewrite, r.settled_ctx, primary(r))
         else {
             continue; // failed variants can't win
         };
-        if novel < b_novel * 0.97 || (ctx as f64) < b_ctx as f64 * 0.98 {
+        if novel < b_novel * 0.97
+            || rewrite < b_rewrite * 0.97
+            || (ctx as f64) < b_ctx as f64 * 0.98
+        {
             continue; // costs something baseline work can't spare
         }
-        if rewrite < b_rewrite * 1.10 {
+        if p < b_primary * 1.10 {
             continue; // doesn't earn its keep
         }
-        if best.is_none_or(|(_, r0)| rewrite > r0) {
-            best = Some((label, rewrite));
+        if best.is_none_or(|(_, p0)| p > p0) {
+            best = Some((label, p));
         }
     }
+    let metric = match goal {
+        Goal::RewriteTg => "rewrite",
+        Goal::Prefill => "prefill",
+    };
     match best {
-        Some((label, rewrite)) => Verdict {
+        Some((label, p)) => Verdict {
             winner: Some(label.clone()),
             reason: format!(
-                "{label}: rewrite {rewrite:.1} t/s vs baseline {b_rewrite:.1} ({:+.0}%), \
-                 novel-code and context preserved",
-                (rewrite / b_rewrite - 1.0) * 100.0
+                "{label}: {metric} {p:.1} t/s vs baseline {b_primary:.1} ({:+.0}%), \
+                 everything else preserved",
+                (p / b_primary - 1.0) * 100.0
             ),
         },
         None => Verdict {
             winner: None,
-            reason: "no candidate beat baseline by ≥10% on rewrite work without costing \
-                     novel-code speed or context — keeping baseline"
-                .into(),
+            reason: format!(
+                "no candidate beat baseline by ≥10% on {metric} without costing \
+                 generation speed or context — keeping baseline"
+            ),
         },
     }
 }
@@ -165,8 +219,22 @@ fn rewrite_prompt() -> String {
     )
 }
 
+/// ~6k tokens of deterministic code for the prefill probe — big enough
+/// that prompt processing dominates, fixed forever for comparability.
+fn prefill_prompt() -> String {
+    let code: String = (0..40)
+        .map(|i| {
+            format!(
+                "def transform_stage_{i}(records, options):\n    output = []\n    for record in records:\n        key = record.get('key_{i}')\n        weight = options.weights.get('w_{i}', 1.0)\n        if key is not None and record['score_{i}'] * weight > options.cutoff_{i}:\n            output.append({{'key': key, 'rank': record['score_{i}'] * weight}})\n    return sorted(output, key=lambda r: r['rank'], reverse=True)\n",
+            )
+        })
+        .collect();
+    format!("Here is a Python module:\n```python\n{code}```\nReply with just: OK")
+}
+
 struct GenStats {
     tps: f64,
+    prompt_tps: Option<f64>,
     draft_n: Option<u64>,
     draft_accepted: Option<u64>,
 }
@@ -192,6 +260,7 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
             .get("predicted_per_second")
             .and_then(|v| v.as_f64())
             .ok_or_else(|| anyhow::anyhow!("timings has no predicted_per_second"))?,
+        prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
     })
@@ -206,6 +275,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
         novel.push(timed_generation(port, model, p, 512)?.tps);
     }
     let rw = timed_generation(port, model, &rewrite_prompt(), 1024)?;
+    let pf = timed_generation(port, model, &prefill_prompt(), 8)?;
     Ok(TrialResult {
         tg_novel: Some(novel.iter().sum::<f64>() / novel.len() as f64),
         tg_rewrite: Some(rw.tps),
@@ -213,6 +283,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
             (Some(a), Some(n)) if n > 0 => Some(a as f64 / n as f64),
             _ => None,
         },
+        pp_prefill: pf.prompt_tps,
         settled_ctx: Some(settled_ctx),
         error: None,
         build: None,
@@ -242,6 +313,7 @@ pub fn run_trial(
     cfg: &settings::AppConfig,
     model: &str,
     variants: &[Variant],
+    goal: Goal,
     progress: &mut dyn FnMut(String),
 ) -> Result<Verdict> {
     let dir = router::state_dir();
@@ -308,8 +380,12 @@ pub fn run_trial(
         .insert(BASELINE.to_string(), baseline.clone());
     write_trials(&dir, &all)?;
 
+    // Verdicts only compare what THIS run raced — stored results from
+    // other menus stay in trials.json for display but can't win here.
+    let mut raced = std::collections::BTreeMap::new();
     for (i, v) in variants.iter().enumerate() {
         let r = round(i + 2, &v.label, &v.extra);
+        raced.insert(v.label.clone(), r.clone());
         all.entry(model.to_string())
             .or_default()
             .insert(v.label.clone(), r);
@@ -320,8 +396,7 @@ pub fn run_trial(
     system::write_preset(cfg, &[])?;
     router::reload(cfg.port)?;
 
-    let table = all.get(model).cloned().unwrap_or_default();
-    let v = verdict(&baseline, &table);
+    let v = verdict(goal, &baseline, &raced);
     progress(format!("{model}: {}", v.reason));
     Ok(v)
 }
@@ -374,8 +449,25 @@ mod tests {
         let mut c = std::collections::BTreeMap::new();
         c.insert("ngram-simple".to_string(), r(40.4, 86.8, 117_248));
         c.insert("ngram-mod".to_string(), r(39.9, 70.0, 117_000));
-        let v = verdict(&base, &c);
+        let v = verdict(Goal::RewriteTg, &base, &c);
         assert_eq!(v.winner.as_deref(), Some("ngram-simple"));
+    }
+
+    #[test]
+    fn prefill_goal_judges_by_prompt_speed() {
+        let mut base = r(38.6, 39.2, 116_224);
+        base.pp_prefill = Some(1400.0);
+        let mut c = std::collections::BTreeMap::new();
+        let mut ub = r(38.5, 39.0, 115_500);
+        ub.pp_prefill = Some(1800.0);
+        c.insert("ub-1024".to_string(), ub);
+        // Faster prefill but pays with generation speed → rejected.
+        let mut bad = r(35.0, 39.0, 116_000);
+        bad.pp_prefill = Some(2000.0);
+        c.insert("ub-2048".to_string(), bad);
+        let v = verdict(Goal::Prefill, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("ub-1024"), "{}", v.reason);
+        assert!(v.reason.contains("prefill"));
     }
 
     #[test]
@@ -389,7 +481,7 @@ mod tests {
         c.insert("slower-novel".to_string(), r(30.0, 80.0, 117_000));
         // Barely faster rewrite → not worth a config change.
         c.insert("meh".to_string(), r(39.0, 41.0, 117_000));
-        let v = verdict(&base, &c);
+        let v = verdict(Goal::RewriteTg, &base, &c);
         assert_eq!(v.winner, None, "{}", v.reason);
     }
 
@@ -400,8 +492,8 @@ mod tests {
             "crashed".to_string(),
             TrialResult { error: Some("boom".into()), ..Default::default() },
         );
-        assert_eq!(verdict(&r(38.0, 39.0, 100_000), &c).winner, None);
-        assert!(verdict(&TrialResult::default(), &c)
+        assert_eq!(verdict(Goal::RewriteTg, &r(38.0, 39.0, 100_000), &c).winner, None);
+        assert!(verdict(Goal::RewriteTg, &TrialResult::default(), &c)
             .reason
             .contains("baseline itself failed"));
     }

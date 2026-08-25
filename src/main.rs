@@ -20,9 +20,10 @@
 //!                                        llama-bench baseline (pp/tg t/s)
 //!                                        for one model, or every measured
 //!                                        model missing a current baseline
-//!   llamacppcodeconf --trial <id> [keep <variant>|keep baseline]
-//!                                        measured speculative-decoding
-//!                                        trial: baseline + ngram variants,
+//!   llamacppcodeconf --trial <id> [spec|ub] [keep <variant>|keep baseline]
+//!                                        measured config trial: baseline +
+//!                                        the menu's variants (spec = ngram
+//!                                        speculation, ub = prefill batch),
 //!                                        server-timed A/B with a verdict;
 //!                                        `keep` persists a winner
 //!   llamacppcodeconf --install-service   write the systemd user unit
@@ -133,7 +134,12 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let Some(model) = rest.first().filter(|a| *a != "keep") else {
         anyhow::bail!("--trial needs a model id (a router alias or cache id)");
     };
-    let variants = trial::spec_decode_variants();
+    let menu_name = rest
+        .get(1)
+        .filter(|a| trial::menu(a).is_some())
+        .map(String::as_str)
+        .unwrap_or("spec");
+    let (variants, goal) = trial::menu(menu_name).expect("validated above");
     if let Some(pos) = rest.iter().position(|a| a == "keep") {
         let label = rest
             .get(pos + 1)
@@ -142,10 +148,10 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         println!("{model}: kept {label} — config.json updated, preset regenerated, router reloaded");
         return Ok(());
     }
-    let v = trial::run_trial(cfg, model, &variants, &mut |line| println!("{line}"))?;
+    let v = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
     match &v.winner {
         Some(w) => println!(
-            "verdict: {w} wins — apply with: llamacppcodeconf --trial {model} keep {w}"
+            "verdict: {w} wins — apply with: llamacppcodeconf --trial {model} {menu_name} keep {w}"
         ),
         None => println!("verdict: keep baseline"),
     }
