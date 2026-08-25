@@ -251,13 +251,20 @@ HF-download timeout fix, ghost-alias cleanup (opencode.json `-2` entry),
 vision serving for the Qwen3.8 shelf models (mmproj re-linked + measured
 ctx correction) and OpenCode image-modality sync.
 
+**M7 phase 2 core DONE (2026-08-24 evening):** `core/trial.rs` +
+`--trial <id> [keep <variant>]` + per-row 🧪 with verdict dialog (Keep
+persists via the override path; trials.json watched like measurements).
+Fleet campaign ran: ngram-simple KEPT on qwen3.8-q4/q5, laguna,
+north-mini (+29% to +118% rewrite); ornith + qwen3.6 keep baseline
+(under the 10% bar). See spike 5 addendum for the numbers and the
+acceptance-is-a-bad-proxy finding.
+
 Next, in rough order:
 
-1. **M7 phase 2 — the trial harness**: generalize spike 5's methodology
-   (same-prompts server-timed A/B, acceptance rate, ctx delta, verdict)
-   into core + a per-row Trial action. First candidates: the other ngram
-   variants (ngram-map-k/k4v/mod/cache), `-ub` 1024/2048, ctv q4_0,
-   `--cpu-moe` advice for MoE-over-VRAM.
+1. **M7 phase 2 remainder**: more trial menus through the same harness —
+   `-ub` 1024/2048, ctv q4_0, `--cpu-moe` for MoE-over-VRAM, remaining
+   ngram variants (map-k, cache); trial results shown next to Library
+   recommendations.
 2. **Alias-death migration** (small, fresh pain): measurements + config
    entries should follow a model when its alias changes; ghosts get
    commented out by the app, not by hand.

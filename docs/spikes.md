@@ -119,3 +119,25 @@ one rewrite prompt (add docstrings to a 10-function module).
   `spec-type = ngram-simple` on qwen3.8-27b-ud-q4_k_xl.
 - Untried variants for the M7 harness: ngram-map-k/k4v/mod/cache,
   draft-eagle3/dflash/dspark (need matching aux models).
+
+### Spike 5 addendum — fleet campaign via the trial harness (same day)
+
+`--trial` run across the six daily models (baseline / ngram-simple /
+ngram-map-k4v / ngram-mod each; server-timed, verdict rules in
+core/trial.rs):
+
+| model                | base rewrite | best              | verdict       |
+|----------------------|--------------|-------------------|---------------|
+| qwen3.8-q4           | 39.6         | simple 80.5 +103% | KEPT simple   |
+| qwen3.8-q5           | 37.8         | simple 82.4 +118% | KEPT simple   |
+| laguna-xs-2.1        | 174.0        | simple 224.2 +29% | KEPT simple   |
+| north-mini-code      | 173.6        | simple 248.0 +43% | KEPT simple   |
+| ornith-35b           | 168.5        | k4v 181.7 +8%     | baseline      |
+| qwen3.6-ud-q5        | 38.5         | +9.9%             | baseline      |
+
+Findings: ngram-simple beats map-k4v everywhere despite LOWER acceptance
+(k4v accepts more but shorter/cheaper spans — acceptance rate is a bad
+proxy for real speed, measure the speed). Speculation helps even
+180 t/s MoE models on copy-heavy work. Qwen3.6 accepts drafts far less
+than Qwen3.8 (15% vs 45% on identical prompts) — generation-level
+behavioral difference, invisible in specs.
