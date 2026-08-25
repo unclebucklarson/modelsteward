@@ -94,11 +94,12 @@ The tabs now match how a user thinks:
   HuggingFace, and points at an on-disk twin when one exists.
 - ✔ GUI reloads measurements.json on disk change (DONE). Still open:
   display-name + alias shown consistently across panes.
-- **Migrate measurements on archive**: archiving a cache model gives it a
-  new preset alias, so its old measurement (keyed by the cache id) shows
-  on a leftover router-only row while the shelf row reads "not measured".
-  Copy n_ctx/tool_call to the new alias (fingerprints cleared → re-measures
-  next calibrate) and consider suppressing the stale cache-id row.
+- ✔ **Migrate measurements on archive** (DONE 2026-08-24 night):
+  archive-to-shelf carries the measurement to the new alias (fingerprints
+  cleared → re-measures next calibrate; bench numbers keep their build
+  stamp) and removes the old cache-id entry so the leftover row stops
+  claiming it. The mmproj companion travels too (resolved blob linked,
+  never the relative symlink).
 
 - ✔ Numbered backups (5) + Tools → Restore From Last Backup (DONE).
 - ✔ Measured-ctx variance policy: DECIDED (user) — sync writes measured
@@ -261,16 +262,18 @@ acceptance-is-a-bad-proxy finding.
 
 Next, in rough order:
 
-1. **M7 phase 2 remainder**: more trial menus through the same harness —
-   `-ub` 1024/2048, ctv q4_0, `--cpu-moe` for MoE-over-VRAM, remaining
-   ngram variants (map-k, cache); trial results shown next to Library
-   recommendations.
-2. **Alias-death migration** (small, fresh pain): measurements + config
-   entries should follow a model when its alias changes; ghosts get
-   commented out by the app, not by hand.
+1. **M7 phase 2 remainder**: `ub` menu RAN (2026-08-24 night — both
+   models keep baseline under the strict ctx guard; see spikes addendum
+   for the north-mini +30–50% prefill nuance and the guard-scaling
+   idea). Still open: ctv q4_0 (needs a quality check to be honest),
+   `--cpu-moe` for MoE-over-VRAM, remaining ngram variants; trial
+   results next to Library recommendations; GUI menu picker for 🧪
+   (spec menu only today — `ub` runs via CLI).
+2. **Ghost comment-out by the app**: config entries whose id a REACHABLE
+   router no longer offers could be auto-commented on sync (design call:
+   currently orphans are reported and removal stays a user action).
 3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor layer.
-4. Connections phase 2; Tier C (slot persistence, LAN serving);
-   archive-to-shelf carrying mmproj (link the resolved blob!).
+4. Connections phase 2; Tier C (slot persistence, LAN serving).
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 

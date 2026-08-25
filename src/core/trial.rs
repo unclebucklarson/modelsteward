@@ -354,9 +354,12 @@ pub fn run_trial(
             Ok(mut r) => {
                 r.build = build;
                 progress(format!(
-                    "[{n}/{total}] {model} · {label}: novel {:.1} t/s, rewrite {:.1} t/s{}",
+                    "[{n}/{total}] {model} · {label}: novel {:.1} t/s, rewrite {:.1} t/s{}{}",
                     r.tg_novel.unwrap_or(0.0),
                     r.tg_rewrite.unwrap_or(0.0),
+                    r.pp_prefill
+                        .map(|p| format!(", prefill {p:.0} t/s"))
+                        .unwrap_or_default(),
                     r.accept_rewrite
                         .map(|a| format!(", acceptance {:.0}%", a * 100.0))
                         .unwrap_or_default()

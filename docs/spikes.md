@@ -141,3 +141,26 @@ proxy for real speed, measure the speed). Speculation helps even
 180 t/s MoE models on copy-heavy work. Qwen3.6 accepts drafts far less
 than Qwen3.8 (15% vs 45% on identical prompts) — generation-level
 behavioral difference, invisible in specs.
+
+### ub campaign (2026-08-24 night, via the `ub` trial menu)
+
+`-ub` (physical batch) 1024/2048 vs 512 default, measured on top of the
+kept ngram configs; prefill probe = fixed ~6k-token prompt.
+
+| model / variant       | prefill t/s | settled ctx | verdict          |
+|-----------------------|-------------|-------------|------------------|
+| qwen3.8-q4 baseline   | 1405        | 118,272     |                  |
+| qwen3.8-q4 ub-1024    | 1461 (+4%)  | 113,152     | rejected (ctx)   |
+| qwen3.8-q4 ub-2048    | 1471 (+5%)  | 102,656     | rejected (ctx)   |
+| north-mini baseline   | 3583        | 255,744     |                  |
+| north-mini ub-1024    | 4662 (+30%) | 237,568     | rejected (ctx)   |
+| north-mini ub-2048    | 5377 (+50%) | 202,752     | rejected (ctx)   |
+
+Both keep baseline under the strict rules (ctx guard: −2% max). Honest
+nuance for the user: on north-mini the trade is +30–50% prefill for
+7–21% of a 255k context — far above agent needs, so a human might
+reasonably take it; the rules deliberately don't. Candidate refinement:
+scale the ctx guard when baseline ctx is far above AGENT_MIN (e.g. allow
+spending context the agent can't use anyway). Side catch: north-mini
+ub-1024/2048 also showed +17% rewrite tg — batch size helps MoE
+generation on copy-heavy spans, worth a second look someday.
