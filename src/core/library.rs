@@ -371,6 +371,23 @@ pub fn archive_to_shelf(m: &ModelFile, shelf_root: &Path) -> anyhow::Result<Path
         std::fs::copy(&src, &tmp).with_context(|| format!("copying to {}", tmp.display()))?;
         std::fs::rename(&tmp, &dest).context("finalizing copy")?;
     }
+    // The vision projector travels with its model — a shelf copy without
+    // it silently serves text-only (2026-08-22 incident). Canonicalize
+    // first: HF snapshot entries are RELATIVE symlinks into blobs/, and
+    // hardlinking the symlink itself plants a dangling link on the shelf.
+    if let Some(proj) = &m.mmproj {
+        let psrc = proj
+            .canonicalize()
+            .with_context(|| format!("resolving {}", proj.display()))?;
+        let pdest = dir.join(proj.file_name().map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "mmproj.gguf".into()));
+        if !pdest.exists() && std::fs::hard_link(&psrc, &pdest).is_err() {
+            let tmp = pdest.with_extension("gguf.partial");
+            std::fs::copy(&psrc, &tmp)
+                .with_context(|| format!("copying to {}", tmp.display()))?;
+            std::fs::rename(&tmp, &pdest).context("finalizing mmproj copy")?;
+        }
+    }
     Ok(dest)
 }
 
@@ -514,12 +531,28 @@ mod tests {
             meta: None,
             mmproj: None,
         };
+        // Vision companion, HF-style: a RELATIVE symlink to its blob (the
+        // 2026-08-22 incident shape — hardlinking the symlink itself would
+        // plant a dangling link).
+        let pblob = store.path().join("blob-proj");
+        std::fs::write(&pblob, b"proj-bytes").unwrap();
+        let psnap = store.path().join("mmproj-F16.gguf");
+        std::os::unix::fs::symlink("blob-proj", &psnap).unwrap();
+        let mut m = m;
+        m.mmproj = Some(psnap);
         let dest = archive_to_shelf(&m, shelf.path()).unwrap();
         assert!(dest.ends_with("Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf"));
         // Same tempfs → hardlink: same inode as the BLOB (symlink resolved).
         assert_eq!(
             std::fs::metadata(&dest).unwrap().ino(),
             std::fs::metadata(&blob).unwrap().ino()
+        );
+        // The projector traveled, resolved to its blob's real bytes.
+        let pdest = dest.parent().unwrap().join("mmproj-F16.gguf");
+        assert_eq!(std::fs::read(&pdest).unwrap(), b"proj-bytes");
+        assert_eq!(
+            std::fs::metadata(&pdest).unwrap().ino(),
+            std::fs::metadata(&pblob).unwrap().ino()
         );
         // Refuses to overwrite.
         assert!(archive_to_shelf(&m, shelf.path()).is_err());

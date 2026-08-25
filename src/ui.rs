@@ -609,6 +609,12 @@ impl App {
                             .unwrap_or_else(|| PathBuf::from("."))
                             .join("models")
                     });
+                // The pre-archive identity, for measurement migration.
+                let old_id = self
+                    .scan
+                    .as_ref()
+                    .map(|s| rows::router_ids_by_path(&s.models))
+                    .and_then(|ids| ids.get(&path).cloned());
                 self.spawn(
                     &format!("archiving {} to your shelf", model.display_name()),
                     move |tx| {
@@ -638,7 +644,26 @@ impl App {
                                         return;
                                     }
                                 }
-                                let _ = tx.send(Msg::Scanned(system::scan_report(&cfg, &[])));
+                                let report = system::scan_report(&cfg, &[]);
+                                // The measurement follows the file to its new
+                                // alias (fingerprints cleared → re-measures
+                                // next calibrate); the old cache-id row stops
+                                // claiming it.
+                                if let Some(old) = &old_id
+                                    && let Some(new) =
+                                        rows::router_ids_by_path(&report.models).get(&dest)
+                                {
+                                    let dir = router::state_dir();
+                                    let mut all = router::read_measurements(&dir);
+                                    router::migrate_measurement(&mut all, old, new);
+                                    if router::write_measurements(&dir, &all).is_ok() {
+                                        let _ = tx.send(Msg::Progress(format!(
+                                            "measurement carried over: {old} → {new}"
+                                        )));
+                                        let _ = tx.send(Msg::Measurements(all));
+                                    }
+                                }
+                                let _ = tx.send(Msg::Scanned(report));
                                 let _ = tx.send(Msg::Finished(
                                     "archive complete — the model is now a shelf model; Load it to measure + add to OpenCode".into(),
                                 ));

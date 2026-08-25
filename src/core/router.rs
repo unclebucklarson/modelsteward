@@ -503,6 +503,29 @@ pub fn read_measurements(dir: &Path) -> Measurements {
         .unwrap_or_default()
 }
 
+/// Carry a model's measurement to its new alias when a file changes
+/// identity (archiving a cache model gives it a preset alias). n_ctx and
+/// tool_call travel with fingerprints CLEARED — the serving args changed,
+/// so the next calibrate re-measures — while bench numbers keep their
+/// build stamp (same bytes, same build → still meaningful). The old key is
+/// removed so the leftover cache-id row stops claiming a measurement it no
+/// longer describes; an existing entry under the new id is never clobbered.
+pub fn migrate_measurement(all: &mut Measurements, old_id: &str, new_id: &str) {
+    if old_id == new_id || all.contains_key(new_id) {
+        return;
+    }
+    if let Some(old) = all.remove(old_id) {
+        all.insert(
+            new_id.to_string(),
+            Measurement {
+                args_fp: None,
+                env_fp: None,
+                ..old
+            },
+        );
+    }
+}
+
 /// Insert a (re)measurement, carrying over bench baselines taken under the
 /// same config + environment — re-measuring ctx must not wipe them. A
 /// changed fingerprint means the old numbers describe a different setup,
@@ -995,6 +1018,40 @@ mod tests {
         let wrong = serde_json::json!({"choices":[{"message":{"tool_calls":[
             {"function":{"name":"weather_lookup","arguments":"{}"}}]}}]});
         assert!(!parse_tool_call_probe(&wrong));
+    }
+
+    #[test]
+    fn migration_moves_ctx_stale_and_keeps_bench() {
+        let mut all = Measurements::new();
+        all.insert(
+            "unsloth/Repo:Q5".into(),
+            Measurement {
+                n_ctx: Some(90_000),
+                tool_call: Some(true),
+                args_fp: Some("aaaa".into()),
+                env_fp: Some("eeee".into()),
+                pp_tps: Some(1500.0),
+                tg_tps: Some(40.0),
+                bench_build: Some(10454),
+                ..Default::default()
+            },
+        );
+        migrate_measurement(&mut all, "unsloth/Repo:Q5", "repo-q5");
+        assert!(!all.contains_key("unsloth/Repo:Q5"), "old key removed");
+        let m = &all["repo-q5"];
+        assert_eq!(m.n_ctx, Some(90_000));
+        assert_eq!(m.tool_call, Some(true));
+        assert!(m.args_fp.is_none() && m.env_fp.is_none(), "stale → re-measures");
+        assert_eq!(m.tg_tps, Some(40.0), "bench travels (same bytes, same build)");
+        assert_eq!(m.bench_build, Some(10454));
+
+        // Never clobber an existing entry under the new id.
+        let mut all2 = Measurements::new();
+        all2.insert("old".into(), Measurement { n_ctx: Some(1), ..Default::default() });
+        all2.insert("new".into(), Measurement { n_ctx: Some(2), ..Default::default() });
+        migrate_measurement(&mut all2, "old", "new");
+        assert_eq!(all2["new"].n_ctx, Some(2));
+        assert!(all2.contains_key("old"), "kept when nothing moved");
     }
 
     #[test]
