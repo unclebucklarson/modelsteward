@@ -68,6 +68,9 @@ enum Msg {
 enum Pane {
     Library,
     Server,
+    /// The performance lab: pick a model, pick campaigns, run, read
+    /// verdicts + history (user-directed split from Library, 2026-08-25).
+    Lab,
     Connections,
     Settings,
 }
@@ -83,8 +86,6 @@ enum RowAction {
     Archive(PathBuf),
     /// Open the per-model override editor.
     EditOverrides(String),
-    /// Run the measured speculation trial (baseline + ngram variants).
-    Trial(String),
 }
 
 struct App {
@@ -123,6 +124,10 @@ struct App {
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
     start_prompt: Option<AfterStart>,
+    lab_selected: Option<String>,
+    lab_bench: bool,
+    lab_spec: bool,
+    lab_ub: bool,
 }
 
 /// A router-needing action intercepted while the router was down: offered
@@ -131,7 +136,8 @@ struct App {
 #[derive(Clone)]
 enum AfterStart {
     Calibrate { force: bool },
-    Trial { id: String },
+    /// A Lab campaign: the selected model + which runs were checked.
+    Lab { id: String, bench: bool, spec: bool, ub: bool },
 }
 
 impl AfterStart {
@@ -139,7 +145,7 @@ impl AfterStart {
         match self {
             AfterStart::Calibrate { force: true } => "re-measure ALL models".into(),
             AfterStart::Calibrate { force: false } => "measure new/stale models".into(),
-            AfterStart::Trial { id } => format!("run the trial for {id}"),
+            AfterStart::Lab { id, .. } => format!("run the Lab campaigns for {id}"),
         }
     }
 }
@@ -192,6 +198,10 @@ impl App {
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
             start_prompt: None,
+            lab_selected: None,
+            lab_bench: true,
+            lab_spec: true,
+            lab_ub: false,
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -467,7 +477,33 @@ impl App {
             }
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
-                AfterStart::Trial { id } => trial_worker(&cfg, &id, tx),
+                AfterStart::Lab { id, bench, spec, ub } => {
+                    // Campaigns run in sequence on one worker: bench frees
+                    // the GPU itself; each trial restores the preset after.
+                    if bench {
+                        let tx2 = tx.clone();
+                        let mut progress = move |line: String| {
+                            let _ = tx2.send(Msg::Progress(line));
+                        };
+                        match bench::run_baselines(&cfg, Some(id.clone()), true, &mut progress)
+                        {
+                            Ok(_) => {}
+                            Err(e) => {
+                                let _ = tx.send(Msg::Error(format!("bench: {e:#}")));
+                                return;
+                            }
+                        }
+                    }
+                    if spec {
+                        trial_worker(&cfg, &id, "spec", tx);
+                    }
+                    if ub {
+                        trial_worker(&cfg, &id, "ub", tx);
+                    }
+                    let _ = tx.send(Msg::Finished(format!(
+                        "Lab: campaigns for {id} complete"
+                    )));
+                }
             }
         });
     }
@@ -554,9 +590,6 @@ impl App {
                         Err(e) => tx.send(Msg::Error(format!("remove: {e:#}"))),
                     };
                 });
-            }
-            RowAction::Trial(id) => {
-                self.run_or_offer_start(AfterStart::Trial { id });
             }
             RowAction::EditOverrides(id) => {
                 let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
@@ -813,6 +846,8 @@ impl App {
                 }
                 Msg::Trials(t) => self.trials = t,
                 Msg::History(h) => self.history = h,
+                // NOTE: does not clear `busy` — a Lab campaign may still be
+                // mid-sequence; the worker ends with Finished.
                 Msg::TrialDone { model, menu, report } => {
                     self.log(format!("trial {model}: {}", report.verdict.reason));
                     self.trial_verdict = Some(TrialVerdictView {
@@ -821,7 +856,6 @@ impl App {
                         report,
                         show_why: false,
                     });
-                    self.busy = None;
                 }
                 Msg::CfgReloaded(c) => {
                     self.cfg = c;
@@ -1036,12 +1070,6 @@ impl App {
             return;
         }
         let router_up = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
-        // Down-but-ours: router-needing buttons stay clickable and offer to
-        // start the router instead of sitting disabled (user request).
-        let router_startable = matches!(
-            self.router_state,
-            Some(router::RouterState::Down) | Some(router::RouterState::Trouble { .. })
-        );
         if !router_up {
             ui.horizontal(|ui| {
                 ui.label("Router is not running — Load and checkbox actions need it.");
@@ -1098,29 +1126,6 @@ impl App {
                 }
             }
         }
-        // Hover summaries for the 🧪 button, built outside the grid closure.
-        let trial_hints: std::collections::HashMap<String, String> = self
-            .trials
-            .iter()
-            .map(|(model, table)| {
-                let mut lines: Vec<String> = table
-                    .iter()
-                    .map(|(label, r)| match &r.error {
-                        Some(e) => format!("{label}: FAILED — {e}"),
-                        None => format!(
-                            "{label}: novel {:.1} / rewrite {:.1} t/s{}",
-                            r.tg_novel.unwrap_or(0.0),
-                            r.tg_rewrite.unwrap_or(0.0),
-                            r.accept_rewrite
-                                .map(|a| format!(" ({:.0}% accepted)", a * 100.0))
-                                .unwrap_or_default()
-                        ),
-                    })
-                    .collect();
-                lines.insert(0, "Measured trial results — click to re-run:".into());
-                (model.clone(), lines.join("\n"))
-            })
-            .collect();
         egui::ScrollArea::both().show(ui, |ui| {
             egui::Grid::new("library")
                 .striped(true)
@@ -1128,8 +1133,7 @@ impl App {
                 .show(ui, |ui| {
                     for h in [
                         "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Speed",
-                        "Server", "OpenCode", "Load", "Tune", "Trial", "Archive", "Advice",
-                        "Why",
+                        "Server", "OpenCode", "Load", "Tune", "Archive", "Advice", "Why",
                     ] {
                         ui.strong(h);
                     }
@@ -1297,25 +1301,7 @@ impl App {
                             {
                                 pending = Some(RowAction::EditOverrides(id.clone()));
                             }
-                            let hint = trial_hints.get(id).cloned().unwrap_or_else(|| {
-                                "Measured speculation trial: times this model's generation \
-                                 with each ngram speculative-decoding mode vs baseline \
-                                 (same prompts, ~10 min, loads the model repeatedly) and \
-                                 offers to keep a measured winner. Not yet trialed."
-                                    .into()
-                            });
-                            if ui
-                                .add_enabled(
-                                    (router_up || router_startable) && !r.embedding,
-                                    egui::Button::new("Run"),
-                                )
-                                .on_hover_text(hint)
-                                .clicked()
-                            {
-                                pending = Some(RowAction::Trial(id.clone()));
-                            }
                         } else {
-                            ui.label("");
                             ui.label("");
                         }
 
@@ -1409,6 +1395,126 @@ impl App {
     }
 
     // ─── Server ──────────────────────────────────────────────────────────
+
+    /// The performance lab: pick a model, pick campaigns, run; results,
+    /// verdicts, and history live here (Library stays everything+advice).
+    fn lab_pane(&mut self, ui: &mut egui::Ui) {
+        ui.label(
+            "Pick a model, pick campaigns, Run. Every number is measured on this \
+             machine; winners are offered, never auto-applied.",
+        );
+        ui.separator();
+        let candidates: Vec<(String, String)> = self
+            .rows
+            .iter()
+            .filter(|r| r.router_id.is_some() && !r.embedding && r.failure.is_none())
+            .map(|r| (r.router_id.clone().unwrap(), r.display.clone()))
+            .collect();
+        let mut run_clicked = false;
+        ui.horizontal_top(|ui| {
+            ui.vertical(|ui| {
+                ui.set_width(300.0);
+                ui.strong("Model");
+                egui::ScrollArea::vertical()
+                    .id_salt("lab-models")
+                    .show(ui, |ui| {
+                        for (id, display) in &candidates {
+                            let sel = self.lab_selected.as_deref() == Some(id.as_str());
+                            if ui.selectable_label(sel, display).clicked() {
+                                self.lab_selected = Some(id.clone());
+                            }
+                        }
+                    });
+            });
+            ui.separator();
+            ui.vertical(|ui| {
+                let Some(id) = self.lab_selected.clone() else {
+                    ui.weak("Select a model on the left.");
+                    return;
+                };
+                ui.strong(&id);
+                if let Some(m) = self.measurements.get(&id) {
+                    let speed = match (m.pp_tps, m.tg_tps) {
+                        (Some(pp), Some(tg)) => {
+                            format!(", pp {pp:.0} / tg {tg:.0} t/s (b{})",
+                                m.bench_build.map(|b| b.to_string()).unwrap_or_else(|| "?".into()))
+                        }
+                        _ => ", speed not benched yet".into(),
+                    };
+                    ui.label(format!(
+                        "Currently: ctx {}{speed}",
+                        m.n_ctx.map(|c| c.to_string()).unwrap_or_else(|| "unmeasured".into()),
+                    ));
+                }
+                ui.add_space(6.0);
+                ui.strong("Campaigns");
+                ui.checkbox(&mut self.lab_bench, "Bench baseline (pp/tg via llama-bench, ~1 min)");
+                ui.checkbox(
+                    &mut self.lab_spec,
+                    "Speculation trial (ngram modes vs baseline, ~10 min)",
+                );
+                ui.checkbox(
+                    &mut self.lab_ub,
+                    "Prefill-batch trial (-ub 1024/2048 vs 512, ~8 min)",
+                );
+                let any = self.lab_bench || self.lab_spec || self.lab_ub;
+                if ui
+                    .add_enabled(any, egui::Button::new("▶ Run selected campaigns"))
+                    .on_hover_text(
+                        "Runs in sequence, narrated in the activity log. Unloads models to \
+                         get honest numbers; offers to start the router if it's down.",
+                    )
+                    .clicked()
+                {
+                    run_clicked = true;
+                }
+                ui.add_space(8.0);
+                ui.separator();
+                ui.strong("Trial results");
+                match self.trials.get(&id) {
+                    Some(table) if !table.is_empty() => {
+                        trial_table_grid(ui, "lab-trials", table);
+                        ui.weak(
+                            "Verdicts (with Why? and Keep) appear in a dialog when a trial \
+                             finishes; current overrides are visible in the Library's ⚙.",
+                        );
+                    }
+                    _ => {
+                        ui.weak("No trials recorded for this model yet.");
+                    }
+                }
+                ui.add_space(8.0);
+                ui.strong("History");
+                let entries = history::for_model(&self.history, &id);
+                if entries.is_empty() {
+                    ui.weak("No journal entries yet — measures and benches land here.");
+                } else {
+                    for e in entries.iter().take(8) {
+                        let b = e.build.map(|b| format!("b{b}")).unwrap_or_else(|| "b?".into());
+                        let what = match (&e.n_ctx, &e.pp_tps, &e.error) {
+                            (Some(c), _, _) => format!("ctx {c}"),
+                            (_, Some(pp), _) => format!(
+                                "pp {pp:.0} / tg {:.0} t/s",
+                                e.tg_tps.unwrap_or(0.0)
+                            ),
+                            (_, _, Some(_)) => "failed".into(),
+                            _ => "—".into(),
+                        };
+                        ui.label(format!("{b} · {what}"));
+                    }
+                }
+            });
+        });
+        if run_clicked {
+            let action = AfterStart::Lab {
+                id: self.lab_selected.clone().unwrap_or_default(),
+                bench: self.lab_bench,
+                spec: self.lab_spec,
+                ub: self.lab_ub,
+            };
+            self.run_or_offer_start(action);
+        }
+    }
 
     fn server_pane(&mut self, ui: &mut egui::Ui) {
         if let Some(warning) = self.vram_contention() {
@@ -2468,6 +2574,43 @@ fn sync_single(
     Ok(())
 }
 
+/// The measured trial table, shared by the verdict dialog and the Lab.
+fn trial_table_grid(
+    ui: &mut egui::Ui,
+    salt: &str,
+    table: &std::collections::BTreeMap<String, trial::TrialResult>,
+) {
+    egui::Grid::new(salt).striped(true).show(ui, |ui| {
+        for h in ["", "novel t/s", "rewrite t/s", "prefill t/s", "context", "accepted"] {
+            ui.strong(h);
+        }
+        ui.end_row();
+        let fmt = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
+        for (label, r) in table {
+            ui.label(label);
+            if let Some(e) = &r.error {
+                ui.label(format!("failed: {e}"));
+                ui.end_row();
+                continue;
+            }
+            ui.label(fmt(r.tg_novel));
+            ui.label(fmt(r.tg_rewrite));
+            ui.label(fmt(r.pp_prefill));
+            ui.label(
+                r.settled_ctx
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "—".into()),
+            );
+            ui.label(
+                r.accept_rewrite
+                    .map(|a| format!("{:.0}%", a * 100.0))
+                    .unwrap_or_else(|| "—".into()),
+            );
+            ui.end_row();
+        }
+    });
+}
+
 /// The Measure New/Stale worker: calibrate + report, off-thread.
 fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
     match run_calibration(cfg, force, tx) {
@@ -2485,10 +2628,12 @@ fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
     }
 }
 
-/// The per-row trial worker (spec menu), off-thread.
-fn trial_worker(cfg: &settings::AppConfig, id: &str, tx: &Sender<Msg>) {
-    let menu = "spec";
-    let (variants, goal) = trial::menu(menu).expect("built-in menu");
+/// One trial-menu run for one model, off-thread.
+fn trial_worker(cfg: &settings::AppConfig, id: &str, menu: &str, tx: &Sender<Msg>) {
+    let Some((variants, goal)) = trial::menu(menu) else {
+        let _ = tx.send(Msg::Error(format!("unknown trial menu {menu:?}")));
+        return;
+    };
     let tx2 = tx.clone();
     let mut progress = move |line: String| {
         let _ = tx2.send(Msg::Progress(line));
@@ -2738,6 +2883,7 @@ impl eframe::App for App {
             ui.horizontal(|ui| {
                 ui.selectable_value(&mut self.pane, Pane::Library, "📚 Library");
                 ui.selectable_value(&mut self.pane, Pane::Server, "🖥 Server");
+                ui.selectable_value(&mut self.pane, Pane::Lab, "⚡ Lab");
                 ui.selectable_value(&mut self.pane, Pane::Connections, "🔌 Connections");
                 ui.selectable_value(&mut self.pane, Pane::Settings, "🔧 Settings");
             });
@@ -2745,6 +2891,7 @@ impl eframe::App for App {
             match self.pane {
                 Pane::Library => self.library_pane(ui),
                 Pane::Server => self.server_pane(ui),
+                Pane::Lab => self.lab_pane(ui),
                 Pane::Connections => self.connections_pane(ui),
                 Pane::Settings => self.settings_pane(ui),
             }
@@ -2780,37 +2927,7 @@ impl eframe::App for App {
                 .resizable(false)
                 .show(ui.ctx(), |ui| {
                     // The evidence first: the full measured table.
-                    egui::Grid::new("trial-table").striped(true).show(ui, |ui| {
-                        for h in ["", "novel t/s", "rewrite t/s", "prefill t/s", "context", "accepted"] {
-                            ui.strong(h);
-                        }
-                        ui.end_row();
-                        let fmt = |v: Option<f64>| {
-                            v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into())
-                        };
-                        for (label, r) in &report.raced {
-                            ui.label(label);
-                            if let Some(e) = &r.error {
-                                ui.label(format!("failed: {e}"));
-                                ui.end_row();
-                                continue;
-                            }
-                            ui.label(fmt(r.tg_novel));
-                            ui.label(fmt(r.tg_rewrite));
-                            ui.label(fmt(r.pp_prefill));
-                            ui.label(
-                                r.settled_ctx
-                                    .map(|c| c.to_string())
-                                    .unwrap_or_else(|| "—".into()),
-                            );
-                            ui.label(
-                                r.accept_rewrite
-                                    .map(|a| format!("{:.0}%", a * 100.0))
-                                    .unwrap_or_else(|| "—".into()),
-                            );
-                            ui.end_row();
-                        }
-                    });
+                    trial_table_grid(ui, "trial-verdict", &report.raced);
                     ui.add_space(6.0);
                     ui.label(&report.verdict.reason);
                     ui.add_space(6.0);
