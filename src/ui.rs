@@ -125,6 +125,7 @@ struct App {
     history: Vec<history::Entry>,
     start_prompt: Option<AfterStart>,
     lab_selected: Option<String>,
+    lab_measure: bool,
     lab_bench: bool,
     lab_spec: bool,
     lab_ub: bool,
@@ -137,7 +138,13 @@ struct App {
 enum AfterStart {
     Calibrate { force: bool },
     /// A Lab campaign: the selected model + which runs were checked.
-    Lab { id: String, bench: bool, spec: bool, ub: bool },
+    Lab {
+        id: String,
+        measure: bool,
+        bench: bool,
+        spec: bool,
+        ub: bool,
+    },
 }
 
 impl AfterStart {
@@ -199,6 +206,7 @@ impl App {
             history: history::read_all(&router::state_dir()),
             start_prompt: None,
             lab_selected: None,
+            lab_measure: true,
             lab_bench: true,
             lab_spec: true,
             lab_ub: false,
@@ -477,9 +485,13 @@ impl App {
             }
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
-                AfterStart::Lab { id, bench, spec, ub } => {
-                    // Campaigns run in sequence on one worker: bench frees
-                    // the GPU itself; each trial restores the preset after.
+                AfterStart::Lab { id, measure, bench, spec, ub } => {
+                    // Campaigns run in sequence on one worker: measure first
+                    // (it's what puts a model into OpenCode at all), bench
+                    // frees the GPU itself, each trial restores the preset.
+                    if measure && !measure_and_sync(&cfg, &id, false, false, tx) {
+                        return; // reported; don't pile campaigns on a broken load
+                    }
                     if bench {
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
@@ -540,7 +552,7 @@ impl App {
                 // Load = measure = make available to OpenCode, and keep it
                 // warm for immediate use.
                 self.spawn(&format!("loading + measuring {id}"), move |tx| {
-                    measure_and_sync(&cfg, &id, true, tx);
+                    measure_and_sync(&cfg, &id, true, true, tx);
                 });
             }
             RowAction::Unload(id) => {
@@ -573,7 +585,7 @@ impl App {
                 } else {
                     // Not measured yet: load briefly, measure, add, unload.
                     self.spawn(&format!("measuring {id} for OpenCode"), move |tx| {
-                        measure_and_sync(&cfg, &id, false, tx);
+                        measure_and_sync(&cfg, &id, false, true, tx);
                     });
                 }
             }
@@ -1448,6 +1460,10 @@ impl App {
                 }
                 ui.add_space(6.0);
                 ui.strong("Campaigns");
+                ui.checkbox(
+                    &mut self.lab_measure,
+                    "Measure (settled context + tool calls; adds to OpenCode, ~2 min)",
+                );
                 ui.checkbox(&mut self.lab_bench, "Bench baseline (pp/tg via llama-bench, ~1 min)");
                 ui.checkbox(
                     &mut self.lab_spec,
@@ -1457,7 +1473,8 @@ impl App {
                     &mut self.lab_ub,
                     "Prefill-batch trial (-ub 1024/2048 vs 512, ~8 min)",
                 );
-                let any = self.lab_bench || self.lab_spec || self.lab_ub;
+                let any =
+                    self.lab_measure || self.lab_bench || self.lab_spec || self.lab_ub;
                 if ui
                     .add_enabled(any, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1508,6 +1525,7 @@ impl App {
         if run_clicked {
             let action = AfterStart::Lab {
                 id: self.lab_selected.clone().unwrap_or_default(),
+                measure: self.lab_measure,
                 bench: self.lab_bench,
                 spec: self.lab_spec,
                 ub: self.lab_ub,
@@ -2731,7 +2749,15 @@ fn send_configured(tx: &Sender<Msg>) {
 /// Load (if needed) + measure + record + add to opencode.json; optionally
 /// leave the model warm. The Library's Load button and checkbox both land
 /// here — loading IS measuring, so nothing enters the config unguessed.
-fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: &Sender<Msg>) {
+/// `finish` = end the busy-flow with Msg::Finished; pass false when this
+/// runs as one step of a longer sequence (the Lab). Returns success.
+fn measure_and_sync(
+    cfg: &settings::AppConfig,
+    id: &str,
+    keep_loaded: bool,
+    finish: bool,
+    tx: &Sender<Msg>,
+) -> bool {
     let dir = router::state_dir();
     let report = system::scan_report(cfg, &[]);
     let env_fp = system::env_fingerprint(&report);
@@ -2784,7 +2810,7 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
             );
             let _ = router::write_measurements(&dir, &all);
             let _ = tx.send(Msg::Measurements(all.clone()));
-            match sync_single(cfg, &all, id) {
+            let ok = match sync_single(cfg, &all, id) {
                 Ok(()) => {
                     send_configured(tx);
                     let tools = match tool_call {
@@ -2792,18 +2818,27 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                         Some(false) => ", tool calls NOT produced",
                         None => "",
                     };
-                    let _ = tx.send(Msg::Finished(format!(
+                    let line = format!(
                         "{id}: measured {ctx} context{tools}, added to OpenCode{}",
                         if keep_loaded { ", still loaded" } else { "" }
-                    )));
+                    );
+                    let _ = tx.send(if finish {
+                        Msg::Finished(line)
+                    } else {
+                        Msg::Progress(line)
+                    });
+                    true
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("{id} measured but sync failed: {e:#}")));
+                    false
                 }
-            }
+            };
             if !keep_loaded {
                 let _ = router::unload_model(cfg.port, id);
+                router::wait_until_not_loaded(cfg.port, id, std::time::Duration::from_secs(30));
             }
+            ok
         }
         Err(e) => {
             let detail = match router::mine_load_error(&dir) {
@@ -2837,6 +2872,7 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
             let _ = router::write_measurements(&dir, &all);
             let _ = tx.send(Msg::Measurements(all));
             let _ = tx.send(Msg::Error(format!("{id}: {detail}")));
+            false
         }
     }
 }

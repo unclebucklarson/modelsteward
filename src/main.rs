@@ -151,6 +151,9 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
             .ok_or_else(|| anyhow::anyhow!("keep what? name a variant or `baseline`"))?;
         trial::keep_variant(&system::config_file(), cfg, model, &variants, label)?;
         println!("{model}: kept {label} — config.json updated, preset regenerated, router reloaded");
+        // The kept config changed the measured context; the agent config
+        // follows it now, not at some future sync.
+        sync(cfg)?;
         return Ok(());
     }
     let report = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
