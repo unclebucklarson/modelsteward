@@ -132,7 +132,6 @@ struct App {
 enum AfterStart {
     Calibrate { force: bool },
     Trial { id: String },
-    Measure { id: String, keep_loaded: bool },
 }
 
 impl AfterStart {
@@ -141,7 +140,6 @@ impl AfterStart {
             AfterStart::Calibrate { force: true } => "re-measure ALL models".into(),
             AfterStart::Calibrate { force: false } => "measure new/stale models".into(),
             AfterStart::Trial { id } => format!("run the trial for {id}"),
-            AfterStart::Measure { id, .. } => format!("load + measure {id}"),
         }
     }
 }
@@ -470,9 +468,6 @@ impl App {
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
                 AfterStart::Trial { id } => trial_worker(&cfg, &id, tx),
-                AfterStart::Measure { id, keep_loaded } => {
-                    measure_and_sync(&cfg, &id, keep_loaded, tx)
-                }
             }
         });
     }
