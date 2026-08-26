@@ -138,6 +138,7 @@ pub struct NearMiss {
 /// table (baseline included), and the guard-rejected tradeoffs.
 #[derive(Debug, Clone)]
 pub struct TrialReport {
+    pub goal: Goal,
     pub verdict: Verdict,
     pub near_misses: Vec<NearMiss>,
     pub raced: std::collections::BTreeMap<String, TrialResult>,
@@ -277,6 +278,143 @@ pub fn verdict(
             ),
         },
     }
+}
+
+/// The verdict explained in plain language, derived entirely from the
+/// measured table — the rules that pick the winner narrate their own
+/// reasoning (user request 2026-08-25: the table isn't self-evident to
+/// someone just learning model optimization). Deterministic and testable;
+/// no model involved.
+pub fn explain(report: &TrialReport) -> Vec<String> {
+    let mut out = Vec::new();
+    out.push(
+        "What the columns mean — novel: generating brand-new code, speculation's worst \
+         case (the did-anything-get-hurt check). rewrite: regenerating code the model was \
+         given — edits, refactors, applying diffs — which is most of what a coding agent \
+         does. prefill: how fast it reads your prompt before the first token. context: \
+         the window memory-fitting could afford under this config. accepted: how many \
+         speculated tokens the model confirmed."
+            .to_string(),
+    );
+    let Some(base) = report.raced.get(BASELINE) else {
+        out.push("The baseline itself failed to measure, so nothing can be compared.".into());
+        return out;
+    };
+    let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match report.goal {
+        Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite"),
+        Goal::Prefill => (|r| r.pp_prefill, "prefill"),
+    };
+    let (Some(b_novel), Some(b_rewrite), Some(b_ctx), Some(b_p)) =
+        (base.tg_novel, base.tg_rewrite, base.settled_ctx, primary(base))
+    else {
+        out.push("The baseline lacks the goal metric — re-run the trial.".into());
+        return out;
+    };
+    let pct = |new: f64, old: f64| (new / old - 1.0) * 100.0;
+
+    // The winner, with its evidence.
+    if let Some(w) = &report.verdict.winner
+        && let Some(r) = report.raced.get(w)
+        && let Some(p) = primary(r)
+    {
+        out.push(format!(
+            "{w} is recommended because the metric that matters most here — {metric} speed \
+             — improved {:+.0}% ({b_p:.1} → {p:.1} t/s) while nothing was paid for it: \
+             novel-code speed stayed within noise ({b_novel:.1} → {:.1}) and context is \
+             effectively unchanged ({b_ctx} → {}).",
+            pct(p, b_p),
+            r.tg_novel.unwrap_or(0.0),
+            r.settled_ctx.unwrap_or(0),
+        ));
+    } else {
+        out.push(
+            "No candidate is recommended: earning a config change takes a ≥10% win on the \
+             goal metric without giving up generation speed or context, and none managed it."
+                .to_string(),
+        );
+    }
+
+    // Why each losing candidate lost.
+    for (label, r) in &report.raced {
+        if label == BASELINE || Some(label) == report.verdict.winner.as_ref() {
+            continue;
+        }
+        if let Some(e) = &r.error {
+            out.push(format!("{label} failed to run ({e}) — recorded, not retried blindly."));
+            continue;
+        }
+        let (Some(novel), Some(rewrite), Some(ctx), Some(p)) =
+            (r.tg_novel, r.tg_rewrite, r.settled_ctx, primary(r))
+        else {
+            continue;
+        };
+        if p < b_p * 1.10 {
+            out.push(format!(
+                "{label} gained only {:+.0}% on {metric} — under the 10% bar a config \
+                 change must earn to be worth carrying.",
+                pct(p, b_p)
+            ));
+        } else if novel < b_novel * 0.97 || rewrite < b_rewrite * 0.97
+            || (ctx as f64) < b_ctx as f64 * 0.98
+        {
+            out.push(format!(
+                "{label} beat the goal but paid for it elsewhere — that tradeoff is offered \
+                 as a separate choice rather than silently picked."
+            ));
+        } else {
+            out.push(format!(
+                "{label} qualified ({:+.0}%) but the winner gained more.",
+                pct(p, b_p)
+            ));
+        }
+    }
+
+    // The recurring counterintuitive one: acceptance is not speed.
+    if let Some(w) = &report.verdict.winner
+        && let Some(wr) = report.raced.get(w)
+        && let (Some(w_acc), Some(w_p)) = (wr.accept_rewrite, primary(wr))
+    {
+        for (label, r) in &report.raced {
+            if label == BASELINE || label == w {
+                continue;
+            }
+            if let (Some(acc), Some(p)) = (r.accept_rewrite, primary(r))
+                && acc > w_acc + 0.05
+                && p < w_p
+            {
+                out.push(format!(
+                    "Counterintuitive but consistent across every model measured so far: \
+                     {label} had the HIGHER acceptance rate ({:.0}% vs {:.0}%) yet gained \
+                     less. Acceptance counts agreements, not payoff — a mode that drafts \
+                     short, cheap spans wins often and earns little. Speed is the truth, \
+                     which is why the app measures it instead of trusting the proxy.",
+                    acc * 100.0,
+                    w_acc * 100.0
+                ));
+                break;
+            }
+        }
+    }
+
+    // Expectation-setting: fast models gain less from speculation.
+    if report.goal == Goal::RewriteTg && b_rewrite > 100.0 {
+        out.push(
+            "If the gain looks smaller than the +100% some models see: this model is \
+             already fast, and a fast model spends proportionally more of its time \
+             verifying drafts — slower models have the most to win from speculation."
+                .to_string(),
+        );
+    }
+    // Context framing for the window this config affords.
+    if b_ctx < 2 * crate::core::rows::AGENT_MIN_CTX {
+        out.push(format!(
+            "Separate observation: this config settles at {b_ctx} tokens of context — \
+             above the ~{} floor where agent work gets painful, but modest. Think \"fast \
+             helper\", not \"whole repo in the window\".",
+            crate::core::rows::AGENT_MIN_CTX
+        ));
+    }
+    out
 }
 
 // ---- measurement machinery -------------------------------------------------
@@ -510,6 +648,7 @@ pub fn run_trial(
         }
         raced.insert(BASELINE.to_string(), baseline);
         Ok(TrialReport {
+            goal,
             verdict: v,
             near_misses: near,
             raced,
@@ -697,6 +836,56 @@ mod tests {
         let mut c2 = std::collections::BTreeMap::new();
         c2.insert("clean".to_string(), clean);
         assert!(near_misses(Goal::Prefill, &base, &c2).is_empty());
+    }
+
+    #[test]
+    fn explain_narrates_the_ornith_table() {
+        // The real ornith-1.5 verdict dialog (2026-08-25).
+        let mut raced = std::collections::BTreeMap::new();
+        let mut mk = |novel: f64, rewrite: f64, ctx: u64, acc: Option<f64>| {
+            let mut t = r(novel, rewrite, ctx);
+            t.accept_rewrite = acc;
+            t.pp_prefill = Some(3050.0);
+            t
+        };
+        raced.insert(BASELINE.into(), mk(148.5, 149.0, 37_376, None));
+        raced.insert("ngram-map-k4v".into(), mk(148.6, 159.0, 37_120, Some(0.69)));
+        raced.insert("ngram-mod".into(), mk(146.5, 161.8, 36_864, Some(0.48)));
+        raced.insert("ngram-simple".into(), mk(147.7, 176.0, 37_376, Some(0.48)));
+        let baseline = raced[BASELINE].clone();
+        let v = verdict(Goal::RewriteTg, &baseline, &raced);
+        assert_eq!(v.winner.as_deref(), Some("ngram-simple"));
+        let report = TrialReport {
+            goal: Goal::RewriteTg,
+            near_misses: near_misses(Goal::RewriteTg, &baseline, &raced),
+            verdict: v,
+            raced,
+        };
+        let text = explain(&report).join("\n");
+        assert!(text.contains("ngram-simple is recommended"), "{text}");
+        assert!(text.contains("+18%"), "{text}");
+        assert!(text.contains("under the 10% bar"), "{text}");
+        assert!(
+            text.contains("HIGHER acceptance rate (69% vs 48%)"),
+            "acceptance lesson must fire: {text}"
+        );
+        assert!(text.contains("already fast"), "{text}");
+        assert!(text.contains("fast helper"), "ctx framing for 37k: {text}");
+
+        // No-winner tables explain the bar instead.
+        let mut raced2 = std::collections::BTreeMap::new();
+        raced2.insert(BASELINE.into(), mk(148.5, 149.0, 37_376, None));
+        raced2.insert("meh".into(), mk(148.0, 152.0, 37_376, Some(0.3)));
+        let base2 = raced2[BASELINE].clone();
+        let report2 = TrialReport {
+            goal: Goal::RewriteTg,
+            verdict: verdict(Goal::RewriteTg, &base2, &raced2),
+            near_misses: near_misses(Goal::RewriteTg, &base2, &raced2),
+            raced: raced2,
+        };
+        let text2 = explain(&report2).join("\n");
+        assert!(text2.contains("No candidate is recommended"), "{text2}");
+        assert!(text2.contains("meh gained only +2%"), "{text2}");
     }
 
     #[test]

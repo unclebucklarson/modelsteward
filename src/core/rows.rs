@@ -86,7 +86,7 @@ pub fn read_ram_mib() -> u64 {
 
 /// Context below which agentic coding gets painful: OpenCode's system
 /// prompt + tool schemas + a modest file few files already approach this.
-const AGENT_MIN_CTX: u64 = 24_576;
+pub const AGENT_MIN_CTX: u64 = 24_576;
 
 /// Turn a stored load-failure string into something a user can act on.
 /// One-liner for table cells; the full story lives in core::diagnose.

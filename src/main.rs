@@ -166,6 +166,10 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
             nm.label, nm.gain, nm.cost, nm.label
         );
     }
+    println!("\nwhy:");
+    for para in trial::explain(&report) {
+        println!("  {para}");
+    }
     Ok(())
 }
 

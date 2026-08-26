@@ -152,6 +152,8 @@ struct TrialVerdictView {
     model: String,
     menu: String,
     report: trial::TrialReport,
+    /// Whether the plain-language explanation is expanded.
+    show_why: bool,
 }
 
 /// A diagnosis being shown for one model row.
@@ -818,7 +820,12 @@ impl App {
                 Msg::History(h) => self.history = h,
                 Msg::TrialDone { model, menu, report } => {
                     self.log(format!("trial {model}: {}", report.verdict.reason));
-                    self.trial_verdict = Some(TrialVerdictView { model, menu, report });
+                    self.trial_verdict = Some(TrialVerdictView {
+                        model,
+                        menu,
+                        report,
+                        show_why: false,
+                    });
                     self.busy = None;
                 }
                 Msg::CfgReloaded(c) => {
@@ -2768,9 +2775,11 @@ impl eframe::App for App {
             let model = tv.model.clone();
             let menu = tv.menu.clone();
             let report = tv.report.clone();
+            let show_why = tv.show_why;
             // The label the user chose to keep this frame, if any.
             let mut keep: Option<String> = None;
             let mut close = false;
+            let mut toggle_why = false;
             egui::Window::new(format!("Trial verdict — {model}"))
                 .collapsible(false)
                 .resizable(false)
@@ -2809,6 +2818,25 @@ impl eframe::App for App {
                     });
                     ui.add_space(6.0);
                     ui.label(&report.verdict.reason);
+                    ui.add_space(6.0);
+                    if ui
+                        .button(if show_why { "Hide why" } else { "Why?" })
+                        .on_hover_text(
+                            "Plain-language walkthrough: what each column means, why the \
+                             recommendation won, and why the others didn't.",
+                        )
+                        .clicked()
+                    {
+                        toggle_why = true;
+                    }
+                    if show_why {
+                        ui.add_space(4.0);
+                        ui.set_max_width(560.0);
+                        for para in trial::explain(&report) {
+                            ui.label(para);
+                            ui.add_space(4.0);
+                        }
+                    }
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if let Some(w) = &report.verdict.winner {
@@ -2901,6 +2929,10 @@ impl eframe::App for App {
                 self.trial_verdict = None;
             } else if close {
                 self.trial_verdict = None;
+            } else if toggle_why
+                && let Some(tv) = &mut self.trial_verdict
+            {
+                tv.show_why = !tv.show_why;
             }
         }
 
