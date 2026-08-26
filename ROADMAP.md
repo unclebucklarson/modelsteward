@@ -250,21 +250,33 @@ CLI; narrated in the activity log, Speed column live-updates per model via
 the measurements watcher. GPU is only freed once there's real work to do
 (a bad id or nothing-to-bench never unloads anything).
 
-**Phase 2 remaining:** A/B any preset change with measured verdict;
-one-click speculative-decoding trial (`--spec-draft-model` + same-family
-draft, e.g. Qwen3.5-4B drafting the 27Bs); showing bench results next to
-every recommendation. Trial menu: see Tier B above.
+**Phase 2 COMPLETE** — A/B-with-verdict became the trial harness; the
+speculative-decoding trial ran (classic draft measured and REJECTED on
+this hardware, ngram adopted instead — spike 5); results-next-to-
+recommendations became the Lab's standing recommendation blocks.
 
-## Where things stand (2026-08-25, HEAD 8c35866, 103 tests green)
+## Where things stand (2026-08-26, 110 tests green)
 
-Since the 08-24 stamp below: M7 phase 2 core landed and campaigned
-(ngram-simple kept on 4 models; north-mini also kept ub-2048 via the new
-tradeoff flow), the wild-readiness pass closed the babysitter gaps
-(near-miss choices, contention-aware measuring, trial-fed limits),
-archive now migrates measurements + carries mmproj, action columns got
-headers, and the daily upstream freshness check landed. User rebuilt to
-b10630 — the four format-locked models await re-measurement (M6p2's
-verification loop is next).
+Since the 08-25 stamp: M6p2 verification loop DONE (`--verify-rebuild` +
+auto-chained after guided rebuilds; live verdict: b10630 unlocked
+nothing, confirmed 4 Ollama-only conversions, cost ~9% ctx fleet-wide —
+honestly synced); measurement history journal (history.jsonl + hover
+trails); measure flows refresh the preset first (new-on-disk models are
+measurable); Start-Router-&-Continue prompt replaces dead-end errors;
+trial verdicts explain themselves (Why? — deterministic, no AI); the
+⚡ Lab tab landed with five campaigns (Measure/Bench/spec/ub/kv),
+standing recommendations with Apply/Revert (mid-campaign popup removed),
+and the quality gate (rewrite fidelity, multiset-scored) unlocking the
+KV-precision menu. Findings-report export (tier 1 sharing) in flight.
+
+Older stamps below kept for history.
+
+### (2026-08-25 stamp)
+
+M7 phase 2 core landed and campaigned (ngram-simple kept on 4 models;
+north-mini also kept ub-2048 via the tradeoff flow), the wild-readiness
+pass closed the babysitter gaps, archive migrates measurements + carries
+mmproj, action columns got headers, daily upstream freshness landed.
 
 M7 is real: baselines swept (10 models, build 10454), GUI Bench action
 landed, and the first Tier B trial ran end to end (spike 5) — ngram-simple
@@ -297,12 +309,10 @@ settled-ctx into measurements (stale-marked) and re-syncs the OpenCode
 limit immediately. Standing rule adopted: every hand-fix prompts
 "should the app do this itself?".
 
-1. **M7 phase 2 remainder**: `ub` menu RAN (2026-08-24 night — north-mini
-   user-kept ub-2048 via the new tradeoff flow). Still open: ctv q4_0
-   (needs a quality check to be honest), `--cpu-moe` for MoE-over-VRAM,
-   remaining ngram variants; trial results next to Library
-   recommendations; GUI menu picker for 🧪 (spec menu only today — `ub`
-   runs via CLI).
+1. **M7 phase 2 remainder** — CLOSED into M8: ctv q4_0 became the kv
+   menu (quality-gated), the menu picker became the Lab's campaign
+   checkboxes, results-next-to-recommendations became the Lab's standing
+   blocks. Still open in M8: `--cpu-moe`, remaining ngram variants.
 2. **Ghost comment-out by the app**: config entries whose id a REACHABLE
    router no longer offers could be auto-commented on sync (design call:
    currently orphans are reported and removal stays a user action).
@@ -318,15 +328,18 @@ limit immediately. Standing rule adopted: every hand-fix prompts
 ## M8 — Peak performance program (mapped 2026-08-25 with user; "tweak
 them to their absolute maximum")
 
-**The quality gate — build FIRST, it unlocks the rest.** Trials measure
-speed/ctx only; quality-affecting knobs are untouchable until quality is
-measured. Plan: rewrite-fidelity scoring (the rewrite prompt has a known
-correct answer — diff the output against it) + an N-shot tool-call
-reliability probe, folded into the trial harness as a guard metric.
-Then:
+**✔ The quality gate — DONE (2026-08-26):** every trial round scores
+rewrite fidelity (multiset line-match against the rewrite prompt's known
+answer — set-matching scored a half-dropped module 0.7, the unit test
+caught it); the verdict disqualifies >5-point fidelity drops outright,
+near-misses spell quality costs in capitals, table + Why? teach the
+column. **Quality gate v2 (open):** N-shot tool-call reliability probe +
+a small local eval battery — needed before the quant-choice advisor can
+claim quality parity. Then:
 
-1. **Asymmetric KV quant trial** (`ctv q4_0`): ~+30% context if quality
-   holds — now honestly measurable.
+1. **Asymmetric KV quant trial** (`ctv q4_0`): MENU BUILT (kv, Context
+   goal — ≥10% more settled ctx with speed and fidelity held). First
+   fleet run pending.
 2. **Quant-choice advisor**: cross-row advice per model family from
    measured speed + ctx + quality ("for agent work use the Q4: +34%
    speed, +88% context, quality within gate"). Probably the single most
@@ -386,12 +399,30 @@ they don't resurface):**
   measured-tuning surface; a third tab would duplicate ⚙ and split the
   apply path. Knobs get promoted into ⚙, evidence stays in the Lab.
 
-**UI home — "Lab" tab (agreed direction, design in flight):** trials,
-benches, history, and the coming quality gate get their own tab: pick a
-model, pick the trial menus/benches to run, queue them, see the results
-table + verdicts + history in one place. The Library slims back toward
-"everything + advice" (Speed column and advice stay; the per-row Trial
-button moves to the Lab or becomes an open-in-Lab shortcut).
+**✔ UI home — "⚡ Lab" tab (DONE 2026-08-26):** model picker + five
+campaign checkboxes (Measure/Bench/spec/ub/kv) queued on one narrated
+worker; results table, standing per-menu recommendations with
+Apply/Revert/"anyway" + Why?, currently-applied display, history trail.
+Library slimmed back to everything+advice (Trial column removed);
+mid-campaign verdict popup removed — the Lab is the one verdict surface,
+and apply buttons disable while anything runs.
+
+**Findings sharing (2026-08-26 discussion):**
+- **Tier 1 — findings-report export (IN FLIGHT)**: a sanitized markdown
+  bundle (hardware, build, measured tables, trial verdicts, history
+  highlights; NO paths/usernames) written locally for the user to review
+  and post where maintainers look (llama.cpp discussions, quant repos).
+  Verify loop flags report-worthy regressions. Tools menu + `--report`.
+- **Tier 2 (future)**: automated submission IF a community dataset home
+  ever exists — the tier-1 format is deliberately the ingestible
+  primitive. Not ours to host (server/moderation/abuse = its own
+  project).
+- **Tier 3 — the standing line**: any outbound data is opt-in, reviewed
+  before sending, manually triggered. This app sends nothing anywhere by
+  default (today: only your router + one daily git fetch).
+- **Cache-effectiveness monitor (new idea)**: mine slot logs for real
+  OpenCode sessions' prompt-token reuse rate — does `cache-reuse`
+  actually pay in practice, not just in trials?
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 
@@ -412,8 +443,8 @@ acquisition is storage-side.
   the observe-don't-touch principle (an app-OWNED repo is exempt, like
   the router we start); how the Settings binary picker presents
   "managed" vs "mine"; and whether the Build Advisor's guided rebuild
-  then defaults to the managed copy. Decide together before M6 phase 2
-  builds the verification loop on top.
+  then defaults to the managed copy. (The verification loop is built;
+  it would simply target the managed checkout if this lands.)
 
 - **Serve unoffered HF-hub variants**: a hub file whose variant the router's
   cache index doesn't list (e.g. a second quant of the same repo) currently

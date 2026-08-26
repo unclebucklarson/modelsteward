@@ -42,20 +42,34 @@ downstream from those measurements.
   tokens/sec at the real serving KV types — stored beside the measurements
   and shown in the Library's Speed column, re-measured only when the build
   changes.
-- **Trials config changes instead of trusting folklore** (each row's
-  Trial → Run, or `--trial <id> [spec|ub|kv]`): baseline vs candidates,
-  server-timed on fixed prompts, ending in a verdict dialog with the full
-  measured table. Strict rules pick winners that cost nothing; tradeoffs
-  the rules reject (say, +50% prefill for context you'd never use) are
-  surfaced as explicit "your call" choices instead of dying silently.
-  Keeping a winner writes the override, reloads the router, and syncs the
-  honest new limits in one step. First campaigns: `ngram-simple`
-  speculation adopted on four models (up to +118% generation on
-  edit-heavy agent work, zero VRAM) while the folklore-favorite classic
-  draft model was measured and rejected (on a single 24GB card it costs
-  96% of your context and is 6x slower — `docs/spikes.md`). Measurements
-  that collide with your own coding session are skipped as "server busy",
-  never recorded as model failures.
+- **Tunes with trials, not folklore** (⚡ Lab tab, or `--trial <id>
+  [spec|ub|kv]`): pick a model, pick campaigns — Measure, Bench,
+  speculation modes, prefill batch, KV precision — and Run. Each trial
+  races baseline vs candidates on fixed prompts, server-timed, including
+  a **quality gate** (how much of a known-answer rewrite came back
+  verbatim — no speed win survives degraded output). Strict rules pick
+  winners that cost nothing; rejected tradeoffs (say, +50% prefill for
+  context you'd never use) appear as explicit "your call" buttons, and a
+  Why? explains the whole table in plain language. The Lab keeps standing
+  recommendations with one-click **Apply/Revert** — applying cascades
+  through the override, the preset, the live router, and the synced
+  OpenCode limits. First campaigns: `ngram-simple` speculation adopted on
+  four models (up to +118% generation on edit-heavy agent work, zero
+  VRAM) while the folklore-favorite classic draft model was measured and
+  rejected (on a single 24GB card it costs 96% of your context and is 6x
+  slower — `docs/spikes.md`). Measurements that collide with your own
+  coding session are skipped as "server busy", never recorded as model
+  failures.
+- **Remembers every measurement** (history.jsonl): each context measure
+  and bench result is journaled with its llama.cpp build — hover the
+  Measured ctx or Speed cells for the trail, so "what did that rebuild
+  cost me?" is a glance, not archaeology.
+- **Verifies rebuilds** (auto after a guided rebuild, or
+  `--verify-rebuild`): restarts the router onto the new binary,
+  re-measures everything the new build made stale, and reports the
+  measured outcome — models unlocked ✓, still locked (with the
+  explanation), regressions, and context shifts, with synced limits
+  following automatically.
 - **Connects your apps** (🔌 Connections tab): OpenCode gets full config
   sync through a comment-preserving JSONC editor (hand-edits survive,
   removals are comment-outs, every write has numbered backups + a restore
@@ -94,6 +108,7 @@ llamacppcodeconf --calibrate   # measure new/stale models (add `force` for all)
 llamacppcodeconf --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
 llamacppcodeconf --trial <id>  # measured config trial ([spec|ub|kv]; `keep <variant>` applies)
 llamacppcodeconf --sync        # write measured limits into opencode.json
+llamacppcodeconf --verify-rebuild  # after a rebuild: restart, re-measure, report
 llamacppcodeconf --advise      # build advisor report
 llamacppcodeconf --status      # router + per-model state (JSON)
 llamacppcodeconf --stop
