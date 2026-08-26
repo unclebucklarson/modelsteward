@@ -347,6 +347,44 @@ Then:
    lineage — surface "b10630: −9% ctx vs b10454" as advice, and (if the
    app-managed-checkout idea lands) offer pinning the best-measured
    build rather than blindly tracking master.
+6. **Speculation-dial trials** (2026-08-26 knob review): the adopted
+   ngram modes have untouched dials (`--spec-draft-p-min`, draft-length)
+   — sweep them as a trial menu on top of the kept winners; the likeliest
+   source of further free tokens/sec.
+7. **FA-engaged check** (Advisor): verify FlashAttention actually engaged
+   per model by mining the load log — a check, not a knob (`-fa auto`
+   already chooses correctly; forcing it is only ever worse).
+8. **cpu-moe trial folds in thread count**: `n_threads` only matters once
+   expert weights live in RAM — it's a sub-variant of that trial, not a
+   standalone knob.
+9. **⚙ field promotion**: proven knobs (spec-type, ubatch-size; later
+   cache-type-v) graduate from "extra flags" to first-class override
+   fields with their measured optimum shown; plus sampling DEFAULTS
+   (temp/top-k/top-p) for Connections clients that don't set their own —
+   config surface only, never a trial target.
+10. **cache-reuse sweep**: confirm 256 is the right Tier A value once;
+    expected flat.
+
+**Evaluated and REJECTED (2026-08-26 knob review, with reasoning — so
+they don't resurface):**
+- *top-k / top-p as performance knobs*: sampling shapes output, not
+  speed, and agent clients (OpenCode) override server defaults per
+  request — a server-side setting would be silently ignored. Standing
+  decision since 2026-08-17: sampling is the client's job. (Defaults for
+  non-agent Connections clients: see item 9.)
+- *manual n_gpu_layers on single GPU*: `-ngl auto` + `--fit` already
+  optimize placement upstream — founding rule: don't reimplement
+  llama.cpp's placement math. Becomes real with multi-GPU hardware;
+  for over-VRAM models the right lever is cpu-moe, not ngl.
+- *standalone n_threads*: zero effect while models run fully on GPU
+  (see item 8 for when it matters).
+- *standalone n_batch*: `-ub` dominates; `-b` combos may join the ub
+  menu for completeness, expected marginal.
+- *FlashAttention as a lever*: auto already picks it; only verification
+  is useful (item 7).
+- *a separate Tuning tab*: ⚙ is the manual-knob surface, the Lab is the
+  measured-tuning surface; a third tab would duplicate ⚙ and split the
+  apply path. Knobs get promoted into ⚙, evidence stays in the Lab.
 
 **UI home — "Lab" tab (agreed direction, design in flight):** trials,
 benches, history, and the coming quality gate get their own tab: pick a
