@@ -129,6 +129,8 @@ struct App {
     lab_bench: bool,
     lab_spec: bool,
     lab_ub: bool,
+    /// Which menu's Why? explanation is expanded in the Lab, if any.
+    lab_why: Option<String>,
 }
 
 /// A router-needing action intercepted while the router was down: offered
@@ -210,6 +212,7 @@ impl App {
             lab_bench: true,
             lab_spec: true,
             lab_ub: false,
+            lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -460,6 +463,44 @@ impl App {
     /// troubled — open the "Start Router & Continue?" prompt instead of a
     /// dead-end error. External servers are untouched: those actions keep
     /// their plain refusal.
+    /// Persist a trial choice (winner, near-miss, or "baseline" to revert)
+    /// through every config layer: override → preset → router reload →
+    /// measurement → OpenCode limit. Keeps need no router prompt —
+    /// keep_variant tolerates a down router (reload is best-effort).
+    fn spawn_keep(&mut self, model: &str, menu: &str, label: &str) {
+        let cfg = self.cfg.clone();
+        let m = model.to_string();
+        let menu = menu.to_string();
+        let w = label.to_string();
+        self.spawn(&format!("applying {w} to {m}"), move |tx| {
+            let variants = trial::menu(&menu)
+                .map(|(v, _)| v)
+                .unwrap_or_else(trial::spec_decode_variants);
+            let _ = match trial::keep_variant(&system::config_file(), &cfg, &m, &variants, &w) {
+                Ok(()) => {
+                    let _ = tx.send(Msg::CfgReloaded(system::load_config()));
+                    let _ = tx.send(Msg::Measurements(router::read_measurements(
+                        &router::state_dir(),
+                    )));
+                    match sync_single(&cfg, &router::read_measurements(&router::state_dir()), &m)
+                    {
+                        Ok(()) => {
+                            send_configured(tx);
+                            tx.send(Msg::Finished(format!(
+                                "{m}: {w} applied — override saved, router reloaded, \
+                                 OpenCode limit updated from the trial's measurement"
+                            )))
+                        }
+                        Err(e) => tx.send(Msg::Finished(format!(
+                            "{m}: {w} applied (OpenCode sync deferred: {e:#})"
+                        ))),
+                    }
+                }
+                Err(e) => tx.send(Msg::Error(format!("apply: {e:#}"))),
+            };
+        });
+    }
+
     fn run_or_offer_start(&mut self, action: AfterStart) {
         let startable = matches!(
             self.router_state,
@@ -1488,17 +1529,102 @@ impl App {
                 ui.add_space(8.0);
                 ui.separator();
                 ui.strong("Trial results");
+                let mut apply: Option<(String, String)> = None; // (menu, label)
+                let mut toggle_why: Option<String> = None;
                 match self.trials.get(&id) {
                     Some(table) if !table.is_empty() => {
                         trial_table_grid(ui, "lab-trials", table);
-                        ui.weak(
-                            "Verdicts (with Why? and Keep) appear in a dialog when a trial \
-                             finishes; current overrides are visible in the Library's ⚙.",
-                        );
+                        // Standing recommendations, recomputed from the
+                        // stored numbers — applicable any time, not only
+                        // in the moment the run's dialog was open.
+                        for menu_name in ["spec", "ub"] {
+                            let Some(report) = trial::stored_report(menu_name, table) else {
+                                continue;
+                            };
+                            ui.add_space(6.0);
+                            let applied = trial::applied_keys(&self.cfg, &id, menu_name);
+                            let applied_text = if applied.is_empty() {
+                                "baseline".to_string()
+                            } else {
+                                applied
+                                    .iter()
+                                    .map(|(k, v)| format!("{k} = {v}"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            };
+                            ui.label(format!(
+                                "{}: {}  (currently applied: {applied_text})",
+                                match menu_name {
+                                    "spec" => "Speculation",
+                                    _ => "Prefill batch",
+                                },
+                                report.verdict.reason
+                            ));
+                            ui.horizontal(|ui| {
+                                if let Some(w) = &report.verdict.winner {
+                                    if ui
+                                        .button(format!("Apply {w}"))
+                                        .on_hover_text(
+                                            "Writes the override, regenerates the preset, \
+                                             reloads the router, updates the OpenCode limit.",
+                                        )
+                                        .clicked()
+                                    {
+                                        apply = Some((menu_name.to_string(), w.clone()));
+                                    }
+                                }
+                                if !applied.is_empty()
+                                    && ui
+                                        .button("Revert to baseline")
+                                        .on_hover_text(
+                                            "Strips this knob from the override — same \
+                                             cascade, back to stock.",
+                                        )
+                                        .clicked()
+                                {
+                                    apply = Some((menu_name.to_string(), "baseline".into()));
+                                }
+                                for nm in &report.near_misses {
+                                    if ui
+                                        .button(format!("Apply {} anyway", nm.label))
+                                        .on_hover_text(format!(
+                                            "Rules said no — {} for {}. Your call; reverses \
+                                             the same way.",
+                                            nm.gain, nm.cost
+                                        ))
+                                        .clicked()
+                                    {
+                                        apply =
+                                            Some((menu_name.to_string(), nm.label.clone()));
+                                    }
+                                }
+                                if ui.button("Why?").clicked() {
+                                    toggle_why = Some(menu_name.to_string());
+                                }
+                            });
+                            if self.lab_why.as_deref() == Some(menu_name) {
+                                ui.add_space(4.0);
+                                ui.set_max_width(560.0);
+                                for para in trial::explain(&report) {
+                                    ui.label(para);
+                                    ui.add_space(4.0);
+                                }
+                            }
+                        }
                     }
                     _ => {
                         ui.weak("No trials recorded for this model yet.");
                     }
+                }
+                if let Some(menu_name) = toggle_why {
+                    self.lab_why = if self.lab_why.as_deref() == Some(menu_name.as_str()) {
+                        None
+                    } else {
+                        Some(menu_name)
+                    };
+                }
+                if let Some((menu_name, label)) = apply {
+                    self.spawn_keep(&id, &menu_name, &label);
                 }
                 ui.add_space(8.0);
                 ui.strong("History");
@@ -3033,47 +3159,7 @@ impl eframe::App for App {
                     }
                 });
             if let Some(w) = keep {
-                let cfg = self.cfg.clone();
-                let m = model.clone();
-                self.spawn(&format!("keeping {w} for {m}"), move |tx| {
-                    // (keeps need no router prompt: keep_variant tolerates a
-                    // down router — the preset regenerates and reload is
-                    // best-effort.)
-                    let variants = trial::menu(&menu)
-                        .map(|(v, _)| v)
-                        .unwrap_or_else(trial::spec_decode_variants);
-                    let _ = match trial::keep_variant(
-                        &system::config_file(),
-                        &cfg,
-                        &m,
-                        &variants,
-                        &w,
-                    ) {
-                        Ok(()) => {
-                            let _ = tx.send(Msg::CfgReloaded(system::load_config()));
-                            let _ = tx.send(Msg::Measurements(router::read_measurements(
-                                &router::state_dir(),
-                            )));
-                            match sync_single(
-                                &cfg,
-                                &router::read_measurements(&router::state_dir()),
-                                &m,
-                            ) {
-                                Ok(()) => {
-                                    send_configured(tx);
-                                    tx.send(Msg::Finished(format!(
-                                        "{m}: {w} kept — override saved, router reloaded, \
-                                         OpenCode limit updated from the trial's measurement"
-                                    )))
-                                }
-                                Err(e) => tx.send(Msg::Finished(format!(
-                                    "{m}: {w} kept (OpenCode sync deferred: {e:#})"
-                                ))),
-                            }
-                        }
-                        Err(e) => tx.send(Msg::Error(format!("keep: {e:#}"))),
-                    };
-                });
+                self.spawn_keep(&model, &menu, &w);
                 self.trial_verdict = None;
             } else if close {
                 self.trial_verdict = None;

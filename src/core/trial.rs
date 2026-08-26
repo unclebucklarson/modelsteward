@@ -280,6 +280,61 @@ pub fn verdict(
     }
 }
 
+/// Rebuild a TrialReport from STORED results for one menu — so the Lab
+/// can show a standing recommendation with Apply buttons long after the
+/// run's dialog closed (user request 2026-08-25: results must be
+/// applicable, not just viewable). Filters the model's stored table down
+/// to baseline + this menu's variants; None until both exist.
+pub fn stored_report(
+    menu_name: &str,
+    table: &std::collections::BTreeMap<String, TrialResult>,
+) -> Option<TrialReport> {
+    let (variants, goal) = menu(menu_name)?;
+    let baseline = table.get(BASELINE)?.clone();
+    let mut raced: std::collections::BTreeMap<String, TrialResult> = variants
+        .iter()
+        .filter_map(|v| table.get(&v.label).map(|r| (v.label.clone(), r.clone())))
+        .collect();
+    if raced.is_empty() {
+        return None;
+    }
+    let verdict = verdict(goal, &baseline, &raced);
+    let near = near_misses(goal, &baseline, &raced);
+    raced.insert(BASELINE.to_string(), baseline);
+    Some(TrialReport {
+        goal,
+        verdict,
+        near_misses: near,
+        raced,
+    })
+}
+
+/// The knob keys a menu's variants set that the model's override currently
+/// carries — "what is applied right now", for display next to Apply.
+pub fn applied_keys(
+    cfg: &settings::AppConfig,
+    model: &str,
+    menu_name: &str,
+) -> Vec<(String, String)> {
+    let Some((variants, _)) = menu(menu_name) else {
+        return Vec::new();
+    };
+    let knob_keys: std::collections::HashSet<&str> = variants
+        .iter()
+        .flat_map(|v| v.extra.iter().map(|(k, _)| k.as_str()))
+        .collect();
+    cfg.overrides
+        .get(model)
+        .map(|ov| {
+            ov.extra
+                .iter()
+                .filter(|(k, _)| knob_keys.contains(k.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// The verdict explained in plain language, derived entirely from the
 /// measured table — the rules that pick the winner narrate their own
 /// reasoning (user request 2026-08-25: the table isn't self-evident to
@@ -886,6 +941,55 @@ mod tests {
         let text2 = explain(&report2).join("\n");
         assert!(text2.contains("No candidate is recommended"), "{text2}");
         assert!(text2.contains("meh gained only +2%"), "{text2}");
+    }
+
+    #[test]
+    fn stored_report_splits_menus_and_applied_keys_filter() {
+        // A stored table mixing both menus: each menu's standing
+        // recommendation must race only its own variants.
+        let mut table = std::collections::BTreeMap::new();
+        table.insert(BASELINE.to_string(), {
+            let mut t = r(40.0, 40.0, 100_000);
+            t.pp_prefill = Some(1400.0);
+            t
+        });
+        table.insert("ngram-simple".to_string(), {
+            let mut t = r(40.0, 80.0, 100_000);
+            t.pp_prefill = Some(1400.0);
+            t
+        });
+        table.insert("ub-1024".to_string(), {
+            let mut t = r(40.0, 40.0, 99_000);
+            t.pp_prefill = Some(1800.0);
+            t
+        });
+        let spec = stored_report("spec", &table).unwrap();
+        assert_eq!(spec.verdict.winner.as_deref(), Some("ngram-simple"));
+        assert!(!spec.raced.contains_key("ub-1024"), "menus never cross-race");
+        let ub = stored_report("ub", &table).unwrap();
+        assert_eq!(ub.verdict.winner.as_deref(), Some("ub-1024"), "{}", ub.verdict.reason);
+        assert!(stored_report("nope", &table).is_none());
+
+        let mut cfg = crate::core::settings::AppConfig::default();
+        cfg.overrides.insert(
+            "m".into(),
+            crate::core::router::ModelOverrides {
+                extra: vec![
+                    ("spec-type".into(), "ngram-simple".into()),
+                    ("ubatch-size".into(), "2048".into()),
+                    ("mmproj".into(), "/x".into()),
+                ],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            applied_keys(&cfg, "m", "spec"),
+            vec![("spec-type".to_string(), "ngram-simple".to_string())]
+        );
+        assert_eq!(
+            applied_keys(&cfg, "m", "ub"),
+            vec![("ubatch-size".to_string(), "2048".to_string())]
+        );
     }
 
     #[test]
