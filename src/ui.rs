@@ -2384,6 +2384,18 @@ fn run_calibration(
     let report = system::scan_report(cfg, &[]);
     let env_fp = system::env_fingerprint(&report);
     let build = system::env_build(&report);
+    // A newly downloaded model isn't servable until the preset knows it —
+    // refresh + hot-reload first, so "measure new" includes disk-new files
+    // (user-found: a fresh download measured as "nothing to do").
+    let (_, n) = system::write_preset(cfg, &[])?;
+    let _ = tx.send(Msg::Progress(format!(
+        "preset refreshed ({n} models); reloading router"
+    )));
+    if let Err(e) = router::reload(cfg.port) {
+        let _ = tx.send(Msg::Progress(format!(
+            "router reload failed ({e:#}) — measuring what it currently offers"
+        )));
+    }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let progress_tx = tx.clone();
     router::calibrate(

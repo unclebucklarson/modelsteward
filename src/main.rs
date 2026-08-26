@@ -211,6 +211,13 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     let report = system::scan_report(cfg, &[]);
     let env_fp = system::env_fingerprint(&report);
     let build = system::env_build(&report);
+    // Refresh the preset first so newly downloaded files are servable and
+    // therefore measurable — "new" means new-on-disk, not new-to-router.
+    let (_, n) = system::write_preset(cfg, &[])?;
+    eprintln!("preset refreshed ({n} models); reloading router");
+    if let Err(e) = router::reload(cfg.port) {
+        eprintln!("router reload failed ({e:#}) — measuring what it currently offers");
+    }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &mut |line| {
         eprintln!("{line}");
