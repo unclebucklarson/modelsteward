@@ -24,7 +24,7 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
   `--start/--status/--reload/--stop`, `--calibrate [port] [force]`
   (incremental; skips fingerprint-fresh measurements), `--bench [id] [force]`
   (llama-bench pp/tg baselines; skips current-build-fresh ones),
-  `--trial <id> [spec|ub] [keep <variant>]` (measured config A/B with
+  `--trial <id> [spec|ub|kv] [keep <variant>]` (measured config A/B with
   verdict), `--sync`, `--install-service`. App config lives at
   `~/.config/llamacppcodeconf/config.json` (see core/settings.rs);
   measurements at `~/.local/state/llamacppcodeconf/measurements.json`.

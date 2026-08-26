@@ -129,6 +129,7 @@ struct App {
     lab_bench: bool,
     lab_spec: bool,
     lab_ub: bool,
+    lab_kv: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
 }
@@ -146,6 +147,7 @@ enum AfterStart {
         bench: bool,
         spec: bool,
         ub: bool,
+        kv: bool,
     },
 }
 
@@ -212,6 +214,7 @@ impl App {
             lab_bench: true,
             lab_spec: true,
             lab_ub: false,
+            lab_kv: false,
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
@@ -526,7 +529,7 @@ impl App {
             }
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
-                AfterStart::Lab { id, measure, bench, spec, ub } => {
+                AfterStart::Lab { id, measure, bench, spec, ub, kv } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
                     // frees the GPU itself, each trial restores the preset.
@@ -552,6 +555,9 @@ impl App {
                     }
                     if ub {
                         trial_worker(&cfg, &id, "ub", tx);
+                    }
+                    if kv {
+                        trial_worker(&cfg, &id, "kv", tx);
                     }
                     let _ = tx.send(Msg::Finished(format!(
                         "Lab: campaigns for {id} complete"
@@ -1514,8 +1520,15 @@ impl App {
                     &mut self.lab_ub,
                     "Prefill-batch trial (-ub 1024/2048 vs 512, ~8 min)",
                 );
-                let any =
-                    self.lab_measure || self.lab_bench || self.lab_spec || self.lab_ub;
+                ui.checkbox(
+                    &mut self.lab_kv,
+                    "KV-precision trial (ctv q4_0 — more context if quality holds, ~6 min)",
+                );
+                let any = self.lab_measure
+                    || self.lab_bench
+                    || self.lab_spec
+                    || self.lab_ub
+                    || self.lab_kv;
                 if ui
                     .add_enabled(any, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1537,7 +1550,7 @@ impl App {
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
-                        for menu_name in ["spec", "ub"] {
+                        for menu_name in ["spec", "ub", "kv"] {
                             let Some(report) = trial::stored_report(menu_name, table) else {
                                 continue;
                             };
@@ -1556,7 +1569,8 @@ impl App {
                                 "{}: {}  (currently applied: {applied_text})",
                                 match menu_name {
                                     "spec" => "Speculation",
-                                    _ => "Prefill batch",
+                                    "ub" => "Prefill batch",
+                                    _ => "KV precision",
                                 },
                                 report.verdict.reason
                             ));
@@ -1655,6 +1669,7 @@ impl App {
                 bench: self.lab_bench,
                 spec: self.lab_spec,
                 ub: self.lab_ub,
+                kv: self.lab_kv,
             };
             self.run_or_offer_start(action);
         }
@@ -2725,7 +2740,9 @@ fn trial_table_grid(
     table: &std::collections::BTreeMap<String, trial::TrialResult>,
 ) {
     egui::Grid::new(salt).striped(true).show(ui, |ui| {
-        for h in ["", "novel t/s", "rewrite t/s", "prefill t/s", "context", "accepted"] {
+        for h in [
+            "", "novel t/s", "rewrite t/s", "prefill t/s", "context", "fidelity", "accepted",
+        ] {
             ui.strong(h);
         }
         ui.end_row();
@@ -2743,6 +2760,11 @@ fn trial_table_grid(
             ui.label(
                 r.settled_ctx
                     .map(|c| c.to_string())
+                    .unwrap_or_else(|| "—".into()),
+            );
+            ui.label(
+                r.fidelity
+                    .map(|f| format!("{:.0}%", f * 100.0))
                     .unwrap_or_else(|| "—".into()),
             );
             ui.label(

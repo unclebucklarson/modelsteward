@@ -49,6 +49,17 @@ pub fn ubatch_variants() -> Vec<Variant> {
         .collect()
 }
 
+/// The KV-precision menu: quantizing the V cache to q4_0 shrinks every
+/// token's cache footprint, so `--fit` affords more context — IF quality
+/// holds, which is exactly what the fidelity gate checks. Judged by the
+/// Context goal.
+pub fn kv_variants() -> Vec<Variant> {
+    vec![Variant {
+        label: "ctv-q4_0".into(),
+        extra: vec![("cache-type-v".into(), "q4_0".into())],
+    }]
+}
+
 /// What a trial menu is optimizing for — picks the verdict rules.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Goal {
@@ -57,6 +68,8 @@ pub enum Goal {
     /// Faster prompt processing (batch-size menus) — agent turns are
     /// prefill-dominated when the context is large.
     Prefill,
+    /// A bigger settled context for the same VRAM (KV-precision menus).
+    Context,
 }
 
 /// A named menu: which variants to race and how to judge them.
@@ -64,6 +77,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {
         "spec" => Some((spec_decode_variants(), Goal::RewriteTg)),
         "ub" => Some((ubatch_variants(), Goal::Prefill)),
+        "kv" => Some((kv_variants(), Goal::Context)),
         _ => None,
     }
 }
@@ -80,6 +94,10 @@ pub struct TrialResult {
     pub accept_rewrite: Option<f64>,
     /// Prompt-processing tokens/sec on the long prefill probe.
     pub pp_prefill: Option<f64>,
+    /// Quality gate: fraction of the rewrite module preserved verbatim
+    /// (1.0 = perfect). Free to measure — the rewrite generation already
+    /// runs; this scores its output against the known answer.
+    pub fidelity: Option<f64>,
     /// Context `--fit` settled on under this config.
     pub settled_ctx: Option<u64>,
     /// Load or generation failure — the result is still recorded so a
@@ -159,6 +177,7 @@ pub fn near_misses(
     let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match goal {
         Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite generation"),
         Goal::Prefill => (|r| r.pp_prefill, "prefill"),
+        Goal::Context => (|r| r.settled_ctx.map(|c| c as f64), "context"),
     };
     let Some(b_primary) = primary(baseline) else {
         return Vec::new();
@@ -177,6 +196,17 @@ pub fn near_misses(
             continue; // never beat the goal — not interesting
         }
         let mut costs = Vec::new();
+        if let (Some(bf), Some(cf)) = (baseline.fidelity, r.fidelity)
+            && cf < bf - 0.05
+        {
+            costs.push(format!(
+                "{:.0} points of rewrite fidelity ({:.0}% → {:.0}% preserved) — a QUALITY \
+                 loss, weigh it heavily",
+                (bf - cf) * 100.0,
+                bf * 100.0,
+                cf * 100.0
+            ));
+        }
         if novel < b_novel * 0.97 {
             costs.push(format!(
                 "{:.0}% of novel-code speed ({b_novel:.0} → {novel:.0} t/s)",
@@ -227,6 +257,7 @@ pub fn verdict(
     let primary = |r: &TrialResult| match goal {
         Goal::RewriteTg => r.tg_rewrite,
         Goal::Prefill => r.pp_prefill,
+        Goal::Context => r.settled_ctx.map(|c| c as f64),
     };
     let Some(b_primary) = primary(baseline) else {
         return Verdict {
@@ -250,6 +281,13 @@ pub fn verdict(
         {
             continue; // costs something baseline work can't spare
         }
+        // The quality gate: measured output degradation disqualifies a
+        // candidate outright, no matter what it wins elsewhere.
+        if let (Some(bf), Some(cf)) = (baseline.fidelity, r.fidelity)
+            && cf < bf - 0.05
+        {
+            continue;
+        }
         if p < b_primary * 1.10 {
             continue; // doesn't earn its keep
         }
@@ -260,13 +298,19 @@ pub fn verdict(
     let metric = match goal {
         Goal::RewriteTg => "rewrite",
         Goal::Prefill => "prefill",
+        Goal::Context => "context",
+    };
+    let fmt_val = |v: f64| match goal {
+        Goal::Context => format!("{v:.0} tokens"),
+        _ => format!("{v:.1} t/s"),
     };
     match best {
         Some((label, p)) => Verdict {
             winner: Some(label.clone()),
             reason: format!(
-                "{label}: {metric} {p:.1} t/s vs baseline {b_primary:.1} ({:+.0}%), \
-                 everything else preserved",
+                "{label}: {metric} {} vs baseline {} ({:+.0}%), everything else preserved",
+                fmt_val(p),
+                fmt_val(b_primary),
                 (p / b_primary - 1.0) * 100.0
             ),
         },
@@ -274,7 +318,7 @@ pub fn verdict(
             winner: None,
             reason: format!(
                 "no candidate beat baseline by ≥10% on {metric} without costing \
-                 generation speed or context — keeping baseline"
+                 generation speed, context, or output quality — keeping baseline"
             ),
         },
     }
@@ -348,7 +392,9 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
          given — edits, refactors, applying diffs — which is most of what a coding agent \
          does. prefill: how fast it reads your prompt before the first token. context: \
          the window memory-fitting could afford under this config. accepted: how many \
-         speculated tokens the model confirmed."
+         speculated tokens the model confirmed. fidelity: the quality gate — how much of \
+         a module the model was told to preserve came back verbatim (a drop means the \
+         config is degrading output, and no speed win survives that)."
             .to_string(),
     );
     let Some(base) = report.raced.get(BASELINE) else {
@@ -358,6 +404,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
     let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match report.goal {
         Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite"),
         Goal::Prefill => (|r| r.pp_prefill, "prefill"),
+        Goal::Context => (|r| r.settled_ctx.map(|c| c as f64), "context"),
     };
     let (Some(b_novel), Some(b_rewrite), Some(b_ctx), Some(b_p)) =
         (base.tg_novel, base.tg_rewrite, base.settled_ctx, primary(base))
@@ -372,14 +419,22 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         && let Some(r) = report.raced.get(w)
         && let Some(p) = primary(r)
     {
+        let unit = match report.goal {
+            Goal::Context => "tokens",
+            _ => "t/s",
+        };
         out.push(format!(
-            "{w} is recommended because the metric that matters most here — {metric} speed \
-             — improved {:+.0}% ({b_p:.1} → {p:.1} t/s) while nothing was paid for it: \
-             novel-code speed stayed within noise ({b_novel:.1} → {:.1}) and context is \
-             effectively unchanged ({b_ctx} → {}).",
+            "{w} is recommended because the metric that matters most here — {metric} — \
+             improved {:+.0}% ({b_p:.0} → {p:.0} {unit}) while nothing was paid for it: \
+             novel-code speed stayed within noise ({b_novel:.1} → {:.1}), context {} and \
+             output quality held at the gate.",
             pct(p, b_p),
             r.tg_novel.unwrap_or(0.0),
-            r.settled_ctx.unwrap_or(0),
+            if report.goal == Goal::Context {
+                "IS the win".to_string()
+            } else {
+                format!("is effectively unchanged ({b_ctx} → {})", r.settled_ctx.unwrap_or(0))
+            },
         ));
     } else {
         out.push(
@@ -484,20 +539,60 @@ const NOVEL_PROMPTS: [&str; 2] = [
      BTreeMap<String, BTreeMap<String, String>>, with unit tests.",
 ];
 
-fn rewrite_prompt() -> String {
-    let code: String = (0..10)
+/// The module the rewrite prompt asks the model to preserve — also the
+/// answer key for the fidelity score, so it stays a named function.
+fn rewrite_code() -> String {
+    (0..10)
         .map(|i| {
             format!(
                 "def process_batch_{i}(items, config):\n    results = []\n    for item in items:\n        value = item.get('field_{i}')\n        if value is not None and value > config.threshold_{i}:\n            results.append({{'id': item['id'], 'value': value * {m}}})\n    return results\n",
                 m = i + 1
             )
         })
-        .collect();
+        .collect()
+}
+
+fn rewrite_prompt() -> String {
     format!(
-        "Here is a Python module:\n```python\n{code}```\nRewrite it EXACTLY as-is but add \
+        "Here is a Python module:\n```python\n{}```\nRewrite it EXACTLY as-is but add \
          a docstring \"Process batch items against config thresholds.\" to every function. \
-         Change nothing else — output the complete module."
+         Change nothing else — output the complete module.",
+        rewrite_code()
     )
+}
+
+/// The quality gate's score: what fraction of the original module's
+/// meaningful lines the rewrite reproduced verbatim (whitespace-normalized).
+/// The rewrite prompt has a known correct answer, so degraded output —
+/// e.g. from a too-aggressive KV quant — shows up as dropped or mangled
+/// lines instead of needing a judgment call. 1.0 = perfect preservation.
+pub fn rewrite_fidelity(original: &str, response: &str) -> f64 {
+    let norm = |l: &str| l.split_whitespace().collect::<Vec<_>>().join(" ");
+    // Multiset, not set: boilerplate lines repeat across functions, and a
+    // response must supply each occurrence — otherwise dropping half the
+    // module still scores ~0.7 on shared lines (caught by the unit test).
+    let mut have: std::collections::HashMap<String, usize> = Default::default();
+    for l in response.lines().map(norm).filter(|l| !l.is_empty()) {
+        *have.entry(l).or_default() += 1;
+    }
+    let want: Vec<String> = original
+        .lines()
+        .map(norm)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if want.is_empty() {
+        return 1.0;
+    }
+    let mut matched = 0usize;
+    for l in &want {
+        if let Some(n) = have.get_mut(l)
+            && *n > 0
+        {
+            *n -= 1;
+            matched += 1;
+        }
+    }
+    matched as f64 / want.len() as f64
 }
 
 /// ~6k tokens of deterministic code for the prefill probe — big enough
@@ -518,6 +613,7 @@ struct GenStats {
     prompt_tps: Option<f64>,
     draft_n: Option<u64>,
     draft_accepted: Option<u64>,
+    content: String,
 }
 
 fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Result<GenStats> {
@@ -544,6 +640,11 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
         prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
+        content: body
+            .pointer("/choices/0/message/content")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default()
+            .to_string(),
     })
 }
 
@@ -565,6 +666,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
             _ => None,
         },
         pp_prefill: pf.prompt_tps,
+        fidelity: Some(rewrite_fidelity(&rewrite_code(), &rw.content)),
         settled_ctx: Some(settled_ctx),
         error: None,
         build: None,
@@ -941,6 +1043,50 @@ mod tests {
         let text2 = explain(&report2).join("\n");
         assert!(text2.contains("No candidate is recommended"), "{text2}");
         assert!(text2.contains("meh gained only +2%"), "{text2}");
+    }
+
+    #[test]
+    fn fidelity_scores_verbatim_preservation() {
+        let orig = rewrite_code();
+        // Perfect: response embeds the module with docstrings added.
+        let good = format!("```python\n{orig}```\ndone");
+        assert_eq!(rewrite_fidelity(&orig, &good), 1.0);
+        // Whitespace variance doesn't count against it.
+        let spaced = orig.replace("    ", "  ");
+        assert_eq!(rewrite_fidelity(&orig, &spaced), 1.0);
+        // Half the functions dropped → score collapses.
+        let half: String = orig.lines().take(orig.lines().count() / 2)
+            .collect::<Vec<_>>().join("\n");
+        let s = rewrite_fidelity(&orig, &half);
+        assert!(s > 0.4 && s < 0.6, "{s}");
+        // Garbage → ~0.
+        assert!(rewrite_fidelity(&orig, "I cannot help with that.") < 0.05);
+    }
+
+    #[test]
+    fn kv_menu_wins_on_context_and_quality_gate_disqualifies() {
+        let mk = |ctx: u64, fid: f64| {
+            let mut t = r(40.0, 40.0, ctx);
+            t.pp_prefill = Some(1400.0);
+            t.fidelity = Some(fid);
+            t
+        };
+        let base = mk(100_000, 0.98);
+        // Quality holds → the extra context wins.
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("ctv-q4_0".to_string(), mk(130_000, 0.96));
+        let v = verdict(Goal::Context, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("ctv-q4_0"), "{}", v.reason);
+        assert!(v.reason.contains("tokens"), "context wins report tokens: {}", v.reason);
+        // Quality collapses → disqualified no matter the context gain, and
+        // surfaced as a near-miss with the quality cost spelled out.
+        let mut c2 = std::collections::BTreeMap::new();
+        c2.insert("ctv-q4_0".to_string(), mk(130_000, 0.70));
+        let v2 = verdict(Goal::Context, &base, &c2);
+        assert_eq!(v2.winner, None, "{}", v2.reason);
+        let nm = near_misses(Goal::Context, &base, &c2);
+        assert_eq!(nm.len(), 1);
+        assert!(nm[0].cost.contains("QUALITY"), "{}", nm[0].cost);
     }
 
     #[test]

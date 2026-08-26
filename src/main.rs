@@ -20,7 +20,7 @@
 //!                                        llama-bench baseline (pp/tg t/s)
 //!                                        for one model, or every measured
 //!                                        model missing a current baseline
-//!   llamacppcodeconf --trial <id> [spec|ub] [keep <variant>|keep baseline]
+//!   llamacppcodeconf --trial <id> [spec|ub|kv] [keep <variant>|keep baseline]
 //!                                        measured config trial: baseline +
 //!                                        the menu's variants (spec = ngram
 //!                                        speculation, ub = prefill batch),

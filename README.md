@@ -43,7 +43,7 @@ downstream from those measurements.
   and shown in the Library's Speed column, re-measured only when the build
   changes.
 - **Trials config changes instead of trusting folklore** (each row's
-  Trial → Run, or `--trial <id> [spec|ub]`): baseline vs candidates,
+  Trial → Run, or `--trial <id> [spec|ub|kv]`): baseline vs candidates,
   server-timed on fixed prompts, ending in a verdict dialog with the full
   measured table. Strict rules pick winners that cost nothing; tradeoffs
   the rules reject (say, +50% prefill for context you'd never use) are
@@ -92,7 +92,7 @@ llamacppcodeconf --preset      # write ~/.config/llamacppcodeconf/router.ini
 llamacppcodeconf --start       # router on :8080
 llamacppcodeconf --calibrate   # measure new/stale models (add `force` for all)
 llamacppcodeconf --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
-llamacppcodeconf --trial <id>  # measured config trial ([spec|ub]; `keep <variant>` applies)
+llamacppcodeconf --trial <id>  # measured config trial ([spec|ub|kv]; `keep <variant>` applies)
 llamacppcodeconf --sync        # write measured limits into opencode.json
 llamacppcodeconf --advise      # build advisor report
 llamacppcodeconf --status      # router + per-model state (JSON)
