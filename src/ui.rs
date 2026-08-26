@@ -122,6 +122,28 @@ struct App {
     trial_verdict: Option<TrialVerdictView>,
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
+    start_prompt: Option<AfterStart>,
+}
+
+/// A router-needing action intercepted while the router was down: offered
+/// as "Start Router & Continue" instead of a dead-end error (user request
+/// 2026-08-25). Never offered for an external server — not ours to start.
+#[derive(Clone)]
+enum AfterStart {
+    Calibrate { force: bool },
+    Trial { id: String },
+    Measure { id: String, keep_loaded: bool },
+}
+
+impl AfterStart {
+    fn describe(&self) -> String {
+        match self {
+            AfterStart::Calibrate { force: true } => "re-measure ALL models".into(),
+            AfterStart::Calibrate { force: false } => "measure new/stale models".into(),
+            AfterStart::Trial { id } => format!("run the trial for {id}"),
+            AfterStart::Measure { id, .. } => format!("load + measure {id}"),
+        }
+    }
 }
 
 /// A finished trial's verdict, shown as a dialog: the measured table, the
@@ -169,6 +191,7 @@ impl App {
             trial_verdict: None,
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
+            start_prompt: None,
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -412,24 +435,41 @@ impl App {
     }
 
     fn action_calibrate(&mut self, force: bool) {
-        let cfg = self.cfg.clone();
-        let label = if force {
-            "re-measuring ALL models (forced — minutes)"
+        self.run_or_offer_start(AfterStart::Calibrate { force });
+    }
+
+    /// Run a router-needing action now, or — when our router is down /
+    /// troubled — open the "Start Router & Continue?" prompt instead of a
+    /// dead-end error. External servers are untouched: those actions keep
+    /// their plain refusal.
+    fn run_or_offer_start(&mut self, action: AfterStart) {
+        let startable = matches!(
+            self.router_state,
+            Some(router::RouterState::Down) | Some(router::RouterState::Trouble { .. })
+        );
+        if startable {
+            self.start_prompt = Some(action);
         } else {
-            "measuring new/stale models (fresh ones are skipped)"
+            self.dispatch(action, false);
+        }
+    }
+
+    fn dispatch(&mut self, action: AfterStart, start_first: bool) {
+        let cfg = self.cfg.clone();
+        let label = if start_first {
+            format!("starting router, then: {}", action.describe())
+        } else {
+            action.describe()
         };
-        self.spawn(label, move |tx| {
-            match run_calibration(&cfg, force, tx) {
-                Ok(m) => {
-                    let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
-                    let failed = m.values().filter(|x| x.error.is_some()).count();
-                    let _ = tx.send(Msg::Measurements(m));
-                    let _ = tx.send(Msg::Finished(format!(
-                        "calibration finished: {measured} measured, {failed} known failures"
-                    )));
-                }
-                Err(e) => {
-                    let _ = tx.send(Msg::Error(format!("calibrate: {e:#}")));
+        self.spawn(&label, move |tx| {
+            if start_first && !start_router_and_wait(&cfg, tx) {
+                return;
+            }
+            match action {
+                AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
+                AfterStart::Trial { id } => trial_worker(&cfg, &id, tx),
+                AfterStart::Measure { id, keep_loaded } => {
+                    measure_and_sync(&cfg, &id, keep_loaded, tx)
                 }
             }
         });
@@ -519,26 +559,7 @@ impl App {
                 });
             }
             RowAction::Trial(id) => {
-                self.spawn(
-                    &format!("measured trial: {id} (baseline + ngram variants, ~10 min)"),
-                    move |tx| {
-                        let menu = "spec";
-                        let (variants, goal) = trial::menu(menu).expect("built-in menu");
-                        let tx2 = tx.clone();
-                        let mut progress = move |line: String| {
-                            let _ = tx2.send(Msg::Progress(line));
-                        };
-                        let _ = match trial::run_trial(&cfg, &id, &variants, goal, &mut progress)
-                        {
-                            Ok(report) => tx.send(Msg::TrialDone {
-                                model: id,
-                                menu: menu.to_string(),
-                                report,
-                            }),
-                            Err(e) => tx.send(Msg::Error(format!("trial: {e:#}"))),
-                        };
-                    },
-                );
+                self.run_or_offer_start(AfterStart::Trial { id });
             }
             RowAction::EditOverrides(id) => {
                 let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
@@ -1013,6 +1034,12 @@ impl App {
             return;
         }
         let router_up = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
+        // Down-but-ours: router-needing buttons stay clickable and offer to
+        // start the router instead of sitting disabled (user request).
+        let router_startable = matches!(
+            self.router_state,
+            Some(router::RouterState::Down) | Some(router::RouterState::Trouble { .. })
+        );
         if !router_up {
             ui.horizontal(|ui| {
                 ui.label("Router is not running — Load and checkbox actions need it.");
@@ -1276,7 +1303,10 @@ impl App {
                                     .into()
                             });
                             if ui
-                                .add_enabled(router_up && !r.embedding, egui::Button::new("Run"))
+                                .add_enabled(
+                                    (router_up || router_startable) && !r.embedding,
+                                    egui::Button::new("Run"),
+                                )
                                 .on_hover_text(hint)
                                 .clicked()
                             {
@@ -2424,6 +2454,64 @@ fn sync_single(
     Ok(())
 }
 
+/// The Measure New/Stale worker: calibrate + report, off-thread.
+fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
+    match run_calibration(cfg, force, tx) {
+        Ok(m) => {
+            let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
+            let failed = m.values().filter(|x| x.error.is_some()).count();
+            let _ = tx.send(Msg::Measurements(m));
+            let _ = tx.send(Msg::Finished(format!(
+                "calibration finished: {measured} measured, {failed} known failures"
+            )));
+        }
+        Err(e) => {
+            let _ = tx.send(Msg::Error(format!("calibrate: {e:#}")));
+        }
+    }
+}
+
+/// The per-row trial worker (spec menu), off-thread.
+fn trial_worker(cfg: &settings::AppConfig, id: &str, tx: &Sender<Msg>) {
+    let menu = "spec";
+    let (variants, goal) = trial::menu(menu).expect("built-in menu");
+    let tx2 = tx.clone();
+    let mut progress = move |line: String| {
+        let _ = tx2.send(Msg::Progress(line));
+    };
+    let _ = match trial::run_trial(cfg, id, &variants, goal, &mut progress) {
+        Ok(report) => tx.send(Msg::TrialDone {
+            model: id.to_string(),
+            menu: menu.to_string(),
+            report,
+        }),
+        Err(e) => tx.send(Msg::Error(format!("trial: {e:#}"))),
+    };
+}
+
+/// Start the router and wait for it to answer. Narrates via tx; on
+/// failure it reports (Msg::Error) and returns false.
+fn start_router_and_wait(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
+    let _ = tx.send(Msg::Progress("starting router".into()));
+    if let Err(e) = start_router(cfg) {
+        let _ = tx.send(Msg::Error(format!("start: {e:#}")));
+        return false;
+    }
+    let rcfg = system::router_config(cfg);
+    let dir = router::state_dir();
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        if matches!(router::status(&dir, &rcfg), router::RouterState::Ours { .. }) {
+            let _ = tx.send(Msg::Progress("router is up".into()));
+            return true;
+        }
+    }
+    let _ = tx.send(Msg::Error(
+        "router did not come up within 30s — see router.log".into(),
+    ));
+    false
+}
+
 /// The setup sequence shared by Set Up Everything and the post-rebuild
 /// verification: start if down → wait healthy → incremental calibrate →
 /// sync. Narrates via tx; on failure it reports (Msg::Error) and returns
@@ -2437,26 +2525,9 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
     match router::status(&dir, &rcfg) {
         router::RouterState::Ours { .. } => step("router already running"),
         router::RouterState::Down => {
-            step("starting router");
-            if let Err(e) = start_router(cfg) {
-                let _ = tx.send(Msg::Error(format!("setup/start: {e:#}")));
+            if !start_router_and_wait(cfg, tx) {
                 return false;
             }
-            let mut up = false;
-            for _ in 0..30 {
-                std::thread::sleep(std::time::Duration::from_secs(1));
-                if matches!(router::status(&dir, &rcfg), router::RouterState::Ours { .. }) {
-                    up = true;
-                    break;
-                }
-            }
-            if !up {
-                let _ = tx.send(Msg::Error(
-                    "setup: router did not come up within 30s — see router.log".into(),
-                ));
-                return false;
-            }
-            step("router is up");
         }
         other => {
             let _ = tx.send(Msg::Error(format!(
@@ -2777,6 +2848,9 @@ impl eframe::App for App {
                 let cfg = self.cfg.clone();
                 let m = model.clone();
                 self.spawn(&format!("keeping {w} for {m}"), move |tx| {
+                    // (keeps need no router prompt: keep_variant tolerates a
+                    // down router — the preset regenerates and reload is
+                    // best-effort.)
                     let variants = trial::menu(&menu)
                         .map(|(v, _)| v)
                         .unwrap_or_else(trial::spec_decode_variants);
@@ -2815,6 +2889,38 @@ impl eframe::App for App {
                 self.trial_verdict = None;
             } else if close {
                 self.trial_verdict = None;
+            }
+        }
+
+        if let Some(action) = &self.start_prompt {
+            let desc = action.describe();
+            let mut go = false;
+            let mut cancel = false;
+            egui::Window::new("Router isn't running")
+                .collapsible(false)
+                .resizable(false)
+                .show(ui.ctx(), |ui| {
+                    ui.label(
+                        "This needs the router — models load and measure through it — \
+                         but it isn't running.",
+                    );
+                    ui.label(format!("Start it, then {desc}?"));
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("▶ Start Router & Continue").clicked() {
+                            go = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if go {
+                if let Some(a) = self.start_prompt.take() {
+                    self.dispatch(a, true);
+                }
+            } else if cancel {
+                self.start_prompt = None;
             }
         }
     }
