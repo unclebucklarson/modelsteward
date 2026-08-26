@@ -313,9 +313,12 @@ limit immediately. Standing rule adopted: every hand-fix prompts
    menu (quality-gated), the menu picker became the Lab's campaign
    checkboxes, results-next-to-recommendations became the Lab's standing
    blocks. Still open in M8: `--cpu-moe`, remaining ngram variants.
-2. **Ghost comment-out by the app**: config entries whose id a REACHABLE
-   router no longer offers could be auto-commented on sync (design call:
-   currently orphans are reported and removal stays a user action).
+2. ✔ **Ghost comment-out by the app** (DONE 2026-08-26, user-approved
+   after the same leftover confused twice): sync auto-comments an orphan
+   only when the REACHABLE router omits its id AND no measurement backs
+   it — measured-but-unoffered entries stay reported-only. Comment-outs
+   with note + backup, announced in the sync summary (✂). First live
+   catch: the unsloth Q5 cache entry whose blob/preset had evaporated.
 3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor
    layer. ✔ Daily upstream freshness (DONE 2026-08-25, user request —
    manual checks left the checkout 167 commits stale): the status poller

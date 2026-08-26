@@ -928,6 +928,12 @@ impl App {
                     self.busy = None;
                 }
                 Msg::SyncDone(r) => {
+                    for id in &r.ghosts_commented {
+                        self.log(format!(
+                            "sync: ✂ {id} commented out (router omits it, nothing measured — \
+                             a ghost; uncomment in opencode.json to restore)"
+                        ));
+                    }
                     let line = format!(
                         "sync: {} added, {} updated, {} not synced",
                         r.added.len(),
@@ -2739,11 +2745,23 @@ fn run_sync(
         !desired.is_empty(),
         "no successful measurements yet — measure a model first (measured, not guessed)"
     );
-    opencode::sync_file(
-        &opencode::default_config_path(),
+    let path = opencode::default_config_path();
+    let mut report = opencode::sync_file(
+        &path,
         &format!("http://127.0.0.1:{}/v1", cfg.port),
         &desired,
-    )
+    )?;
+    // Ghost cleanup (user decision 2026-08-26): only against a LIVE router.
+    if let router::RouterState::Ours { models } =
+        router::status(&router::state_dir(), &system::router_config(cfg))
+    {
+        let offered: Vec<String> = models.into_iter().map(|m| m.id).collect();
+        let ghosts =
+            opencode::comment_out_ghosts(&path, &report.orphans, &offered, measurements)?;
+        report.orphans.retain(|id| !ghosts.contains(id));
+        report.ghosts_commented = ghosts;
+    }
+    Ok(report)
 }
 
 /// Sync exactly one measured model into opencode.json.

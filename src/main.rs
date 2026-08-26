@@ -282,6 +282,17 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
     let path = opencode::default_config_path();
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let report = opencode::sync_file(&path, &base_url, &desired)?;
+    // Ghost cleanup (user decision 2026-08-26): only against a LIVE router.
+    if let router::RouterState::Ours { models } =
+        router::status(&router::state_dir(), &system::router_config(cfg))
+    {
+        let offered: Vec<String> = models.into_iter().map(|m| m.id).collect();
+        for id in
+            opencode::comment_out_ghosts(&path, &report.orphans, &offered, &measurements)?
+        {
+            println!("  ✂ {id}: commented out (router omits it, nothing measured — a ghost)");
+        }
+    }
     println!(
         "synced {}: {} added, {} updated",
         path.display(),

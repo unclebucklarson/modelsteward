@@ -99,6 +99,9 @@ pub struct SyncReport {
     /// Configured under our provider but not desired — candidates for
     /// comment-out, surfaced to the user rather than acted on.
     pub orphans: Vec<String>,
+    /// Ghosts the sync commented out itself (reachable router omitted the
+    /// id AND nothing measured backed it — user-approved 2026-08-26).
+    pub ghosts_commented: Vec<String>,
 }
 
 /// Compute the new source text. Pure with respect to the filesystem —
@@ -291,6 +294,31 @@ pub fn orphans_in_file(path: &Path, keep: &[String]) -> Result<Vec<String>> {
         .collect())
 }
 
+/// Auto-comment GHOSTS after a sync (user decision 2026-08-26, after the
+/// same leftover confused twice): an orphan qualifies only when the
+/// REACHABLE router omits its id — CLAUDE.md's precondition for orphaning
+/// — AND no measurement record backs it (a measured-but-unoffered entry
+/// can be a temporarily unoffered variant, so those stay reported-only).
+/// `offered` must come from a live router; callers with a down router
+/// must not call this. Comment-outs, never deletions; backed up like
+/// every write. Returns what was commented.
+pub fn comment_out_ghosts(
+    path: &Path,
+    orphans: &[String],
+    offered: &[String],
+    measurements: &crate::core::router::Measurements,
+) -> Result<Vec<String>> {
+    let mut out = Vec::new();
+    for id in orphans {
+        if offered.iter().any(|o| o == id) || measurements.contains_key(id) {
+            continue;
+        }
+        comment_out_in_file(path, id)?;
+        out.push(id.clone());
+    }
+    Ok(out)
+}
+
 /// Comment one orphan out in place (never deletes; the entry stays visible
 /// in the file under an explanatory note). Backed up like every write.
 pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
@@ -345,6 +373,29 @@ mod tests {
             tool_call: None,
             vision: false,
         }
+    }
+
+    #[test]
+    fn ghost_rules_are_conservative() {
+        use crate::core::router::{Measurement, Measurements};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(&path, SAMPLE).unwrap();
+        // SAMPLE contains configured models incl. "stale-model".
+        let orphans = vec![
+            "stale-model".to_string(),
+            "offered-elsewhere".to_string(),
+            "measured-one".to_string(),
+        ];
+        let offered = vec!["offered-elsewhere".to_string()];
+        let mut m = Measurements::new();
+        m.insert("measured-one".into(), Measurement::default());
+        let ghosts = comment_out_ghosts(&path, &orphans, &offered, &m).unwrap();
+        // Only the unoffered, unmeasured one goes; note it must actually
+        // exist in the file for comment-out to succeed.
+        assert_eq!(ghosts, vec!["stale-model"]);
+        let out = std::fs::read_to_string(&path).unwrap();
+        assert!(out.contains("// \"stale-model\""), "{out}");
     }
 
     #[test]
