@@ -108,6 +108,13 @@ The tabs now match how a user thinks:
 - ✔ Contention warning names the remedy (DONE).
 - `limit.output` exposed in the override editor (crude ctx/2 cap today).
 - Library staleness badge driven by fingerprint mismatch.
+- ✔ **Measurement history journal** (DONE 2026-08-25, user decision after
+  the b10630 diff nearly required transcript archaeology): every ctx
+  measurement and bench result also appends to history.jsonl (build,
+  args_fp, values; newest 50 per model kept), surfaced as hover trails
+  on the Measured ctx and Speed cells. Foundation for build-over-build
+  advisories ("this build cost you 9% ctx"). Current-truth files
+  untouched — history is a side effect of writing, never a source.
 
 ## M6 — Build Advisor + Diagnosis ("Why?" panel)
 

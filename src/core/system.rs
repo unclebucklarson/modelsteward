@@ -103,21 +103,24 @@ pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanRep
     }
 }
 
+/// The build number of the install the devices were probed with — the
+/// same one env_fingerprint hashes, exposed for measurement provenance
+/// (the history journal records it per event).
+pub fn env_build(report: &ScanReport) -> Option<u64> {
+    report.devices_from.as_ref().and_then(|from| {
+        report
+            .installs
+            .iter()
+            .find(|i| &i.server_path == from)
+            .and_then(|i| i.build)
+    })
+}
+
 /// Environment half of a measurement fingerprint: which build measured, on
 /// which devices. Pure over an existing scan so the GUI can compare without
 /// re-probing.
 pub fn env_fingerprint(report: &ScanReport) -> String {
-    let build = report
-        .devices_from
-        .as_ref()
-        .and_then(|from| {
-            report
-                .installs
-                .iter()
-                .find(|i| &i.server_path == from)
-                .and_then(|i| i.build)
-        })
-        .unwrap_or(0);
+    let build = env_build(report).unwrap_or(0);
     let devices: Vec<String> = report
         .devices
         .iter()

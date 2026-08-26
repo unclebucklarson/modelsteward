@@ -553,19 +553,29 @@ pub fn keep_variant(
     // (fingerprints cleared → the normal loop re-verifies next calibrate)
     // so synced limits stay honest without waiting for a re-measure.
     let dir = router::state_dir();
-    if let Some(ctx) = read_trials(&dir)
+    if let Some(r) = read_trials(&dir)
         .get(model)
         .and_then(|t| t.get(label))
-        .and_then(|r| r.settled_ctx)
+        .filter(|r| r.settled_ctx.is_some())
     {
         let mut all = router::read_measurements(&dir);
         let mut entry = all.get(model).cloned().unwrap_or_default();
-        entry.n_ctx = Some(ctx);
+        entry.n_ctx = r.settled_ctx;
         entry.error = None;
         entry.args_fp = None;
         entry.env_fp = None;
         all.insert(model.to_string(), entry);
         router::write_measurements(&dir, &all)?;
+        let _ = crate::core::history::record(
+            &dir,
+            &crate::core::history::Entry {
+                when: crate::core::advisor::now_epoch(),
+                model: model.to_string(),
+                build: r.build,
+                n_ctx: r.settled_ctx,
+                ..Default::default()
+            },
+        );
     }
     Ok(())
 }

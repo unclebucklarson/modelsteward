@@ -6,6 +6,7 @@ pub mod bench;
 pub mod diagnose;
 pub mod discover;
 pub mod gguf;
+pub mod history;
 pub mod jsonc;
 pub mod library;
 pub mod ollama;

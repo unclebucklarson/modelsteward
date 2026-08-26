@@ -205,6 +205,17 @@ pub fn run_baselines(
                 entry.bench_build = b.build;
                 measurements.insert(id.clone(), entry);
                 router::write_measurements(&dir, &measurements)?; // persist per model
+                let _ = crate::core::history::record(
+                    &dir,
+                    &crate::core::history::Entry {
+                        when: crate::core::advisor::now_epoch(),
+                        model: id.clone(),
+                        build: b.build,
+                        pp_tps: b.pp_tps,
+                        tg_tps: b.tg_tps,
+                        ..Default::default()
+                    },
+                );
                 benched += 1;
             }
             Err(e) => progress(format!("[{n}/{total}] {id}: bench failed: {e:#}")),

@@ -208,9 +208,11 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
             cfg.port
         ),
     }
-    let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let report = system::scan_report(cfg, &[]);
+    let env_fp = system::env_fingerprint(&report);
+    let build = system::env_build(&report);
     let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let results = router::calibrate(&dir, cfg.port, &env_fp, force, &embed, &mut |line| {
+    let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &mut |line| {
         eprintln!("{line}");
     })?;
     for (id, m) in &results {

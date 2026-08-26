@@ -653,6 +653,7 @@ pub fn calibrate(
     dir: &Path,
     port: u16,
     env_fp: &str,
+    build: Option<u64>,
     force: bool,
     no_tool_probe: &std::collections::HashSet<String>,
     progress: &mut dyn FnMut(String),
@@ -759,6 +760,18 @@ pub fn calibrate(
                 }
             }
         };
+        let _ = crate::core::history::record(
+            dir,
+            &crate::core::history::Entry {
+                when: crate::core::advisor::now_epoch(),
+                model: m.id.clone(),
+                build,
+                args_fp: measurement.args_fp.clone(),
+                n_ctx: measurement.n_ctx,
+                error: measurement.error.clone(),
+                ..Default::default()
+            },
+        );
         upsert_measurement(&mut out, &m.id, measurement);
         write_measurements(dir, &out)?; // persist per model — a mid-run
         // failure keeps everything measured so far

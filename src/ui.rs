@@ -12,7 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, bench, diagnose, discover, ollama, opencode, router, rows, settings, system, trial,
+    advisor, bench, diagnose, discover, history, ollama, opencode, router, rows, settings,
+    system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -59,6 +60,8 @@ enum Msg {
     CfgReloaded(settings::AppConfig),
     /// The daily upstream freshness probe finished.
     Upstream(advisor::UpstreamStatus),
+    /// history.jsonl changed on disk.
+    History(Vec<history::Entry>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -118,6 +121,7 @@ struct App {
     trials: trial::Trials,
     trial_verdict: Option<TrialVerdictView>,
     upstream: Option<advisor::UpstreamStatus>,
+    history: Vec<history::Entry>,
 }
 
 /// A finished trial's verdict, shown as a dialog: the measured table, the
@@ -164,6 +168,7 @@ impl App {
             trials: trial::read_trials(&router::state_dir()),
             trial_verdict: None,
             upstream: advisor::read_upstream_status(&router::state_dir()),
+            history: history::read_all(&router::state_dir()),
             configured: Vec::new(),
             rows: Vec::new(),
             ram_mib: rows::read_ram_mib(),
@@ -278,8 +283,10 @@ impl App {
         std::thread::spawn(move || {
             let meas_path = router::state_dir().join("measurements.json");
             let trials_path = router::state_dir().join("trials.json");
+            let history_path = router::state_dir().join("history.jsonl");
             let mut last_meas_mtime = None;
             let mut last_trials_mtime = None;
+            let mut last_history_mtime = None;
             loop {
                 let cfg = system::load_config();
                 let state = router::status(&router::state_dir(), &system::router_config(&cfg));
@@ -302,6 +309,11 @@ impl App {
                 if mtime != last_trials_mtime {
                     last_trials_mtime = mtime;
                     let _ = tx.send(Msg::Trials(trial::read_trials(&router::state_dir())));
+                }
+                let mtime = std::fs::metadata(&history_path).and_then(|m| m.modified()).ok();
+                if mtime != last_history_mtime {
+                    last_history_mtime = mtime;
+                    let _ = tx.send(Msg::History(history::read_all(&router::state_dir())));
                 }
                 // Daily upstream freshness (user request 2026-08-25): one
                 // quiet fetch per day, remote-tracking refs only. The
@@ -782,6 +794,7 @@ impl App {
                     rebuild = true;
                 }
                 Msg::Trials(t) => self.trials = t,
+                Msg::History(h) => self.history = h,
                 Msg::TrialDone { model, menu, report } => {
                     self.log(format!("trial {model}: {}", report.verdict.reason));
                     self.trial_verdict = Some(TrialVerdictView { model, menu, report });
@@ -1012,6 +1025,50 @@ impl App {
         let mut pending: Option<RowAction> = None;
         let mut why: Option<DiagnosisView> = None;
         let rows = self.rows.clone();
+        // History trails for the ctx and Speed hovers: the journal's recent
+        // entries per model, one line each, newest first.
+        let age = |when: u64| -> String {
+            let s = advisor::now_epoch().saturating_sub(when);
+            match s {
+                0..=3599 => format!("{}m ago", (s / 60).max(1)),
+                3600..=172_799 => format!("{}h ago", s / 3600),
+                _ => format!("{}d ago", s / 86_400),
+            }
+        };
+        let mut ctx_trails: std::collections::HashMap<String, String> = Default::default();
+        let mut speed_trails: std::collections::HashMap<String, String> = Default::default();
+        {
+            let mut per_model: std::collections::HashMap<&str, (Vec<String>, Vec<String>)> =
+                Default::default();
+            for e in self.history.iter().rev() {
+                let (ctx_lines, speed_lines) = per_model.entry(&e.model).or_default();
+                let b = e.build.map(|b| format!("b{b}")).unwrap_or_else(|| "b?".into());
+                if (e.n_ctx.is_some() || e.error.is_some()) && ctx_lines.len() < 6 {
+                    ctx_lines.push(match (&e.n_ctx, &e.error) {
+                        (Some(c), _) => format!("{b} · ctx {c} · {}", age(e.when)),
+                        (None, Some(_)) => format!("{b} · failed · {}", age(e.when)),
+                        _ => continue,
+                    });
+                }
+                if e.pp_tps.is_some() && speed_lines.len() < 6 {
+                    speed_lines.push(format!(
+                        "{b} · pp {:.0} / tg {:.0} · {}",
+                        e.pp_tps.unwrap_or(0.0),
+                        e.tg_tps.unwrap_or(0.0),
+                        age(e.when)
+                    ));
+                }
+            }
+            for (model, (c, s)) in per_model {
+                if !c.is_empty() {
+                    ctx_trails.insert(model.to_string(), format!("History:\n{}", c.join("\n")));
+                }
+                if !s.is_empty() {
+                    speed_trails
+                        .insert(model.to_string(), format!("History:\n{}", s.join("\n")));
+                }
+            }
+        }
         // Hover summaries for the 🧪 button, built outside the grid closure.
         let trial_hints: std::collections::HashMap<String, String> = self
             .trials
@@ -1104,27 +1161,46 @@ impl App {
                                 ));
                             }
                         }
-                        ui.label(
-                            r.measured_ctx
-                                .map(|c| c.to_string())
-                                .unwrap_or_else(|| "—".into()),
-                        );
-                        match (r.pp_tps, r.tg_tps) {
-                            (None, None) => {
-                                ui.label("—").on_hover_text(
-                                    "No throughput baseline yet — run `llamacppcodeconf \
-                                     --bench` with the GPU idle to measure it.",
-                                );
+                        {
+                            let resp = ui.label(
+                                r.measured_ctx
+                                    .map(|c| c.to_string())
+                                    .unwrap_or_else(|| "—".into()),
+                            );
+                            if let Some(t) =
+                                r.router_id.as_ref().and_then(|id| ctx_trails.get(id))
+                            {
+                                resp.on_hover_text(t);
                             }
-                            (pp, tg) => {
-                                let fmt = |v: Option<f64>| {
-                                    v.map(|t| format!("{t:.0}")).unwrap_or_else(|| "?".into())
-                                };
-                                ui.label(format!("{}/{}", fmt(pp), fmt(tg))).on_hover_text(
-                                    "Measured baseline, tokens per second: prompt processing \
-                                     (pp512) / generation (tg128), benched at the serving KV \
-                                     cache types via llama-bench.",
-                                );
+                        }
+                        {
+                            let trail = r.router_id.as_ref().and_then(|id| speed_trails.get(id));
+                            match (r.pp_tps, r.tg_tps) {
+                                (None, None) => {
+                                    ui.label("—").on_hover_text(trail.cloned().unwrap_or_else(
+                                        || {
+                                            "No throughput baseline yet — Server → Bench \
+                                             New/Stale Models (GPU idle) to measure it."
+                                                .into()
+                                        },
+                                    ));
+                                }
+                                (pp, tg) => {
+                                    let fmt = |v: Option<f64>| {
+                                        v.map(|t| format!("{t:.0}"))
+                                            .unwrap_or_else(|| "?".into())
+                                    };
+                                    let base = "Measured baseline, tokens per second: prompt \
+                                                processing (pp512) / generation (tg128), at \
+                                                the serving KV cache types."
+                                        .to_string();
+                                    ui.label(format!("{}/{}", fmt(pp), fmt(tg))).on_hover_text(
+                                        match trail {
+                                            Some(t) => format!("{base}\n\n{t}"),
+                                            None => base,
+                                        },
+                                    );
+                                }
                             }
                         }
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
@@ -2275,13 +2351,16 @@ fn run_calibration(
     force: bool,
     tx: &Sender<Msg>,
 ) -> anyhow::Result<router::Measurements> {
-    let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let report = system::scan_report(cfg, &[]);
+    let env_fp = system::env_fingerprint(&report);
+    let build = system::env_build(&report);
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let progress_tx = tx.clone();
     router::calibrate(
         &router::state_dir(),
         cfg.port,
         &env_fp,
+        build,
         force,
         &embed,
         &mut |line| {
@@ -2424,7 +2503,9 @@ fn send_configured(tx: &Sender<Msg>) {
 /// here — loading IS measuring, so nothing enters the config unguessed.
 fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: &Sender<Msg>) {
     let dir = router::state_dir();
-    let env_fp = system::env_fingerprint(&system::scan_report(cfg, &[]));
+    let report = system::scan_report(cfg, &[]);
+    let env_fp = system::env_fingerprint(&report);
+    let build = system::env_build(&report);
     let args_fp = router::status(&dir, &system::router_config(cfg));
     let args_fp = match args_fp {
         router::RouterState::Ours { models } => models
@@ -2448,6 +2529,17 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                 }
             };
             let mut all = router::read_measurements(&dir);
+            let _ = crate::core::history::record(
+                &dir,
+                &crate::core::history::Entry {
+                    when: advisor::now_epoch(),
+                    model: id.to_string(),
+                    build,
+                    args_fp: args_fp.clone(),
+                    n_ctx: Some(ctx),
+                    ..Default::default()
+                },
+            );
             router::upsert_measurement(
                 &mut all,
                 id,
@@ -2489,6 +2581,17 @@ fn measure_and_sync(cfg: &settings::AppConfig, id: &str, keep_loaded: bool, tx: 
                 None => format!("{e:#}"),
             };
             let mut all = router::read_measurements(&dir);
+            let _ = crate::core::history::record(
+                &dir,
+                &crate::core::history::Entry {
+                    when: advisor::now_epoch(),
+                    model: id.to_string(),
+                    build,
+                    args_fp: args_fp.clone(),
+                    error: Some(detail.clone()),
+                    ..Default::default()
+                },
+            );
             router::upsert_measurement(
                 &mut all,
                 id,
