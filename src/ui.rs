@@ -1075,6 +1075,36 @@ impl App {
                 open_path = Some(router::state_dir().join("router.log"));
                 ui.close();
             }
+            ui.separator();
+            if ui
+                .button("Export Findings Report…")
+                .on_hover_text(
+                    "Writes a sanitized markdown summary of this machine's measured \
+                     results (hardware, build, measurements, trial verdicts, \
+                     build-over-build history — no paths or usernames) for YOU to \
+                     review and share where maintainers look. Nothing is sent \
+                     anywhere by the app.",
+                )
+                .clicked()
+            {
+                let cfg = self.cfg.clone();
+                self.spawn("exporting findings report", move |tx| {
+                    let _ = tx.send(match crate::core::report::generate(&cfg) {
+                        Ok(path) => {
+                            // Open only after the file exists — review is
+                            // the whole point.
+                            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                            Msg::Finished(format!(
+                                "findings report written and opened: {} — review it, then \
+                                 share it wherever you choose",
+                                path.display()
+                            ))
+                        }
+                        Err(e) => Msg::Error(format!("report: {e:#}")),
+                    });
+                });
+                ui.close();
+            }
             if let Some(path) = open_path {
                 match std::process::Command::new("xdg-open").arg(&path).spawn() {
                     Ok(_) => self.log(format!("opened {}", path.display())),

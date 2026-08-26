@@ -30,6 +30,9 @@
 //!                                        re-measure stale, sync, and report
 //!                                        what changed (unlocked / still
 //!                                        locked / context shifts)
+//!   llamacppcodeconf --report            write the sanitized findings report
+//!                                        (hardware + build + measurements +
+//!                                        trial verdicts) for manual sharing
 //!   llamacppcodeconf --install-service   write the systemd user unit
 //!
 //! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
@@ -99,6 +102,17 @@ fn main() {
         Some("--bench") => bench_baselines(&cfg, &args[1..]),
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--verify-rebuild") => verify_rebuild(&cfg),
+        Some("--report") => match llamacppcodeconf::core::report::generate(&cfg) {
+            Ok(path) => {
+                println!("findings report written: {}", path.display());
+                println!(
+                    "review it before sharing — it is sanitized (no paths/usernames) but \
+                     the judgment is yours; nothing is ever sent by the app"
+                );
+                Ok(())
+            }
+            Err(e) => Err(e),
+        },
         Some("--install-service") => system::install_systemd_unit(&cfg).map(|path| {
             println!("unit written: {}", path.display());
             println!(
@@ -107,7 +121,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --advise | --install-service | --stop"
+                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --report | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }

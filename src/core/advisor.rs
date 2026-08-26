@@ -245,6 +245,22 @@ pub fn verify_summary(r: &VerifyReport) -> Vec<String> {
     if out.is_empty() {
         out.push("no measured changes — same locks, same contexts".into());
     }
+    // Findings a maintainer would want to hear about deserve a nudge —
+    // the report is generated locally and shared only by the user.
+    let big_ctx_regression = !r.ctx_shifts.is_empty()
+        && r.ctx_shifts
+            .iter()
+            .map(|(_, b, a)| *a as f64 / *b as f64 - 1.0)
+            .sum::<f64>()
+            / r.ctx_shifts.len() as f64
+            <= -0.05;
+    if !r.newly_locked.is_empty() || big_ctx_regression {
+        out.push(
+            "this looks worth reporting upstream — Tools → Export Findings Report \
+             (or `--report`) writes a sanitized summary you can review and post"
+                .to_string(),
+        );
+    }
     out
 }
 

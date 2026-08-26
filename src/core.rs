@@ -10,6 +10,7 @@ pub mod history;
 pub mod jsonc;
 pub mod library;
 pub mod ollama;
+pub mod report;
 pub mod opencode;
 pub mod router;
 pub mod rows;
