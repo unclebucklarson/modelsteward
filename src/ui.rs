@@ -120,7 +120,6 @@ struct App {
     backend_sel: Option<advisor::BackendSelection>,
     diagnosis: Option<DiagnosisView>,
     trials: trial::Trials,
-    trial_verdict: Option<TrialVerdictView>,
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
     start_prompt: Option<AfterStart>,
@@ -161,16 +160,6 @@ impl AfterStart {
     }
 }
 
-/// A finished trial's verdict, shown as a dialog: the measured table, the
-/// rules' pick, and any guard-rejected tradeoffs as explicit choices.
-struct TrialVerdictView {
-    model: String,
-    menu: String,
-    report: trial::TrialReport,
-    /// Whether the plain-language explanation is expanded.
-    show_why: bool,
-}
-
 /// A diagnosis being shown for one model row.
 struct DiagnosisView {
     display: String,
@@ -205,7 +194,6 @@ impl App {
             ollama: Default::default(),
             measurements: router::read_measurements(&router::state_dir()),
             trials: trial::read_trials(&router::state_dir()),
-            trial_verdict: None,
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
             start_prompt: None,
@@ -906,15 +894,19 @@ impl App {
                 Msg::Trials(t) => self.trials = t,
                 Msg::History(h) => self.history = h,
                 // NOTE: does not clear `busy` — a Lab campaign may still be
-                // mid-sequence; the worker ends with Finished.
+                // mid-sequence; the worker ends with Finished. No dialog:
+                // verdicts live in the Lab's standing recommendations
+                // (user decision 2026-08-26 — a popup mid-campaign offered
+                // Apply while the worker still owned the GPU).
                 Msg::TrialDone { model, menu, report } => {
+                    let _ = menu;
                     self.log(format!("trial {model}: {}", report.verdict.reason));
-                    self.trial_verdict = Some(TrialVerdictView {
-                        model,
-                        menu,
-                        report,
-                        show_why: false,
-                    });
+                    for nm in &report.near_misses {
+                        self.log(format!(
+                            "trial {model}: rules rejected {} — {} for {} (decide in the Lab)",
+                            nm.label, nm.gain, nm.cost
+                        ));
+                    }
                 }
                 Msg::CfgReloaded(c) => {
                     self.cfg = c;
@@ -1524,13 +1516,14 @@ impl App {
                     &mut self.lab_kv,
                     "KV-precision trial (ctv q4_0 — more context if quality holds, ~6 min)",
                 );
+                let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
                     || self.lab_spec
                     || self.lab_ub
                     || self.lab_kv;
                 if ui
-                    .add_enabled(any, egui::Button::new("▶ Run selected campaigns"))
+                    .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
                         "Runs in sequence, narrated in the activity log. Unloads models to \
                          get honest numbers; offers to start the router if it's down.",
@@ -1575,9 +1568,15 @@ impl App {
                                 report.verdict.reason
                             ));
                             ui.horizontal(|ui| {
+                                // Applying mid-campaign would race the
+                                // worker for the preset and GPU — buttons
+                                // sit out until the run finishes.
                                 if let Some(w) = &report.verdict.winner {
                                     if ui
-                                        .button(format!("Apply {w}"))
+                                        .add_enabled(
+                                            idle,
+                                            egui::Button::new(format!("Apply {w}")),
+                                        )
                                         .on_hover_text(
                                             "Writes the override, regenerates the preset, \
                                              reloads the router, updates the OpenCode limit.",
@@ -1589,7 +1588,10 @@ impl App {
                                 }
                                 if !applied.is_empty()
                                     && ui
-                                        .button("Revert to baseline")
+                                        .add_enabled(
+                                            idle,
+                                            egui::Button::new("Revert to baseline"),
+                                        )
                                         .on_hover_text(
                                             "Strips this knob from the override — same \
                                              cascade, back to stock.",
@@ -1600,7 +1602,13 @@ impl App {
                                 }
                                 for nm in &report.near_misses {
                                     if ui
-                                        .button(format!("Apply {} anyway", nm.label))
+                                        .add_enabled(
+                                            idle,
+                                            egui::Button::new(format!(
+                                                "Apply {} anyway",
+                                                nm.label
+                                            )),
+                                        )
                                         .on_hover_text(format!(
                                             "Rules said no — {} for {}. Your call; reverses \
                                              the same way.",
@@ -3095,101 +3103,6 @@ impl eframe::App for App {
                     ui.label("Manages llama.cpp (router mode) + OpenCode config.");
                     ui.label("Measured, not guessed.");
                 });
-        }
-
-        if let Some(tv) = &self.trial_verdict {
-            let model = tv.model.clone();
-            let menu = tv.menu.clone();
-            let report = tv.report.clone();
-            let show_why = tv.show_why;
-            // The label the user chose to keep this frame, if any.
-            let mut keep: Option<String> = None;
-            let mut close = false;
-            let mut toggle_why = false;
-            egui::Window::new(format!("Trial verdict — {model}"))
-                .collapsible(false)
-                .resizable(false)
-                .show(ui.ctx(), |ui| {
-                    // The evidence first: the full measured table.
-                    trial_table_grid(ui, "trial-verdict", &report.raced);
-                    ui.add_space(6.0);
-                    ui.label(&report.verdict.reason);
-                    ui.add_space(6.0);
-                    if ui
-                        .button(if show_why { "Hide why" } else { "Why?" })
-                        .on_hover_text(
-                            "Plain-language walkthrough: what each column means, why the \
-                             recommendation won, and why the others didn't.",
-                        )
-                        .clicked()
-                    {
-                        toggle_why = true;
-                    }
-                    if show_why {
-                        ui.add_space(4.0);
-                        ui.set_max_width(560.0);
-                        for para in trial::explain(&report) {
-                            ui.label(para);
-                            ui.add_space(4.0);
-                        }
-                    }
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        if let Some(w) = &report.verdict.winner {
-                            if ui
-                                .button(format!("Keep {w}"))
-                                .on_hover_text(
-                                    "Writes the winning config into this model's override \
-                                     (visible in ⚙), regenerates the preset, reloads the \
-                                     router, and carries the trial's measured context into \
-                                     the synced limits.",
-                                )
-                                .clicked()
-                            {
-                                keep = Some(w.clone());
-                            }
-                        }
-                        if ui
-                            .button(if report.verdict.winner.is_some() {
-                                "Keep baseline instead"
-                            } else {
-                                "OK (baseline kept)"
-                            })
-                            .clicked()
-                        {
-                            close = true;
-                        }
-                    });
-                    // Guard-rejected tradeoffs: the rules said no, the
-                    // numbers are on the table, the choice is the user's.
-                    for nm in &report.near_misses {
-                        ui.add_space(4.0);
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button(format!("Keep {} anyway", nm.label))
-                                .on_hover_text(
-                                    "The strict rules rejected this, but the tradeoff may \
-                                     suit your use — it applies exactly like a winner and \
-                                     reverses the same way.",
-                                )
-                                .clicked()
-                            {
-                                keep = Some(nm.label.clone());
-                            }
-                            ui.label(format!("{} for {}", nm.gain, nm.cost));
-                        });
-                    }
-                });
-            if let Some(w) = keep {
-                self.spawn_keep(&model, &menu, &w);
-                self.trial_verdict = None;
-            } else if close {
-                self.trial_verdict = None;
-            } else if toggle_why
-                && let Some(tv) = &mut self.trial_verdict
-            {
-                tv.show_why = !tv.show_why;
-            }
         }
 
         if let Some(action) = &self.start_prompt {
