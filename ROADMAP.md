@@ -315,6 +315,46 @@ limit immediately. Standing rule adopted: every hand-fix prompts
    appears.
 4. Connections phase 2; Tier C (slot persistence, LAN serving).
 
+## M8 — Peak performance program (mapped 2026-08-25 with user; "tweak
+them to their absolute maximum")
+
+**The quality gate — build FIRST, it unlocks the rest.** Trials measure
+speed/ctx only; quality-affecting knobs are untouchable until quality is
+measured. Plan: rewrite-fidelity scoring (the rewrite prompt has a known
+correct answer — diff the output against it) + an N-shot tool-call
+reliability probe, folded into the trial harness as a guard metric.
+Then:
+
+1. **Asymmetric KV quant trial** (`ctv q4_0`): ~+30% context if quality
+   holds — now honestly measurable.
+2. **Quant-choice advisor**: cross-row advice per model family from
+   measured speed + ctx + quality ("for agent work use the Q4: +34%
+   speed, +88% context, quality within gate"). Probably the single most
+   valuable plain-human advisory the app can give.
+3. **Speculation leftovers**: ngram-map-k / ngram-cache campaign (cheap);
+   MTP self-speculation when upstream lands the flag (⚡ models draft for
+   themselves — could win on NOVEL code, which ngram can't); investigate
+   the DeepSeek-V4-Flash BF16 "won't load standalone" blob — it lives in
+   a dspark/ dir and may be a draft-dspark aux artifact, not a broken
+   model (diagnose would learn a new category).
+4. **Latency-between-generations**: slot persistence
+   (`--slot-save-path`, Tier C promoted — agent sessions survive
+   swaps/restarts; measure time-to-first-token after swap); load-mode
+   trial (mmap/mlock/dio vs the ~12s hot-swap); `models_max = 2`
+   topology advice (resident 4B sidekick next to the big coder, decided
+   from measured VRAM math).
+5. **Build advisory**: the history journal records build-over-build
+   lineage — surface "b10630: −9% ctx vs b10454" as advice, and (if the
+   app-managed-checkout idea lands) offer pinning the best-measured
+   build rather than blindly tracking master.
+
+**UI home — "Lab" tab (agreed direction, design in flight):** trials,
+benches, history, and the coming quality gate get their own tab: pick a
+model, pick the trial menus/benches to run, queue them, see the results
+table + verdicts + history in one place. The Library slims back toward
+"everything + advice" (Speed column and advice stay; the per-row Trial
+button moves to the Lab or becomes an open-in-Lab shortcut).
+
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 
 Inventory / backup / archival for model files lives in its own project —
