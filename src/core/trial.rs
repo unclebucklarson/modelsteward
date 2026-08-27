@@ -111,6 +111,38 @@ pub fn load_mode_variants() -> Vec<Variant> {
         .collect()
 }
 
+/// The speculation-dial menu (M8 #6): the adopted ngram-simple has
+/// untouched dials — lookup length (size-n, default 12) and draft length
+/// (size-m, default 48). Every variant sets spec-type too, so a kept
+/// winner is self-contained; the incumbent default-dial config races as
+/// its own candidate. Judged like speculation: rewrite generation.
+pub fn spec_dial_variants() -> Vec<Variant> {
+    let mk = |label: &str, extra: Vec<(&str, &str)>| Variant {
+        label: label.into(),
+        extra: std::iter::once(("spec-type".to_string(), "ngram-simple".to_string()))
+            .chain(extra.into_iter().map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect(),
+    };
+    vec![
+        mk("ngram-default", vec![]),
+        mk(
+            "ngram-n8-m64",
+            vec![
+                ("spec-ngram-simple-size-n", "8"),
+                ("spec-ngram-simple-size-m", "64"),
+            ],
+        ),
+        mk(
+            "ngram-n16-m32",
+            vec![
+                ("spec-ngram-simple-size-n", "16"),
+                ("spec-ngram-simple-size-m", "32"),
+            ],
+        ),
+        mk("ngram-m96", vec![("spec-ngram-simple-size-m", "96")]),
+    ]
+}
+
 /// A named menu: which variants to race and how to judge them.
 pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {
@@ -118,6 +150,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "ub" => Some((ubatch_variants(), Goal::Prefill)),
         "kv" => Some((kv_variants(), Goal::Context)),
         "load" => Some((load_mode_variants(), Goal::LoadTime)),
+        "dials" => Some((spec_dial_variants(), Goal::RewriteTg)),
         _ => None,
     }
 }
