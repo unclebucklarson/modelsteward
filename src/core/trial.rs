@@ -539,7 +539,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         else {
             continue;
         };
-        if p < b_p * 1.10 {
+        if improvement(goal, b_p, p) < 1.10 {
             out.push(format!(
                 "{label} gained only {:+.0}% on {metric} — under the 10% bar a config \
                  change must earn to be worth carrying.",
@@ -1175,6 +1175,34 @@ mod tests {
         let nm = near_misses(Goal::Context, &base, &c2);
         assert_eq!(nm.len(), 1);
         assert!(nm[0].cost.contains("QUALITY"), "{}", nm[0].cost);
+    }
+
+    #[test]
+    fn explain_classifies_slower_loads_as_under_bar() {
+        // The live 2026-08-27 case: dio was 2x SLOWER — explain must file
+        // it under-the-bar, never as 'qualified but outgained'.
+        let mk = |secs: f64| {
+            let mut t = r(43.0, 83.0, 114_000);
+            t.pp_prefill = Some(1400.0);
+            t.load_secs = Some(secs);
+            t
+        };
+        let baseline = mk(4.0);
+        let mut raced = std::collections::BTreeMap::new();
+        raced.insert("load-dio".to_string(), mk(8.1));
+        let report = TrialReport {
+            goal: Goal::LoadTime,
+            verdict: verdict(Goal::LoadTime, &baseline, &raced),
+            near_misses: near_misses(Goal::LoadTime, &baseline, &raced),
+            raced: {
+                let mut m = raced.clone();
+                m.insert(BASELINE.to_string(), baseline);
+                m
+            },
+        };
+        let text = explain(&report).join("\n");
+        assert!(text.contains("load-dio gained only -51%"), "{text}");
+        assert!(!text.contains("qualified"), "{text}");
     }
 
     #[test]
