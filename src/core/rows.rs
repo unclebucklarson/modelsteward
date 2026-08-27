@@ -641,23 +641,24 @@ mod tests {
     #[test]
     fn advice_grades_by_size_measurement_and_failure() {
         // Too large outright.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 120 * 1024 * 1024 * 1024, None, None, None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), "model", 120 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Bad);
         assert!(msg.contains("too large"), "{msg}");
         // Bigger than VRAM → CPU spill warning.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 30 * 1024 * 1024 * 1024, None, None, None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), "model", 30 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Warn);
         assert!(msg.contains("partly on CPU"), "{msg}");
         // Measured small ctx.
-        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(8192), None, None, HW);
+        let (lvl, msg) = advice_for(Some(&GgufMeta::default()), "model", 10 << 30, Some(8192), None, None, HW);
         assert_eq!(lvl, AdviceLevel::Warn);
         assert!(msg.contains("small for agentic"), "{msg}");
         // Measured healthy.
-        let (lvl, _) = advice_for(Some(&GgufMeta::default()), 10 << 30, Some(80_000), None, None, HW);
+        let (lvl, _) = advice_for(Some(&GgufMeta::default()), "model", 10 << 30, Some(80_000), None, None, HW);
         assert_eq!(lvl, AdviceLevel::Good);
         // Failure dominates.
         let (lvl, msg) = advice_for(
             Some(&GgufMeta::default()),
+            "model",
             10 << 30,
             None,
             None,
