@@ -1,5 +1,5 @@
 [package]
-name = "llamacppcodeconf"
+name = "modelsteward"
 version = "0.1.0"
 edition = "2024"
 description = "Measured, not guessed: a llama.cpp server manager that tunes local models to their best performance and keeps OpenCode (and any OpenAI-compatible app) configured from real measurements."

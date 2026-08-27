@@ -1,4 +1,4 @@
-# llamacppCodeConf
+# modelsteward
 
 Squeeze maximum performance out of local models — llama.cpp serving any
 OpenAI-compatible app, with first-class [OpenCode](https://opencode.ai)
@@ -100,18 +100,18 @@ First run: **File → Set Up Everything** — starts the router, measures
 anything unmeasured, syncs OpenCode. Or entirely from the CLI:
 
 ```sh
-llamacppcodeconf --setup       # the one-shot: start + measure + sync
-llamacppcodeconf --scan        # what's on this machine (JSON)
-llamacppcodeconf --preset      # write ~/.config/llamacppcodeconf/router.ini
-llamacppcodeconf --start       # router on :8080
-llamacppcodeconf --calibrate   # measure new/stale models (add `force` for all)
-llamacppcodeconf --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
-llamacppcodeconf --trial <id>  # measured config trial ([spec|ub|kv]; `keep <variant>` applies)
-llamacppcodeconf --sync        # write measured limits into opencode.json
-llamacppcodeconf --verify-rebuild  # after a rebuild: restart, re-measure, report
-llamacppcodeconf --advise      # build advisor report
-llamacppcodeconf --status      # router + per-model state (JSON)
-llamacppcodeconf --stop
+modelsteward --setup       # the one-shot: start + measure + sync
+modelsteward --scan        # what's on this machine (JSON)
+modelsteward --preset      # write ~/.config/modelsteward/router.ini
+modelsteward --start       # router on :8080
+modelsteward --calibrate   # measure new/stale models (add `force` for all)
+modelsteward --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
+modelsteward --trial <id>  # measured config trial ([spec|ub|kv]; `keep <variant>` applies)
+modelsteward --sync        # write measured limits into opencode.json
+modelsteward --verify-rebuild  # after a rebuild: restart, re-measure, report
+modelsteward --advise      # build advisor report
+modelsteward --status      # router + per-model state (JSON)
+modelsteward --stop
 ```
 
 Any OpenAI-compatible app connects with just the base URL (the Connections
@@ -123,8 +123,8 @@ http://127.0.0.1:8080/v1       # api_key: anything, it's ignored
 
 App settings (scan directories, ports, llama-server binary with browse +
 detected-installs picker, max loaded models) live in the Settings tab,
-persisted at `~/.config/llamacppcodeconf/config.json`. Measurements live at
-`~/.local/state/llamacppcodeconf/measurements.json`.
+persisted at `~/.config/modelsteward/config.json`. Measurements live at
+`~/.local/state/modelsteward/measurements.json`.
 
 ## Surviving logout: systemd user unit
 

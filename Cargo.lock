@@ -1880,22 +1880,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
-name = "llamacppcodeconf"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "eframe",
- "env_logger",
- "jsonc-parser",
- "rfd",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.20",
- "ureq",
-]
-
-[[package]]
 name = "lock_api"
 version = "0.4.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1942,6 +1926,22 @@ checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
  "simd-adler32",
+]
+
+[[package]]
+name = "modelsteward"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "eframe",
+ "env_logger",
+ "jsonc-parser",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.20",
+ "ureq",
 ]
 
 [[package]]

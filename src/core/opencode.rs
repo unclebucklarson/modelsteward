@@ -113,7 +113,7 @@ pub fn sync_source(
 ) -> Result<(String, SyncReport)> {
     let scaffold = json!({
         "npm": "@ai-sdk/openai-compatible",
-        "name": "llama.cpp (llamacppcodeconf)",
+        "name": "llama.cpp (modelsteward)",
         "options": { "baseURL": base_url },
         "models": {}
     });
@@ -324,7 +324,7 @@ pub fn comment_out_ghosts(
 pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
-    let note = "Commented out by llamacppcodeconf: not in the current router \npreset / never measured. Uncomment to restore, or delete these \nlines to discard permanently.";
+    let note = "Commented out by modelsteward: not in the current router \npreset / never measured. Uncomment to restore, or delete these \nlines to discard permanently.";
     let updated = jsonc::comment_out_model(&original, PROVIDER_ID, model_id, note)
         .with_context(|| format!("commenting out {model_id}"))?;
     write_backed_up(path, &original, &updated)

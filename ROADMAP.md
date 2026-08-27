@@ -1,6 +1,6 @@
 # Roadmap
 
-The tracking document for llamacppCodeConf. PLAN.md holds the founding
+The tracking document for modelsteward. PLAN.md holds the founding
 design; this file holds what's done, what's next, and the idea backlog.
 North star for every entry: **maximum llama.cpp + OpenCode performance
 without requiring expertise — measured, not guessed.**
@@ -444,7 +444,7 @@ acquisition is storage-side.
 
 - **App-managed llama.cpp checkout** (user idea 2026-08-25): the app
   creates and owns a default checkout (e.g. `~/.local/share/
-  llamacppcodeconf/llama.cpp`), telling the user hands-off — making
+  modelsteward/llama.cpp`), telling the user hands-off — making
   ff-pulls, rebuilds, and freshness checks always safe (no dirty-state
   or diverged-branch surprises). Tradeoffs to settle before building:
   disk cost of a second checkout when `~/src/llama.cpp` already exists;

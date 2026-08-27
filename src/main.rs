@@ -1,51 +1,56 @@
 //! Entry point. No arguments → the GUI. With arguments → the headless CLI
 //! (same core, scriptable):
 //!
-//!   llamacppcodeconf --setup             one shot: start router if needed,
+//!   modelsteward --setup             one shot: start router if needed,
 //!                                        measure anything unmeasured, sync
-//!   llamacppcodeconf --scan [dir ...]    system report as JSON
-//!   llamacppcodeconf --preset [dir ...]  (re)generate the router preset INI
-//!   llamacppcodeconf --start [port]      start the router
-//!   llamacppcodeconf --status [port]     router + per-model status as JSON
-//!   llamacppcodeconf --reload [port]     ask the router to re-read the preset
-//!   llamacppcodeconf --stop              stop the router we started
-//!   llamacppcodeconf --calibrate [port] [force]
+//!   modelsteward --scan [dir ...]    system report as JSON
+//!   modelsteward --preset [dir ...]  (re)generate the router preset INI
+//!   modelsteward --start [port]      start the router
+//!   modelsteward --status [port]     router + per-model status as JSON
+//!   modelsteward --reload [port]     ask the router to re-read the preset
+//!   modelsteward --stop              stop the router we started
+//!   modelsteward --calibrate [port] [force]
 //!                                        measure settled contexts (skips
 //!                                        fresh measurements unless `force`)
-//!   llamacppcodeconf --sync [port]       write measured models into
+//!   modelsteward --sync [port]       write measured models into
 //!                                        opencode.json (backs up first)
-//!   llamacppcodeconf --advise            build advisor: check llama.cpp
+//!   modelsteward --advise            build advisor: check llama.cpp
 //!                                        against upstream + this machine
-//!   llamacppcodeconf --bench [id] [force]
+//!   modelsteward --bench [id] [force]
 //!                                        llama-bench baseline (pp/tg t/s)
 //!                                        for one model, or every measured
 //!                                        model missing a current baseline
-//!   llamacppcodeconf --trial <id> [spec|ub|kv] [keep <variant>|keep baseline]
+//!   modelsteward --trial <id> [spec|ub|kv] [keep <variant>|keep baseline]
 //!                                        measured config trial: baseline +
 //!                                        the menu's variants (spec = ngram
 //!                                        speculation, ub = prefill batch),
 //!                                        server-timed A/B with a verdict;
 //!                                        `keep` persists a winner
-//!   llamacppcodeconf --verify-rebuild    after a rebuild: restart router,
+//!   modelsteward --verify-rebuild    after a rebuild: restart router,
 //!                                        re-measure stale, sync, and report
 //!                                        what changed (unlocked / still
 //!                                        locked / context shifts)
-//!   llamacppcodeconf --report            write the sanitized findings report
+//!   modelsteward --report            write the sanitized findings report
 //!                                        (hardware + build + measurements +
 //!                                        trial verdicts) for manual sharing
-//!   llamacppcodeconf --install-service   write the systemd user unit
+//!   modelsteward --install-service   write the systemd user unit
 //!
-//! Ports default to the configured value (~/.config/llamacppcodeconf/config.json).
+//! Ports default to the configured value (~/.config/modelsteward/config.json).
 
-use llamacppcodeconf::core::{advisor, bench, discover, opencode, router, settings, system, trial};
+use modelsteward::core::{advisor, bench, discover, opencode, router, settings, system, trial};
 use std::path::PathBuf;
 
 fn main() {
+    // Runs before anything reads config/state: the 2026-08-26 rename
+    // moved both directories, and the data must follow the name.
+    for note in system::migrate_rename() {
+        eprintln!("{note}");
+    }
     let cfg = system::load_config();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         None => {
-            if let Err(e) = llamacppcodeconf::ui::run() {
+            if let Err(e) = modelsteward::ui::run() {
                 eprintln!("GUI failed: {e}");
                 std::process::exit(1);
             }
@@ -102,7 +107,7 @@ fn main() {
         Some("--bench") => bench_baselines(&cfg, &args[1..]),
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--verify-rebuild") => verify_rebuild(&cfg),
-        Some("--report") => match llamacppcodeconf::core::report::generate(&cfg) {
+        Some("--report") => match modelsteward::core::report::generate(&cfg) {
             Ok(path) => {
                 println!("findings report written: {}", path.display());
                 println!(
@@ -121,7 +126,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: llamacppcodeconf [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --report | --advise | --install-service | --stop"
+                "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --report | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }
@@ -173,13 +178,13 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let report = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
     match &report.verdict.winner {
         Some(w) => println!(
-            "verdict: {w} wins — apply with: llamacppcodeconf --trial {model} {menu_name} keep {w}"
+            "verdict: {w} wins — apply with: modelsteward --trial {model} {menu_name} keep {w}"
         ),
         None => println!("verdict: keep baseline"),
     }
     for nm in &report.near_misses {
         println!(
-            "your call: {} gains {} but costs {} — apply with: llamacppcodeconf --trial {model} {menu_name} keep {}",
+            "your call: {} gains {} but costs {} — apply with: modelsteward --trial {model} {menu_name} keep {}",
             nm.label, nm.gain, nm.cost, nm.label
         );
     }

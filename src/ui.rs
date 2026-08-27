@@ -27,7 +27,7 @@ pub fn run() -> eframe::Result {
         ..Default::default()
     };
     eframe::run_native(
-        "llamacppcodeconf",
+        "modelsteward",
         options,
         Box::new(|cc| Ok(Box::new(App::new(cc)))),
     )
@@ -3142,7 +3142,7 @@ impl eframe::App for App {
                 .resizable(false)
                 .open(&mut self.show_about)
                 .show(ui.ctx(), |ui| {
-                    ui.label(format!("llamacppcodeconf {}", env!("CARGO_PKG_VERSION")));
+                    ui.label(format!("modelsteward {}", env!("CARGO_PKG_VERSION")));
                     ui.label("Manages llama.cpp (router mode) + OpenCode config.");
                     ui.label("Measured, not guessed.");
                 });

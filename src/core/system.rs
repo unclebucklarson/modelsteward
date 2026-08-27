@@ -27,11 +27,57 @@ pub fn config_dir() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".config")
         })
-        .join("llamacppcodeconf")
+        .join("modelsteward")
 }
 
 pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
+}
+
+/// One-time rename migration (llamacppcodeconf → modelsteward,
+/// 2026-08-26): move the old config and state dirs to the new names so
+/// measurements, history, trials, and overrides survive the rename.
+/// Never merges — if both old and new exist, the new wins and the old is
+/// left untouched for the user to reconcile. Returns human-readable notes
+/// (empty = nothing to do).
+pub fn migrate_rename() -> Vec<String> {
+    let old_config = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".config")
+        })
+        .join("llamacppcodeconf");
+    let old_state = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            std::env::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".local/state")
+        })
+        .join("llamacppcodeconf");
+    let mut notes = Vec::new();
+    for (old, new) in [
+        (old_config, config_dir()),
+        (old_state, router::state_dir()),
+    ] {
+        if old.is_dir() && !new.exists() {
+            match std::fs::rename(&old, &new) {
+                Ok(()) => notes.push(format!("migrated {} → {}", old.display(), new.display())),
+                Err(e) => notes.push(format!("could NOT migrate {}: {e}", old.display())),
+            }
+        }
+    }
+    if !notes.is_empty() {
+        notes.push(
+            "rename migration: a router started before the rename still references the \
+             old preset path — Stop/Start it once; an installed systemd unit needs \
+             --install-service again"
+                .into(),
+        );
+    }
+    notes
 }
 
 pub fn load_config() -> settings::AppConfig {
@@ -136,7 +182,7 @@ pub fn env_fingerprint(report: &ScanReport) -> String {
 pub fn systemd_unit_text(cfg: &router::RouterConfig) -> String {
     format!(
         "[Unit]\n\
-         Description=llama.cpp router (llamacppcodeconf)\n\
+         Description=llama.cpp router (modelsteward)\n\
          After=network.target\n\n\
          [Service]\n\
          ExecStart={server} --models-preset {preset} --host 127.0.0.1 --port {port} --models-max {max}\n\
@@ -217,12 +263,12 @@ mod tests {
         let cfg = router::RouterConfig {
             server_bin: PathBuf::from("/opt/bin/llama-server"),
             port: 8080,
-            preset_path: PathBuf::from("/home/u/.config/llamacppcodeconf/router.ini"),
+            preset_path: PathBuf::from("/home/u/.config/modelsteward/router.ini"),
             models_max: 1,
         };
         let unit = systemd_unit_text(&cfg);
         assert!(unit.contains(
-            "ExecStart=/opt/bin/llama-server --models-preset /home/u/.config/llamacppcodeconf/router.ini --host 127.0.0.1 --port 8080 --models-max 1"
+            "ExecStart=/opt/bin/llama-server --models-preset /home/u/.config/modelsteward/router.ini --host 127.0.0.1 --port 8080 --models-max 1"
         ));
         // The preset path in ExecStart is exactly what find_preset_process
         // matches on — this is the ownership handshake with the router module.

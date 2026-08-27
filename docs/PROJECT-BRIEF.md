@@ -1,4 +1,4 @@
-# llamacppCodeConf — Project Brief
+# modelsteward — Project Brief
 
 *A desktop manager for local AI model serving. Rust + egui, Linux.
 Personal project, August 2026. This brief is written for a general
@@ -6,7 +6,7 @@ technical audience.*
 
 ## What it is
 
-llamacppCodeConf manages the full lifecycle of running large language
+modelsteward manages the full lifecycle of running large language
 models locally with llama.cpp: finding the models scattered across a
 machine, serving them through one hot-swapping server, measuring what each
 model can actually do on the available hardware, and keeping client

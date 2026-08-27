@@ -1,4 +1,4 @@
-# llamacppCodeConf — Plan (founding design, kept as history)
+# modelsteward — Plan (founding design, kept as history)
 
 > **Status 2026-08-25:** M0–M5.7, M6 phase 1, M6.5 phases 1–2, the
 > Connections pivot, M7 phases 1–2 (baselines + the measured-trial
@@ -125,7 +125,7 @@ src/
                    start/stop, logs
     opencode_pane  three-list diff (configured / new / orphaned) + apply
     settings_pane  scan dirs, chosen llama.cpp install, ports, fit targets
-  app config       ~/.config/llamacppCodeConf/config.json
+  app config       ~/.config/modelsteward/config.json
 ```
 
 ## Spikes first (verify before building on them)
