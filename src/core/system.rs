@@ -251,6 +251,9 @@ pub fn write_preset(
         .collect();
     let ini = router::render_preset(&entries, &extra_sections);
     std::fs::create_dir_all(config_dir())?;
+    // The preset's [*] names this dir for slot snapshots — llama-server
+    // won't create it, and a save into a missing dir is a 500.
+    std::fs::create_dir_all(router::slot_save_dir())?;
     std::fs::write(preset_path(), &ini)?;
     Ok((preset_path(), entries.len()))
 }

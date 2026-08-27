@@ -828,48 +828,8 @@ struct GenStats {
 /// measure what the second turn actually reprocesses. Returns
 /// (turn2 prefill ms, fraction of turn2's prompt served from cache).
 fn agent_turn_probe(port: u16, model: &str) -> Result<(f64, Option<f64>)> {
-    let code = |edited: bool| -> String {
-        (0..40)
-            .map(|i| {
-                // The middle-of-prompt edit: one function renamed at ~1/3.
-                let name = if edited && i == 13 { "renamed_stage".to_string() }
-                    else { format!("transform_stage_{i}") };
-                format!(
-                    "def {name}(records, options):\n    total = 0\n    for r in records:\n        v = r.get('field_{i}')\n        if v is not None and v > options.cut_{i}:\n            total += v * {m}\n    return total\n",
-                    m = i + 1
-                )
-            })
-            .collect()
-    };
-    let ask = |body_code: String| -> Result<GenStats> {
-        let body: serde_json::Value =
-            ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
-                .timeout(std::time::Duration::from_secs(600))
-                .send_json(serde_json::json!({
-                    "model": model,
-                    "messages": [{"role": "user", "content":
-                        format!("Here is a Python module:\n```python\n{body_code}```\nReply with just: OK")}],
-                    "max_tokens": 8,
-                    "temperature": 0,
-                    "cache_prompt": true,
-                }))
-                .context("agent-turn request")?
-                .into_json()?;
-        let t = body
-            .get("timings")
-            .ok_or_else(|| anyhow::anyhow!("no timings"))?;
-        Ok(GenStats {
-            tps: t.get("predicted_per_second").and_then(|v| v.as_f64()).unwrap_or(0.0),
-            prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
-            prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
-            prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
-            draft_n: None,
-            draft_accepted: None,
-            content: String::new(),
-        })
-    };
-    let t1 = ask(code(false))?;
-    let t2 = ask(code(true))?;
+    let t1 = agent_turn_ask(port, model, false)?;
+    let t2 = agent_turn_ask(port, model, true)?;
     let ms = t2
         .prompt_ms
         .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
@@ -878,6 +838,57 @@ fn agent_turn_probe(port: u16, model: &str) -> Result<(f64, Option<f64>)> {
         _ => None,
     };
     Ok((ms, reuse))
+}
+
+/// The probe's synthetic module: ~40 Python functions (a few thousand
+/// tokens). `edited` renames ONE function a third of the way in — the
+/// middle-of-prompt edit that decides how much cache an agent turn keeps.
+fn agent_turn_code(edited: bool) -> String {
+    (0..40)
+        .map(|i| {
+            let name = if edited && i == 13 {
+                "renamed_stage".to_string()
+            } else {
+                format!("transform_stage_{i}")
+            };
+            format!(
+                "def {name}(records, options):\n    total = 0\n    for r in records:\n        v = r.get('field_{i}')\n        if v is not None and v > options.cut_{i}:\n            total += v * {m}\n    return total\n",
+                m = i + 1
+            )
+        })
+        .collect()
+}
+
+/// One agent-style turn with prompt caching ON; the timings tell us what
+/// the server actually reprocessed. Shared by the agent-turn probe and
+/// the slot-persistence trial.
+fn agent_turn_ask(port: u16, model: &str, edited: bool) -> Result<GenStats> {
+    let body_code = agent_turn_code(edited);
+    let body: serde_json::Value =
+        ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
+            .timeout(std::time::Duration::from_secs(600))
+            .send_json(serde_json::json!({
+                "model": model,
+                "messages": [{"role": "user", "content":
+                    format!("Here is a Python module:\n```python\n{body_code}```\nReply with just: OK")}],
+                "max_tokens": 8,
+                "temperature": 0,
+                "cache_prompt": true,
+            }))
+            .context("agent-turn request")?
+            .into_json()?;
+    let t = body
+        .get("timings")
+        .ok_or_else(|| anyhow::anyhow!("no timings"))?;
+    Ok(GenStats {
+        tps: t.get("predicted_per_second").and_then(|v| v.as_f64()).unwrap_or(0.0),
+        prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
+        prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
+        prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
+        draft_n: None,
+        draft_accepted: None,
+        content: String::new(),
+    })
 }
 
 fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Result<GenStats> {
@@ -953,6 +964,197 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
         error: None,
         build: None,
     })
+}
+
+/// Labels the slot-persistence trial records under (kept out of the
+/// menu/verdict system on purpose: it measures a WORKFLOW, not a config
+/// knob — there is nothing to Apply).
+pub const SLOT_COLD: &str = "slot-cold";
+pub const SLOT_RESTORE: &str = "slot-restore";
+
+/// POST to a child server's /slots API. Talks to the CHILD directly
+/// (mined from router.log): the router proxies chat by the body's model
+/// field, but /slots carries none.
+fn slot_action(child_port: u16, action: &str, filename: &str) -> Result<serde_json::Value> {
+    ureq::post(&format!(
+        "http://127.0.0.1:{child_port}/slots/0?action={action}"
+    ))
+    .timeout(std::time::Duration::from_secs(600))
+    .send_json(serde_json::json!({ "filename": filename }))
+    .with_context(|| format!("slot {action}"))?
+    .into_json()
+    .map_err(Into::into)
+}
+
+/// The slot-persistence ceiling (best-effort groundwork, 2026-08-27):
+/// llama-server can snapshot a slot's KV cache to disk and restore it
+/// later — which would make swapping BACK to a model mid-conversation
+/// cost a file read instead of a full reprocess. The user picks one
+/// "middle of the road" model today precisely because swaps are dear;
+/// this measures what a save→swap→restore workflow would buy on THIS
+/// hardware before any workflow gets designed around it.
+///
+/// Two passes, same conversation, both across a full unload/reload:
+///   slot-cold:    reload → edited turn (nothing to reuse) — today's cost.
+///   slot-restore: turn 1 → save → reload → restore → edited turn.
+/// Recorded in trials.json under labels the menus don't own; the Lab
+/// shows the ratio via slot_summary(). No Apply — nothing to configure.
+pub fn run_slot_trial(
+    cfg: &settings::AppConfig,
+    model: &str,
+    cancel: &crate::core::cancel::CancelToken,
+    progress: &mut dyn FnMut(String),
+) -> Result<String> {
+    let dir = router::state_dir();
+    match router::status(&dir, &system::router_config(cfg)) {
+        router::RouterState::Ours { .. } => {}
+        other => anyhow::bail!(
+            "the slot trial needs our router running on port {}; state is {other:?}",
+            cfg.port
+        ),
+    }
+    // The preset must carry slot-save-path (older on-disk presets won't):
+    // regenerate + reload before measuring, same rule as Measure.
+    system::write_preset(cfg, &[])?;
+    router::reload(cfg.port)?;
+    let build = system::pick_server(cfg)
+        .ok()
+        .as_deref()
+        .and_then(crate::core::discover::build_of);
+    let filename = "steward-slot-trial.bin";
+    let child = |model: &str| -> Result<u16> {
+        let log = std::fs::read_to_string(dir.join("router.log")).unwrap_or_default();
+        crate::core::evidence::child_port(&log, model)
+            .ok_or_else(|| anyhow::anyhow!("no spawn line for {model} in router.log"))
+    };
+    let reload_fresh = |progress: &mut dyn FnMut(String)| -> Result<u64> {
+        let _ = router::unload_model(cfg.port, model);
+        router::wait_until_not_loaded(cfg.port, model, std::time::Duration::from_secs(30));
+        progress(format!("{model}: reloading (fresh process, empty cache)…"));
+        router::fetch_settled_ctx(cfg.port, model)
+    };
+
+    let mut all = read_trials(&dir);
+    let record = |all: &mut Trials, label: &str, r: TrialResult| {
+        all.entry(model.to_string())
+            .or_default()
+            .insert(label.to_string(), r);
+        let _ = write_trials(&dir, all);
+    };
+
+    let body = (|| -> Result<String> {
+        cancel.check()?;
+        // Pass 1 — cold: what swap-back costs today.
+        let ctx = reload_fresh(progress)?;
+        if ctx < 8192 {
+            anyhow::bail!(
+                "settled context {ctx} is too small for the probe prompt — \
+                 fix context before measuring slot persistence"
+            );
+        }
+        let cold = agent_turn_ask(cfg.port, model, true)?;
+        let cold_ms = cold
+            .prompt_ms
+            .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
+        progress(format!(
+            "{model}: cold swap-back turn: {cold_ms:.0} ms prefill ({} tokens reprocessed)",
+            cold.prompt_n.unwrap_or(0)
+        ));
+        record(
+            &mut all,
+            SLOT_COLD,
+            TrialResult {
+                turn2_prompt_ms: Some(cold_ms),
+                turn2_reuse: Some(0.0),
+                build,
+                ..Default::default()
+            },
+        );
+
+        cancel.check()?;
+        // Pass 2 — restore: turn 1 fills the cache, save snapshots it,
+        // the reload wipes the process, restore brings it back.
+        let _ = reload_fresh(progress)?;
+        let t1 = agent_turn_ask(cfg.port, model, false)?;
+        let saved = slot_action(child(model)?, "save", filename)?;
+        let mib = saved
+            .get("n_written")
+            .and_then(|v| v.as_u64())
+            .map(|b| b as f64 / (1024.0 * 1024.0));
+        progress(format!(
+            "{model}: saved slot snapshot{}",
+            mib.map(|m| format!(" ({m:.0} MiB)")).unwrap_or_default()
+        ));
+        let _ = reload_fresh(progress)?;
+        let t0 = std::time::Instant::now();
+        slot_action(child(model)?, "restore", filename)?;
+        let restore_secs = t0.elapsed().as_secs_f64();
+        let warm = agent_turn_ask(cfg.port, model, true)?;
+        let warm_ms = warm
+            .prompt_ms
+            .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
+        let reuse = match (t1.prompt_n, warm.prompt_n) {
+            (Some(n1), Some(n2)) if n1 > 0 => Some(1.0 - (n2 as f64 / n1 as f64).min(1.0)),
+            _ => None,
+        };
+        record(
+            &mut all,
+            SLOT_RESTORE,
+            TrialResult {
+                turn2_prompt_ms: Some(warm_ms),
+                turn2_reuse: reuse,
+                // The restore read itself is part of the price of the
+                // workflow — parked in load_secs (the "getting ready"
+                // column) so the table carries it.
+                load_secs: Some(restore_secs),
+                build,
+                ..Default::default()
+            },
+        );
+        let summary = slot_summary(all.get(model).unwrap())
+            .unwrap_or_else(|| "slot trial recorded".into());
+        progress(format!("{model}: {summary}"));
+        Ok(summary)
+    })();
+    // The snapshot can be GBs — never leave it behind.
+    let _ = std::fs::remove_file(router::slot_save_dir().join(filename));
+    let _ = router::unload_model(cfg.port, model);
+    if let Err(e) = &body {
+        record(
+            &mut all,
+            SLOT_RESTORE,
+            TrialResult {
+                error: Some(format!("{e:#}")),
+                build,
+                ..Default::default()
+            },
+        );
+    }
+    body
+}
+
+/// The standing Lab line for slot persistence, recomputed from stored
+/// rows — mirrors stored_report()'s retroactivity, minus the verdict
+/// machinery (nothing to Apply).
+pub fn slot_summary(
+    table: &std::collections::BTreeMap<String, TrialResult>,
+) -> Option<String> {
+    let restore = table.get(SLOT_RESTORE)?;
+    if let Some(e) = &restore.error {
+        return Some(format!("slot restore failed: {e}"));
+    }
+    let cold_ms = table.get(SLOT_COLD)?.turn2_prompt_ms?;
+    let warm_ms = restore.turn2_prompt_ms?;
+    let ratio = if warm_ms > 0.0 { cold_ms / warm_ms } else { 0.0 };
+    let restore_cost = restore
+        .load_secs
+        .map(|s| format!(" (+{s:.1}s to read the snapshot)"))
+        .unwrap_or_default();
+    Some(format!(
+        "swap-back with a restored snapshot: {warm_ms:.0} ms vs {cold_ms:.0} ms \
+         cold — {ratio:.1}x faster{restore_cost}. Groundwork only: nothing to \
+         apply yet; a snapshot/resume workflow would build on this (roadmap)."
+    ))
 }
 
 /// The model's override with every key any variant sets stripped — the
@@ -1566,6 +1768,36 @@ mod tests {
             vec![("no-mmproj".to_string(), "true".to_string())]
         );
         assert!(applied_keys(&cfg, "m", "spec").is_empty());
+    }
+
+    #[test]
+    fn slot_summary_prices_the_swap_back() {
+        let mut table = std::collections::BTreeMap::new();
+        table.insert(
+            SLOT_COLD.to_string(),
+            TrialResult {
+                turn2_prompt_ms: Some(4800.0),
+                ..Default::default()
+            },
+        );
+        table.insert(
+            SLOT_RESTORE.to_string(),
+            TrialResult {
+                turn2_prompt_ms: Some(300.0),
+                load_secs: Some(1.4),
+                ..Default::default()
+            },
+        );
+        let line = slot_summary(&table).unwrap();
+        assert!(line.contains("300 ms vs 4800 ms"), "{line}");
+        assert!(line.contains("16.0x faster"), "{line}");
+        assert!(line.contains("+1.4s"), "{line}");
+        // A failed restore reports itself instead of a ratio.
+        table.get_mut(SLOT_RESTORE).unwrap().error = Some("500 from child".into());
+        assert!(slot_summary(&table).unwrap().contains("failed: 500 from child"));
+        // No restore row → no line (cold alone proves nothing).
+        table.remove(SLOT_RESTORE);
+        assert!(slot_summary(&table).is_none());
     }
 
     #[test]

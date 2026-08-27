@@ -373,8 +373,22 @@ measurements + journal. Then:
    harness handles lower-is-better goals via improvement ratios; trial
    rounds time load-request→loaded) and ✔ the load-mode menu landed
    (`load`: dio/mlock vs auto, Lab campaign + CLI — first run pending).
-   Still open: slot persistence (`--slot-save-path`) evaluated with the
-   same LoadTime instrument; `models_max = 2` topology advice.
+   Slot persistence groundwork ✔ DONE 2026-08-27 (user decision:
+   best-effort now, full workflow later): the preset's `[*]` sets
+   `slot-save-path` (save/restore API live fleet-wide, zero cost unused),
+   and the `slots` Lab campaign / `--trial <id> slots` measures the
+   ceiling — save → swap → restore → edited turn vs a cold swap-back,
+   reported as a standing Lab line (no Apply; it's a workflow, not a
+   knob). BACKLOG — snapshot/resume workflow, revisit when the measured
+   ceiling justifies it: the user today picks ONE middle-of-the-road
+   model precisely because swap-back costs a full reprocess; cheap
+   restore would unlock specialist-model-per-task. Design constraints
+   recorded: the app is NOT in the router's eviction path (llama-server
+   evicts on the incoming request), so automation means either a manual
+   "snapshot session" affordance or upstream save-on-evict — watch
+   llama.cpp for the latter. Snapshot files scale with conversation
+   length (GBs); restore speed is disk-bound. Still open:
+   `models_max = 2` topology advice.
 5. **Build advisory**: the history journal records build-over-build
    lineage — surface "b10630: −9% ctx vs b10454" as advice, and (if the
    app-managed-checkout idea lands) offer pinning the best-measured

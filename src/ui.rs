@@ -141,6 +141,7 @@ struct App {
     lab_moe: bool,
     lab_vision: bool,
     lab_cache: bool,
+    lab_slots: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
 }
@@ -165,6 +166,7 @@ enum AfterStart {
         moe: bool,
         vision: bool,
         cache: bool,
+        slots: bool,
     },
 }
 
@@ -233,6 +235,7 @@ impl App {
             lab_moe: false,
             lab_vision: false,
             lab_cache: false,
+            lab_slots: false,
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
@@ -569,7 +572,7 @@ impl App {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
                 AfterStart::Lab {
                     id, measure, bench, spec, ub, kv, quality, load, dials, moe,
-                    vision, cache,
+                    vision, cache, slots,
                 } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
@@ -620,6 +623,17 @@ impl App {
                     }
                     if cache {
                         trial_worker(&cfg, &id, "cache", &cancel_token, tx);
+                    }
+                    if slots {
+                        let tx2 = tx.clone();
+                        let mut progress = move |line: String| {
+                            let _ = tx2.send(Msg::Progress(line));
+                        };
+                        if let Err(e) =
+                            trial::run_slot_trial(&cfg, &id, &cancel_token, &mut progress)
+                        {
+                            let _ = tx.send(Msg::Error(format!("slot trial: {e:#}")));
+                        }
                     }
                     if quality {
                         let tx2 = tx.clone();
@@ -1710,6 +1724,7 @@ impl App {
                         self.lab_moe = is_moe_over_vram;
                         self.lab_vision = has_mmproj;
                         self.lab_cache = true;
+                        self.lab_slots = false;
                     }
                     if ui.small_button("select all").clicked() {
                         self.lab_measure = true;
@@ -1723,6 +1738,7 @@ impl App {
                         self.lab_moe = true;
                         self.lab_vision = true;
                         self.lab_cache = true;
+                        self.lab_slots = true;
                     }
                     if ui.small_button("select none").clicked() {
                         self.lab_measure = false;
@@ -1736,6 +1752,7 @@ impl App {
                         self.lab_moe = false;
                         self.lab_vision = false;
                         self.lab_cache = false;
+                        self.lab_slots = false;
                     }
                 });
                 ui.checkbox(
@@ -1802,6 +1819,18 @@ impl App {
                      cache-reuse decides how much of the KV cache survives that. \
                      Measured with a two-turn probe, not guessed.",
                 );
+                ui.checkbox(
+                    &mut self.lab_slots,
+                    "Slot-persistence ceiling (save/restore a session's KV cache \
+                     across a swap — groundwork measurement, ~6 min)",
+                )
+                .on_hover_text(
+                    "Swapping models mid-conversation currently costs a full \
+                     reprocess when you swap back — which is why picking one \
+                     middle-of-the-road model beats switching. This measures what \
+                     a snapshot/restore workflow would buy on your hardware. \
+                     Nothing to apply yet; it prices the future feature.",
+                );
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
@@ -1813,7 +1842,8 @@ impl App {
                     || self.lab_dials
                     || self.lab_moe
                     || self.lab_vision
-                    || self.lab_cache;
+                    || self.lab_cache
+                    || self.lab_slots;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1930,6 +1960,10 @@ impl App {
                                 }
                             }
                         }
+                        if let Some(line) = trial::slot_summary(table) {
+                            ui.add_space(6.0);
+                            ui.label(format!("Slot persistence: {line}"));
+                        }
                     }
                     _ => {
                         ui.weak("No trials recorded for this model yet.");
@@ -1982,6 +2016,7 @@ impl App {
                 moe: self.lab_moe,
                 vision: self.lab_vision,
                 cache: self.lab_cache,
+                slots: self.lab_slots,
             };
             self.run_or_offer_start(action);
         }

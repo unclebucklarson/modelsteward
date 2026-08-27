@@ -56,6 +56,26 @@ fn port_prefix(line: &str) -> Option<(u32, &str)> {
     Some((port, rest[end + 1..].trim_start()))
 }
 
+/// The port of the child server instance currently serving `model`,
+/// mined from the router's spawn lines (the LAST one wins — the router
+/// respawns on every load and the log keeps history). Slot save/restore
+/// must talk to the child directly: the router proxies chat by the
+/// body's model field, but `/slots` carries no model.
+pub fn child_port(log: &str, model: &str) -> Option<u16> {
+    let mut port = None;
+    for line in log.lines() {
+        if let Some(idx) = line.find("spawning server instance with name=") {
+            let rest = &line[idx + "spawning server instance with name=".len()..];
+            if let Some((name, port_part)) = rest.split_once(" on port ")
+                && name.trim() == model
+            {
+                port = port_part.trim().parse::<u16>().ok().or(port);
+            }
+        }
+    }
+    port
+}
+
 /// Mine the whole log. Later instances of a port override earlier ones for
 /// the port→model mapping (ports get reused across restarts within one log).
 pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
@@ -192,5 +212,14 @@ mod tests {
 [5] x I slot print_timing: id 0 | task 1 | prompt processing, n_tokens = 100, progress = 1.00\n\
 [9] x I slot release: id 0 | task 3 | stop processing: n_tokens = 50, truncated = 0\n";
         assert!(cache_effectiveness(log).is_empty());
+    }
+    #[test]
+    fn child_port_takes_the_last_spawn_for_the_model() {
+        let log = "load: spawning server instance with name=alpha on port 40001\n\
+                   load: spawning server instance with name=beta on port 40002\n\
+                   load: spawning server instance with name=alpha on port 40007\n";
+        assert_eq!(child_port(log, "alpha"), Some(40007));
+        assert_eq!(child_port(log, "beta"), Some(40002));
+        assert_eq!(child_port(log, "gamma"), None);
     }
 }

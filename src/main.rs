@@ -20,7 +20,7 @@
 //!                                        llama-bench baseline (pp/tg t/s)
 //!                                        for one model, or every measured
 //!                                        model missing a current baseline
-//!   modelsteward --trial <id> [spec|ub|kv|load|dials|moe|vision|cache] [keep <variant>|keep baseline]
+//!   modelsteward --trial <id> [spec|ub|kv|load|dials|moe|vision|cache|slots] [keep <variant>|keep baseline]
 //!                                        measured config trial: baseline +
 //!                                        the menu's variants (spec = ngram
 //!                                        speculation, ub = prefill batch),
@@ -165,6 +165,17 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let Some(model) = rest.first().filter(|a| *a != "keep") else {
         anyhow::bail!("--trial needs a model id (a router alias or cache id)");
     };
+    // "slots" is a workflow measurement, not a config menu — no variants,
+    // no keep; it prints its ceiling and returns.
+    if rest.get(1).map(String::as_str) == Some("slots") {
+        trial::run_slot_trial(
+            cfg,
+            model,
+            &cancel::CancelToken::default(),
+            &mut |line| println!("{line}"),
+        )?;
+        return Ok(());
+    }
     let menu_name = rest
         .get(1)
         .filter(|a| trial::menu(a).is_some())

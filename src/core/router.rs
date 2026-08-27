@@ -60,6 +60,14 @@ pub const DEFAULT_CACHE_REUSE: u32 = 256;
 /// sessions benefit from more on RAM-rich machines.
 pub const DEFAULT_CACHE_RAM_MIB: u32 = 24_576;
 
+/// Where slot KV snapshots live. Setting `slot-save-path` in `[*]` turns
+/// on llama-server's `/slots/{id}?action=save|restore` API for every
+/// served model — pure enablement, zero cost until something calls it.
+/// Groundwork for cheap model-swap-back (see roadmap: slot persistence).
+pub fn slot_save_dir() -> PathBuf {
+    state_dir().join("slots")
+}
+
 /// Render the router preset INI. Pure — writing it and telling the server to
 /// reload are separate steps.
 ///
@@ -80,10 +88,12 @@ pub fn render_preset(
          cache-type-k = {kv}\n\
          cache-type-v = {kv}\n\
          cache-reuse = {reuse}\n\
-         cache-ram = {ram}\n",
+         cache-ram = {ram}\n\
+         slot-save-path = {slots}\n",
         kv = DEFAULT_KV_TYPE,
         reuse = DEFAULT_CACHE_REUSE,
         ram = DEFAULT_CACHE_RAM_MIB,
+        slots = slot_save_dir().display(),
     );
     for (alias, model, ov) in models {
         out.push('\n');
@@ -992,6 +1002,9 @@ mod tests {
         // KV reuse + a bigger host-RAM budget for swapped-out slot caches.
         assert!(ini.contains("cache-reuse = 256"));
         assert!(ini.contains("cache-ram = 24576"));
+        // Slot save/restore API enabled fleet-wide (groundwork for cheap
+        // swap-back; the dir itself is created by write_preset).
+        assert!(ini.contains("slot-save-path = "));
         assert!(ini.contains("[alpha]\nmodel = /models/a.gguf\n"));
         // beta overrides the global KV type and pins ctx.
         assert!(ini.contains("[beta]"));
