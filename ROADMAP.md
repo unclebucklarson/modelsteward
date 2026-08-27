@@ -357,12 +357,12 @@ measurements + journal. Then:
    the DeepSeek-V4-Flash BF16 "won't load standalone" blob — it lives in
    a dspark/ dir and may be a draft-dspark aux artifact, not a broken
    model (diagnose would learn a new category).
-4. **Latency-between-generations**: slot persistence
-   (`--slot-save-path`, Tier C promoted — agent sessions survive
-   swaps/restarts; measure time-to-first-token after swap); load-mode
-   trial (mmap/mlock/dio vs the ~12s hot-swap); `models_max = 2`
-   topology advice (resident 4B sidekick next to the big coder, decided
-   from measured VRAM math).
+4. **Latency-between-generations**: ✔ foundation DONE 2026-08-27 (the
+   harness handles lower-is-better goals via improvement ratios; trial
+   rounds time load-request→loaded) and ✔ the load-mode menu landed
+   (`load`: dio/mlock vs auto, Lab campaign + CLI — first run pending).
+   Still open: slot persistence (`--slot-save-path`) evaluated with the
+   same LoadTime instrument; `models_max = 2` topology advice.
 5. **Build advisory**: the history journal records build-over-build
    lineage — surface "b10630: −9% ctx vs b10454" as advice, and (if the
    app-managed-checkout idea lands) offer pinning the best-measured
@@ -432,9 +432,13 @@ and apply buttons disable while anything runs.
 - **Tier 3 — the standing line**: any outbound data is opt-in, reviewed
   before sending, manually triggered. This app sends nothing anywhere by
   default (today: only your router + one daily git fetch).
-- **Cache-effectiveness monitor (new idea)**: mine slot logs for real
-  OpenCode sessions' prompt-token reuse rate — does `cache-reuse`
-  actually pay in practice, not just in trials?
+- ✔ **Cache-effectiveness monitor (DONE 2026-08-27)**: core/evidence.rs
+  mines router.log (grammar learned empirically) for per-model prompt
+  reuse across real sessions; Server tab shows turns + reuse % and warns
+  when llama.cpp disabled cache-reuse for vision-served models — the
+  miner's FIRST live report: both qwen3.8 daily drivers reprocess full
+  prompts every turn because mmproj disables reuse. FA-engaged check
+  deferred: no FA evidence exists at this log verbosity.
 
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 

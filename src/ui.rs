@@ -12,8 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, bench, diagnose, discover, history, ollama, opencode, router, rows, settings,
-    system, trial,
+    advisor, bench, diagnose, discover, evidence, history, ollama, opencode, router, rows,
+    settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -62,6 +62,8 @@ enum Msg {
     Upstream(advisor::UpstreamStatus),
     /// history.jsonl changed on disk.
     History(Vec<history::Entry>),
+    /// Prompt-cache effectiveness mined from router.log.
+    CacheStats(Vec<evidence::ModelCacheStats>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -122,6 +124,7 @@ struct App {
     trials: trial::Trials,
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
+    cache_stats: Vec<evidence::ModelCacheStats>,
     start_prompt: Option<AfterStart>,
     lab_selected: Option<String>,
     lab_measure: bool,
@@ -200,6 +203,7 @@ impl App {
             trials: trial::read_trials(&router::state_dir()),
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
+            cache_stats: Vec::new(),
             start_prompt: None,
             lab_selected: None,
             lab_measure: true,
@@ -323,6 +327,9 @@ impl App {
             let mut last_meas_mtime = None;
             let mut last_trials_mtime = None;
             let mut last_history_mtime = None;
+            let log_path = router::state_dir().join("router.log");
+            let mut last_log_len: u64 = 0;
+            let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
             loop {
                 let cfg = system::load_config();
                 let state = router::status(&router::state_dir(), &system::router_config(&cfg));
@@ -350,6 +357,16 @@ impl App {
                 if mtime != last_history_mtime {
                     last_history_mtime = mtime;
                     let _ = tx.send(Msg::History(history::read_all(&router::state_dir())));
+                }
+                // Prompt-cache effectiveness: re-mine when the log grew,
+                // throttled to twice a minute (the log can be large).
+                let log_len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+                if log_len != last_log_len && last_mine.elapsed().as_secs() >= 30 {
+                    last_log_len = log_len;
+                    last_mine = std::time::Instant::now();
+                    if let Ok(text) = std::fs::read_to_string(&log_path) {
+                        let _ = tx.send(Msg::CacheStats(evidence::cache_effectiveness(&text)));
+                    }
                 }
                 // Daily upstream freshness (user request 2026-08-25): one
                 // quiet fetch per day, remote-tracking refs only. The
@@ -912,6 +929,7 @@ impl App {
                 }
                 Msg::Trials(t) => self.trials = t,
                 Msg::History(h) => self.history = h,
+                Msg::CacheStats(c) => self.cache_stats = c,
                 // NOTE: does not clear `busy` — a Lab campaign may still be
                 // mid-sequence; the worker ends with Finished. No dialog:
                 // verdicts live in the Lab's standing recommendations
@@ -1760,6 +1778,34 @@ impl App {
     fn server_pane(&mut self, ui: &mut egui::Ui) {
         if let Some(warning) = self.vram_contention() {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
+            ui.separator();
+        }
+        if !self.cache_stats.is_empty() {
+            ui.strong("Prompt cache — measured from your real sessions");
+            for s in &self.cache_stats {
+                if s.reuse_disabled {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!(
+                            "{}: cache-reuse DISABLED — llama.cpp turns it off for \
+                             vision-served models, so every turn reprocesses the full \
+                             prompt. If you don't use images with this model, removing \
+                             its mmproj (⚙ / shelf dir) restores the biggest agent \
+                             prefill win.",
+                            s.model
+                        ),
+                    );
+                } else {
+                    ui.label(format!(
+                        "{}: {} turns, {:.0}% of prompt tokens reused ({} of {})",
+                        s.model,
+                        s.turns,
+                        s.reuse_fraction() * 100.0,
+                        s.reused_tokens,
+                        s.prompt_tokens
+                    ));
+                }
+            }
             ui.separator();
         }
         if let Some(s) = &self.upstream {

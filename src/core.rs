@@ -5,6 +5,7 @@ pub mod advisor;
 pub mod bench;
 pub mod diagnose;
 pub mod discover;
+pub mod evidence;
 pub mod gguf;
 pub mod history;
 pub mod jsonc;
