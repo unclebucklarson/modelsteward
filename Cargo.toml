@@ -5,6 +5,10 @@ edition = "2024"
 description = "Measured, not guessed: a llama.cpp server manager that tunes local models to their best performance and keeps OpenCode (and any OpenAI-compatible app) configured from real measurements."
 license = "MIT OR Apache-2.0"
 authors = ["Scott Larson"]
+repository = "https://github.com/unclebucklarson/modelsteward"
+readme = "README.md"
+keywords = ["llama-cpp", "llm", "local-ai", "benchmark", "opencode"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1"
