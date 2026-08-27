@@ -584,7 +584,9 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
             out.push(format!("{label} failed to run ({e}) — recorded, not retried blindly."));
             continue;
         }
-        let (Some(novel), Some(rewrite), Some(ctx), Some(p)) =
+        // All metrics must exist for a loser to be narrated; only the
+        // primary is used directly (guard details come from near_misses).
+        let (Some(_novel), Some(_rewrite), Some(_ctx), Some(p)) =
             (r.tg_novel, r.tg_rewrite, r.settled_ctx, primary(r))
         else {
             continue;
