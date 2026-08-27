@@ -170,3 +170,10 @@ verified llama-server behavior this is built on, and
 [docs/PROJECT-BRIEF.md](docs/PROJECT-BRIEF.md) for a general-audience
 overview. Sibling project: `../modelwarden` (model inventory/backup —
 storage truth; this app owns serving).
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT License](LICENSE-MIT), at your option. Unless you explicitly state
+otherwise, any contribution intentionally submitted for inclusion shall
+be dual-licensed as above, without any additional terms or conditions.
