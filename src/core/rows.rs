@@ -97,8 +97,23 @@ pub fn failure_hint(error: &str) -> String {
     crate::core::diagnose::short_hint(error)
 }
 
+/// MoE detection for advice: the architecture says so, or the name
+/// carries the active-params convention ("A3B", "A22B", …).
+pub fn looks_moe(meta: Option<&GgufMeta>, display: &str) -> bool {
+    if meta
+        .and_then(|m| m.architecture.as_deref())
+        .is_some_and(|a| a.contains("moe"))
+    {
+        return true;
+    }
+    let d = display.to_lowercase();
+    d.split(['-', '_', ' '])
+        .any(|t| t.starts_with('a') && t.ends_with('b') && t[1..t.len() - 1].parse::<u32>().is_ok())
+}
+
 fn advice_for(
     meta: Option<&GgufMeta>,
+    display: &str,
     size_bytes: u64,
     measured: Option<u64>,
     tool_call: Option<bool>,
@@ -153,13 +168,25 @@ fn advice_for(
             ),
         )
     } else if hw.vram_mib > 0 && size_mib > hw.vram_mib.saturating_sub(1024) {
-        (
-            AdviceLevel::Warn,
-            format!(
-                "bigger than your {:.0} GB VRAM — will run partly on CPU (slow); Load to measure what you actually get",
-                hw.vram_mib as f64 / 1024.0
-            ),
-        )
+        if looks_moe(meta, display) {
+            (
+                AdviceLevel::Warn,
+                format!(
+                    "MoE bigger than your {:.0} GB VRAM — default placement will be slow; \
+                     run the Lab's MoE-offload trial (--cpu-moe: attention on GPU, experts \
+                     in RAM) and keep the measured winner",
+                    hw.vram_mib as f64 / 1024.0
+                ),
+            )
+        } else {
+            (
+                AdviceLevel::Warn,
+                format!(
+                    "bigger than your {:.0} GB VRAM — will run partly on CPU (slow); Load to measure what you actually get",
+                    hw.vram_mib as f64 / 1024.0
+                ),
+            )
+        }
     } else {
         (
             AdviceLevel::Unknown,
@@ -304,6 +331,7 @@ pub fn assemble(
         } else {
             advice_for(
                 m.meta.as_ref(),
+                &m.display_name(),
                 m.file_size,
                 measured_ctx,
                 tool_call,
@@ -777,6 +805,20 @@ mod tests {
         let rows = assemble(&[m2], &[], &Measurements::new(), &[], HW);
         assert_eq!(rows[0].quant, "Q4_K_M");
         assert!(rows[0].quant_header_disagrees.is_none());
+    }
+
+    #[test]
+    fn oversized_moe_gets_the_cpu_moe_advice() {
+        assert!(looks_moe(None, "Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL"));
+        assert!(looks_moe(None, "qwen_qwen3.6-35b-a3b-q4_k_s"));
+        assert!(!looks_moe(None, "Qwen3.8-27B-UD-Q4_K_XL"), "dense stays dense");
+        // The incoming 43GiB download's exact shape: MoE, way over 24GB VRAM,
+        // fits VRAM+RAM → the advice points at the moe trial, not generic
+        // CPU-spill.
+        let m = file("Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf", Source::Shelf, 43, true);
+        let rows = assemble(&[m], &[], &Measurements::new(), &[], HW);
+        assert!(rows[0].advice.contains("MoE-offload trial"), "{}", rows[0].advice);
+        assert_eq!(rows[0].advice_level, AdviceLevel::Warn);
     }
 
     #[test]

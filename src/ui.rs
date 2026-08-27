@@ -138,6 +138,7 @@ struct App {
     lab_quality: bool,
     lab_load: bool,
     lab_dials: bool,
+    lab_moe: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
 }
@@ -159,6 +160,7 @@ enum AfterStart {
         quality: bool,
         load: bool,
         dials: bool,
+        moe: bool,
     },
 }
 
@@ -224,6 +226,7 @@ impl App {
             lab_quality: false,
             lab_load: false,
             lab_dials: false,
+            lab_moe: false,
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
@@ -559,7 +562,7 @@ impl App {
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
                 AfterStart::Lab {
-                    id, measure, bench, spec, ub, kv, quality, load, dials,
+                    id, measure, bench, spec, ub, kv, quality, load, dials, moe,
                 } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
@@ -601,6 +604,9 @@ impl App {
                     }
                     if dials {
                         trial_worker(&cfg, &id, "dials", &cancel_token, tx);
+                    }
+                    if moe {
+                        trial_worker(&cfg, &id, "moe", &cancel_token, tx);
                     }
                     if quality {
                         let tx2 = tx.clone();
@@ -1667,6 +1673,11 @@ impl App {
                     &mut self.lab_dials,
                     "Speculation-dial trial (ngram lookup/draft lengths, ~12 min)",
                 );
+                ui.checkbox(
+                    &mut self.lab_moe,
+                    "MoE-offload trial (--cpu-moe + thread counts — for MoE models \
+                     bigger than VRAM, ~15 min)",
+                );
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
@@ -1675,7 +1686,8 @@ impl App {
                     || self.lab_kv
                     || self.lab_quality
                     || self.lab_load
-                    || self.lab_dials;
+                    || self.lab_dials
+                    || self.lab_moe;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1697,7 +1709,7 @@ impl App {
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
-                        for menu_name in ["spec", "ub", "kv", "load", "dials"] {
+                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe"] {
                             let Some(report) = trial::stored_report(menu_name, table) else {
                                 continue;
                             };
@@ -1719,7 +1731,8 @@ impl App {
                                     "ub" => "Prefill batch",
                                     "kv" => "KV precision",
                                     "load" => "Load mode",
-                                    _ => "Speculation dials",
+                                    "dials" => "Speculation dials",
+                                    _ => "MoE offload",
                                 },
                                 report.verdict.reason
                             ));
@@ -1838,6 +1851,7 @@ impl App {
                 quality: self.lab_quality,
                 load: self.lab_load,
                 dials: self.lab_dials,
+                moe: self.lab_moe,
             };
             self.run_or_offer_start(action);
         }

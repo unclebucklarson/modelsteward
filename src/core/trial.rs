@@ -143,6 +143,28 @@ pub fn spec_dial_variants() -> Vec<Variant> {
     ]
 }
 
+/// The MoE-offload menu (M8 #4/#8): for a MoE model bigger than VRAM,
+/// `--cpu-moe` keeps attention on the GPU and expert weights in RAM —
+/// usually far faster than the default partial layer-offload, because
+/// A3B-class models activate only a few B parameters per token. Thread
+/// count folds in here (the knob review's rule: threads only matter once
+/// experts live on CPU). Judged like generation work: rewrite speed.
+pub fn moe_variants() -> Vec<Variant> {
+    let mk = |label: &str, extra: Vec<(&str, &str)>| Variant {
+        label: label.into(),
+        extra: std::iter::once(("cpu-moe".to_string(), "true".to_string()))
+            .chain(extra.into_iter().map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect(),
+    };
+    vec![
+        mk("cpu-moe", vec![]),
+        // P-cores only vs all threads: E-core scheduling can hurt or help
+        // expert matmuls — measured, not assumed (i9-12900K: 8P+8E/24T).
+        mk("cpu-moe-t8", vec![("threads", "8")]),
+        mk("cpu-moe-t24", vec![("threads", "24")]),
+    ]
+}
+
 /// A named menu: which variants to race and how to judge them.
 pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {
@@ -151,6 +173,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "kv" => Some((kv_variants(), Goal::Context)),
         "load" => Some((load_mode_variants(), Goal::LoadTime)),
         "dials" => Some((spec_dial_variants(), Goal::RewriteTg)),
+        "moe" => Some((moe_variants(), Goal::RewriteTg)),
         _ => None,
     }
 }
