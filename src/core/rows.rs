@@ -58,6 +58,9 @@ pub struct Row {
     /// generation tokens/sec, when benched on this machine.
     pub pp_tps: Option<f64>,
     pub tg_tps: Option<f64>,
+    /// Quality gate v2 scores, when the Quality probe has run.
+    pub eval_score: Option<f64>,
+    pub tool_reliability: Option<f64>,
 }
 
 /// Hardware picture for advice. `vram_mib` is the largest single device
@@ -284,6 +287,10 @@ pub fn assemble(
             measurement.and_then(|mm| mm.pp_tps),
             measurement.and_then(|mm| mm.tg_tps),
         );
+        let (eval_score, tool_reliability) = (
+            measurement.and_then(|mm| mm.eval_score),
+            measurement.and_then(|mm| mm.tool_reliability),
+        );
         let (advice_level, advice) = if !router_models.is_empty()
             && router_id.is_some()
             && server_status.is_none()
@@ -372,6 +379,8 @@ pub fn assemble(
             embedding,
             pp_tps,
             tg_tps,
+            eval_score,
+            tool_reliability,
         });
     }
 
@@ -387,6 +396,10 @@ pub fn assemble(
         let (pp_tps, tg_tps) = (
             measurement.and_then(|mm| mm.pp_tps),
             measurement.and_then(|mm| mm.tg_tps),
+        );
+        let (eval_score, tool_reliability) = (
+            measurement.and_then(|mm| mm.eval_score),
+            measurement.and_then(|mm| mm.tool_reliability),
         );
         // A "cache" entry no scanned file claimed means Load fetches from
         // HuggingFace first — a 20GB-class pull, and a *re*-download whenever
@@ -445,10 +458,106 @@ pub fn assemble(
             embedding: false,
             pp_tps,
             tg_tps,
+            eval_score,
+            tool_reliability,
         });
     }
 
+    quant_advice(&mut rows);
     rows
+}
+
+/// The quant-choice advisor (M8): when two quants of the SAME model are
+/// both measured, say which one agent work should use — from measurement,
+/// with quality respected. Rules, transparent:
+/// - family = display name with the quant token removed (Q4/Q5 of one
+///   model group; UD and non-UD stay separate families).
+/// - best = fastest generation (tg); context breaks ties / substitutes
+///   when speed isn't benched yet.
+/// - quality veto: if the faster quant scores a full eval item WORSE
+///   (>0.17), no crown — the tradeoff is stated instead.
+/// - unmeasured quality on either side is said out loud, not assumed.
+fn quant_advice(rows: &mut [Row]) {
+    let family_key = |r: &Row| -> Option<String> {
+        if r.quant.is_empty() || r.measured_ctx.is_none() {
+            return None;
+        }
+        let d = r.display.to_lowercase();
+        let q = r.quant.to_lowercase();
+        if !d.contains(&q) {
+            return None;
+        }
+        Some(d.replace(&q, "").trim_matches(['-', '_', '.', ' ']).to_string())
+    };
+    let mut families: std::collections::HashMap<String, Vec<usize>> = Default::default();
+    for (i, r) in rows.iter().enumerate() {
+        if let Some(k) = family_key(r) {
+            families.entry(k).or_default().push(i);
+        }
+    }
+    for members in families.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        // Best by tg where benched, else by context.
+        let best = *members
+            .iter()
+            .max_by(|a, b| {
+                let key = |i: usize| {
+                    (
+                        rows[i].tg_tps.unwrap_or(0.0),
+                        rows[i].measured_ctx.unwrap_or(0),
+                    )
+                };
+                key(**a)
+                    .partial_cmp(&key(**b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .expect("members non-empty");
+        for &i in members {
+            if i == best {
+                continue;
+            }
+            let line = {
+                let (b, o) = (&rows[best], &rows[i]);
+                match (b.eval_score, o.eval_score) {
+                    // Quality veto: the faster quant measurably answers worse.
+                    (Some(be), Some(oe)) if be < oe - 0.17 => format!(
+                        "; quant tradeoff: {} is faster but this one scores higher on \
+                         evals ({:.0}% vs {:.0}%) — your call",
+                        b.quant,
+                        oe * 100.0,
+                        be * 100.0
+                    ),
+                    both => {
+                        let quality_note = match both {
+                            (Some(_), Some(_)) => " (quality parity measured)",
+                            _ => " (quality unmeasured — run the Lab's Quality probe on \
+                                  both to confirm)",
+                        };
+                        let tg_part = match (b.tg_tps, o.tg_tps) {
+                            (Some(bt), Some(ot)) if ot > 0.0 => {
+                                format!("{:+.0}% speed, ", (bt / ot - 1.0) * 100.0)
+                            }
+                            _ => String::new(),
+                        };
+                        let ctx_part = match (b.measured_ctx, o.measured_ctx) {
+                            (Some(bc), Some(oc)) if oc > 0 => {
+                                format!("{:+.0}% context", bc as f64 / oc as f64 * 100.0 - 100.0)
+                            }
+                            _ => String::new(),
+                        };
+                        format!(
+                            "; quant advice: prefer the {} of this model — \
+                             {tg_part}{ctx_part}{quality_note}",
+                            b.quant
+                        )
+                    }
+                }
+            };
+            rows[i].advice.push_str(&line);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -668,6 +777,51 @@ mod tests {
         let rows = assemble(&[m2], &[], &Measurements::new(), &[], HW);
         assert_eq!(rows[0].quant, "Q4_K_M");
         assert!(rows[0].quant_header_disagrees.is_none());
+    }
+
+    #[test]
+    fn quant_advisor_crowns_measures_and_vetoes() {
+        let mk_meas = |ctx: u64, tg: f64, eval: Option<f64>| Measurement {
+            n_ctx: Some(ctx),
+            tool_call: Some(true),
+            tg_tps: Some(tg),
+            eval_score: eval,
+            ..Default::default()
+        };
+        let models = vec![
+            file("Qwen3.8-27B-UD-Q4_K_XL.gguf", Source::Shelf, 18, true),
+            file("Qwen3.8-27B-UD-Q5_K_XL.gguf", Source::Shelf, 20, true),
+        ];
+        // The real 2026-08-26 numbers: Q4 faster AND roomier, parity quality.
+        let mut meas = Measurements::new();
+        meas.insert("qwen3.8-27b-ud-q4_k_xl".into(), mk_meas(118_016, 40.6, Some(0.83)));
+        meas.insert("qwen3.8-27b-ud-q5_k_xl".into(), mk_meas(62_720, 37.0, Some(0.83)));
+        let rows = assemble(&models, &[], &meas, &[], HW);
+        let q5 = rows.iter().find(|r| r.display.contains("Q5")).unwrap();
+        assert!(q5.advice.contains("prefer the Q4_K_XL"), "{}", q5.advice);
+        assert!(q5.advice.contains("+10% speed"), "{}", q5.advice);
+        assert!(q5.advice.contains("+88% context"), "{}", q5.advice);
+        assert!(q5.advice.contains("quality parity measured"), "{}", q5.advice);
+        let q4 = rows.iter().find(|r| r.display.contains("Q4")).unwrap();
+        assert!(!q4.advice.contains("prefer"), "winner gets no nag: {}", q4.advice);
+
+        // Unmeasured quality is said out loud.
+        let mut meas2 = Measurements::new();
+        meas2.insert("qwen3.8-27b-ud-q4_k_xl".into(), mk_meas(118_016, 40.6, None));
+        meas2.insert("qwen3.8-27b-ud-q5_k_xl".into(), mk_meas(62_720, 37.0, Some(0.83)));
+        let rows = assemble(&models, &[], &meas2, &[], HW);
+        let q5 = rows.iter().find(|r| r.display.contains("Q5")).unwrap();
+        assert!(q5.advice.contains("quality unmeasured"), "{}", q5.advice);
+
+        // Quality veto: faster quant answers a full eval item worse.
+        let mut meas3 = Measurements::new();
+        meas3.insert("qwen3.8-27b-ud-q4_k_xl".into(), mk_meas(118_016, 40.6, Some(0.50)));
+        meas3.insert("qwen3.8-27b-ud-q5_k_xl".into(), mk_meas(62_720, 37.0, Some(0.83)));
+        let rows = assemble(&models, &[], &meas3, &[], HW);
+        let q5 = rows.iter().find(|r| r.display.contains("Q5")).unwrap();
+        assert!(q5.advice.contains("quant tradeoff"), "{}", q5.advice);
+        assert!(q5.advice.contains("83% vs 50%"), "{}", q5.advice);
+        assert!(!q5.advice.contains("prefer the"), "no crown under a veto: {}", q5.advice);
     }
 
     #[test]

@@ -336,17 +336,21 @@ rewrite fidelity (multiset line-match against the rewrite prompt's known
 answer — set-matching scored a half-dropped module 0.7, the unit test
 caught it); the verdict disqualifies >5-point fidelity drops outright,
 near-misses spell quality costs in capitals, table + Why? teach the
-column. **Quality gate v2 (open):** N-shot tool-call reliability probe +
-a small local eval battery — needed before the quant-choice advisor can
-claim quality parity. Then:
+column. **✔ Quality gate v2 (DONE 2026-08-27):** six-item fixed eval
+battery with strict machine-checked answers (last-line / structural-JSON
+matchers, self-consistency tested) + N-shot tool reliability; Lab's
+sixth campaign and `--quality <id> [shots]`; scores persist to
+measurements + journal. Then:
 
 1. **Asymmetric KV quant trial** (`ctv q4_0`): MENU BUILT (kv, Context
    goal — ≥10% more settled ctx with speed and fidelity held). First
    fleet run pending.
-2. **Quant-choice advisor**: cross-row advice per model family from
-   measured speed + ctx + quality ("for agent work use the Q4: +34%
-   speed, +88% context, quality within gate"). Probably the single most
-   valuable plain-human advisory the app can give.
+2. ✔ **Quant-choice advisor (DONE 2026-08-27)**: rows of the same model
+   family (display minus quant token) with ≥2 measured quants get advice
+   on the non-preferred rows — fastest tg crowned ("prefer the Q4_K_XL:
+   +10% speed, +88% context"), quality respected: parity stated when
+   measured, absence said out loud, and a QUALITY VETO (faster quant
+   >1 eval item worse) turns the crown into a stated tradeoff.
 3. **Speculation leftovers**: ngram-map-k / ngram-cache campaign (cheap);
    MTP self-speculation when upstream lands the flag (⚡ models draft for
    themselves — could win on NOVEL code, which ngram can't); investigate
