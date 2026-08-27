@@ -1107,11 +1107,30 @@ impl App {
                 ui.close();
             }
             ui.separator();
-            if ui.button("Measure New/Stale Models").clicked() {
+            if ui
+                .button("Measure New/Stale Models (context + tool calls)")
+                .on_hover_text(
+                    "The FLEET sweep: refreshes the preset (new files become servable), \
+                     then for every model that's new or whose config/build changed — \
+                     loads it, reads the context --fit actually settled on, probes for a \
+                     well-formed tool call, records both, and syncs OpenCode. Fresh \
+                     models are skipped. For ONE model, use the Lab's Measure campaign \
+                     — same operation, chosen scope.",
+                )
+                .clicked()
+            {
                 self.action_calibrate(false);
                 ui.close();
             }
-            if ui.button("Re-measure ALL (force)").clicked() {
+            if ui
+                .button("Re-measure ALL (force)")
+                .on_hover_text(
+                    "The same fleet sweep, ignoring freshness — every model re-measures \
+                     even if nothing changed. Takes minutes; useful when you distrust \
+                     the recorded numbers.",
+                )
+                .clicked()
+            {
                 self.action_calibrate(true);
                 ui.close();
             }
@@ -1119,8 +1138,10 @@ impl App {
             if ui
                 .button("Bench New/Stale Models (speed)")
                 .on_hover_text(
-                    "llama-bench baseline (prompt-processing + generation tokens/sec) for \
-                     every measured model missing a current one. Unloads the router's models \
+                    "The FLEET sweep for speed: llama-bench baselines (prompt-processing + \
+                     generation tokens/sec) for every measured model missing a current one. \
+                     For ONE model, use the Lab's Bench campaign — same operation, chosen \
+                     scope. Unloads the router's models \
                      first; a 27B takes about a minute each. Fills the Speed column.",
                 )
                 .clicked()
