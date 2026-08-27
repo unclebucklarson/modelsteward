@@ -17,10 +17,13 @@ use std::path::Path;
 
 /// One candidate configuration delta: extra preset keys for the model's
 /// section. The label is the identity trials are stored under.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Variant {
     pub label: String,
     pub extra: Vec<(String, String)>,
+    /// Vision toggle: Some(true) serves text-only (ModelOverrides
+    /// .no_mmproj) — not expressible as a preset key.
+    pub no_mmproj: Option<bool>,
 }
 
 /// The speculative-decoding menu (spike 5 methodology). ngram modes cost
@@ -32,6 +35,7 @@ pub fn spec_decode_variants() -> Vec<Variant> {
         .map(|t| Variant {
             label: t.to_string(),
             extra: vec![("spec-type".into(), t.into())],
+            no_mmproj: None,
         })
         .collect()
 }
@@ -45,6 +49,7 @@ pub fn ubatch_variants() -> Vec<Variant> {
         .map(|n| Variant {
             label: format!("ub-{n}"),
             extra: vec![("ubatch-size".into(), n.to_string())],
+            no_mmproj: None,
         })
         .collect()
 }
@@ -57,6 +62,7 @@ pub fn kv_variants() -> Vec<Variant> {
     vec![Variant {
         label: "ctv-q4_0".into(),
         extra: vec![("cache-type-v".into(), "q4_0".into())],
+        no_mmproj: None,
     }]
 }
 
@@ -73,6 +79,10 @@ pub enum Goal {
     /// A faster model load/swap (load-mode menus) — LOWER is better; the
     /// harness handles direction via `improvement`.
     LoadTime,
+    /// A faster SECOND agent turn (vision / cache-reuse menus): the
+    /// agent-turn probe's incremental prefill milliseconds. LOWER is
+    /// better — this is the wait you actually feel in OpenCode.
+    AgentTurn,
 }
 
 /// The goal metric of one result, whatever its direction.
@@ -82,6 +92,7 @@ fn primary_of(goal: Goal, r: &TrialResult) -> Option<f64> {
         Goal::Prefill => r.pp_prefill,
         Goal::Context => r.settled_ctx.map(|c| c as f64),
         Goal::LoadTime => r.load_secs,
+        Goal::AgentTurn => r.turn2_prompt_ms,
     }
 }
 
@@ -89,7 +100,7 @@ fn primary_of(goal: Goal, r: &TrialResult) -> Option<f64> {
 /// >1.0 = better, direction-aware (LoadTime inverts — smaller is better).
 fn improvement(goal: Goal, baseline: f64, candidate: f64) -> f64 {
     match goal {
-        Goal::LoadTime => {
+        Goal::LoadTime | Goal::AgentTurn => {
             if candidate > 0.0 { baseline / candidate } else { 0.0 }
         }
         _ => {
@@ -107,6 +118,7 @@ pub fn load_mode_variants() -> Vec<Variant> {
         .map(|m| Variant {
             label: format!("load-{m}"),
             extra: vec![("load-mode".into(), m.into())],
+            no_mmproj: None,
         })
         .collect()
 }
@@ -122,6 +134,7 @@ pub fn spec_dial_variants() -> Vec<Variant> {
         extra: std::iter::once(("spec-type".to_string(), "ngram-simple".to_string()))
             .chain(extra.into_iter().map(|(k, v)| (k.to_string(), v.to_string())))
             .collect(),
+        no_mmproj: None,
     };
     vec![
         mk("ngram-default", vec![]),
@@ -158,6 +171,7 @@ pub fn moe_variants() -> Vec<Variant> {
         extra: std::iter::once(("cpu-moe".to_string(), "true".to_string()))
             .chain(extra.into_iter().map(|(k, v)| (k.to_string(), v.to_string())))
             .collect(),
+        no_mmproj: None,
     };
     vec![
         mk("cpu-moe", vec![]),
@@ -166,6 +180,32 @@ pub fn moe_variants() -> Vec<Variant> {
         mk("cpu-moe-t8", vec![("threads", "8")]),
         mk("cpu-moe-t24", vec![("threads", "24")]),
     ]
+}
+
+/// The vision menu: serve WITHOUT the projector. llama.cpp disables
+/// prompt-cache reuse for multimodal serving, so vision quietly costs
+/// every agent turn a full reprocess — this trial PRICES that cost with
+/// the agent-turn probe instead of leaving it an orange warning. Only
+/// meaningful for models that have a projector.
+pub fn vision_variants() -> Vec<Variant> {
+    vec![Variant {
+        label: "text-only".into(),
+        extra: Vec::new(),
+        no_mmproj: Some(true),
+    }]
+}
+
+/// The cache-reuse sweep (Tier A confirmation): 0 = off, 1024 = deeper
+/// reuse vs the shipped 256 default.
+pub fn cache_reuse_variants() -> Vec<Variant> {
+    [0u32, 1024]
+        .into_iter()
+        .map(|n| Variant {
+            label: format!("cache-reuse-{n}"),
+            extra: vec![("cache-reuse".into(), n.to_string())],
+            no_mmproj: None,
+        })
+        .collect()
 }
 
 /// A named menu: which variants to race and how to judge them.
@@ -177,6 +217,8 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "load" => Some((load_mode_variants(), Goal::LoadTime)),
         "dials" => Some((spec_dial_variants(), Goal::RewriteTg)),
         "moe" => Some((moe_variants(), Goal::Context)),
+        "vision" => Some((vision_variants(), Goal::AgentTurn)),
+        "cache" => Some((cache_reuse_variants(), Goal::AgentTurn)),
         _ => None,
     }
 }
@@ -201,6 +243,11 @@ pub struct TrialResult {
     pub settled_ctx: Option<u64>,
     /// Wall seconds from load request to loaded — the hot-swap cost.
     pub load_secs: Option<f64>,
+    /// Agent-turn probe: prefill milliseconds of the SECOND turn (same
+    /// conversation, middle edit, cache_prompt on) — real agent latency.
+    pub turn2_prompt_ms: Option<f64>,
+    /// Fraction of the second turn's prompt served from cache.
+    pub turn2_reuse: Option<f64>,
     /// Load or generation failure — the result is still recorded so a
     /// crashing variant is remembered, not retried forever.
     pub error: Option<String>,
@@ -281,6 +328,7 @@ pub fn near_misses(
         Goal::Prefill => "prefill",
         Goal::Context => "context",
         Goal::LoadTime => "load time",
+        Goal::AgentTurn => "second-turn prefill",
     };
     let Some(b_primary) = primary(baseline) else {
         return Vec::new();
@@ -417,10 +465,12 @@ pub fn verdict(
         Goal::Prefill => "prefill",
         Goal::Context => "context",
         Goal::LoadTime => "load time",
+        Goal::AgentTurn => "second-turn prefill",
     };
     let fmt_val = |v: f64| match goal {
         Goal::Context => format!("{v:.0} tokens"),
         Goal::LoadTime => format!("{v:.1}s"),
+        Goal::AgentTurn => format!("{v:.0} ms"),
         _ => format!("{v:.1} t/s"),
     };
     match best {
@@ -494,14 +544,20 @@ pub fn applied_keys(
         .iter()
         .flat_map(|v| v.extra.iter().map(|(k, _)| k.as_str()))
         .collect();
+    let touches_vision = variants.iter().any(|v| v.no_mmproj.is_some());
     cfg.overrides
         .get(model)
         .map(|ov| {
-            ov.extra
+            let mut keys: Vec<(String, String)> = ov
+                .extra
                 .iter()
                 .filter(|(k, _)| knob_keys.contains(k.as_str()))
                 .cloned()
-                .collect()
+                .collect();
+            if touches_vision && ov.no_mmproj {
+                keys.push(("no-mmproj".into(), "true".into()));
+            }
+            keys
         })
         .unwrap_or_default()
 }
@@ -519,9 +575,12 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
          given — edits, refactors, applying diffs — which is most of what a coding agent \
          does. prefill: how fast it reads your prompt before the first token. context: \
          the window memory-fitting could afford under this config. accepted: how many \
-         speculated tokens the model confirmed. fidelity: the quality gate — how much of \
-         a module the model was told to preserve came back verbatim (a drop means the \
-         config is degrading output, and no speed win survives that)."
+         speculated tokens the model confirmed. 2nd-turn ms: the agent-turn probe — \
+         a big prompt sent, then re-sent with a middle edit (what agents do every \
+         turn); this is how long the second turn's prefill took, with how much of it \
+         the prompt cache served. fidelity: the quality gate — how much of a module \
+         the model was told to preserve came back verbatim (a drop means the config \
+         is degrading output, and no speed win survives that)."
             .to_string(),
     );
     let Some(base) = report.raced.get(BASELINE) else {
@@ -535,6 +594,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         Goal::Prefill => "prefill",
         Goal::Context => "context",
         Goal::LoadTime => "load time",
+        Goal::AgentTurn => "second-turn prefill",
     };
     let (Some(b_novel), Some(b_rewrite), Some(b_ctx), Some(b_p)) =
         (base.tg_novel, base.tg_rewrite, base.settled_ctx, primary(base))
@@ -552,6 +612,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         let unit = match report.goal {
             Goal::Context => "tokens",
             Goal::LoadTime => "s",
+            Goal::AgentTurn => "ms",
             _ => "t/s",
         };
         out.push(format!(
@@ -744,9 +805,68 @@ fn prefill_prompt() -> String {
 struct GenStats {
     tps: f64,
     prompt_tps: Option<f64>,
+    prompt_n: Option<u64>,
+    prompt_ms: Option<f64>,
     draft_n: Option<u64>,
     draft_accepted: Option<u64>,
     content: String,
+}
+
+/// The agent-turn probe: send a large code context, then resend it with a
+/// MIDDLE edit (what agents do all day) with prompt caching ON, and
+/// measure what the second turn actually reprocesses. Returns
+/// (turn2 prefill ms, fraction of turn2's prompt served from cache).
+fn agent_turn_probe(port: u16, model: &str) -> Result<(f64, Option<f64>)> {
+    let code = |edited: bool| -> String {
+        (0..40)
+            .map(|i| {
+                // The middle-of-prompt edit: one function renamed at ~1/3.
+                let name = if edited && i == 13 { "renamed_stage".to_string() }
+                    else { format!("transform_stage_{i}") };
+                format!(
+                    "def {name}(records, options):\n    total = 0\n    for r in records:\n        v = r.get('field_{i}')\n        if v is not None and v > options.cut_{i}:\n            total += v * {m}\n    return total\n",
+                    m = i + 1
+                )
+            })
+            .collect()
+    };
+    let ask = |body_code: String| -> Result<GenStats> {
+        let body: serde_json::Value =
+            ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
+                .timeout(std::time::Duration::from_secs(600))
+                .send_json(serde_json::json!({
+                    "model": model,
+                    "messages": [{"role": "user", "content":
+                        format!("Here is a Python module:\n```python\n{body_code}```\nReply with just: OK")}],
+                    "max_tokens": 8,
+                    "temperature": 0,
+                    "cache_prompt": true,
+                }))
+                .context("agent-turn request")?
+                .into_json()?;
+        let t = body
+            .get("timings")
+            .ok_or_else(|| anyhow::anyhow!("no timings"))?;
+        Ok(GenStats {
+            tps: t.get("predicted_per_second").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
+            prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
+            prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
+            draft_n: None,
+            draft_accepted: None,
+            content: String::new(),
+        })
+    };
+    let t1 = ask(code(false))?;
+    let t2 = ask(code(true))?;
+    let ms = t2
+        .prompt_ms
+        .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
+    let reuse = match (t1.prompt_n, t2.prompt_n) {
+        (Some(n1), Some(n2)) if n1 > 0 => Some(1.0 - (n2 as f64 / n1 as f64).min(1.0)),
+        _ => None,
+    };
+    Ok((ms, reuse))
 }
 
 fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Result<GenStats> {
@@ -771,6 +891,8 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
             .and_then(|v| v.as_f64())
             .ok_or_else(|| anyhow::anyhow!("timings has no predicted_per_second"))?,
         prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
+        prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
+        prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
         content: body
@@ -799,6 +921,11 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
     } else {
         None
     };
+    let turn2 = if settled_ctx >= 8192 {
+        Some(agent_turn_probe(port, model)?)
+    } else {
+        None
+    };
     Ok(TrialResult {
         tg_novel: Some(novel.iter().sum::<f64>() / novel.len() as f64),
         tg_rewrite: Some(rw.tps),
@@ -807,6 +934,8 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
             _ => None,
         },
         pp_prefill: pf.and_then(|g| g.prompt_tps),
+        turn2_prompt_ms: turn2.map(|(ms, _)| ms),
+        turn2_reuse: turn2.and_then(|(_, r)| r),
         fidelity: Some(rewrite_fidelity(&rewrite_code(), &rw.content)),
         settled_ctx: Some(settled_ctx),
         load_secs: None, // stamped by the round, which owns the load
@@ -828,6 +957,9 @@ pub fn baseline_override(
         .collect();
     let mut ov = cfg.overrides.get(model).cloned().unwrap_or_default();
     ov.extra.retain(|(k, _)| !knob_keys.contains(k.as_str()));
+    if variants.iter().any(|v| v.no_mmproj.is_some()) {
+        ov.no_mmproj = false;
+    }
     ov
 }
 
@@ -865,12 +997,16 @@ pub fn run_trial(
     let round = |n: usize,
                  label: &str,
                  extra: &[(String, String)],
+                 no_mmproj: Option<bool>,
                  progress: &mut dyn FnMut(String)|
      -> Result<TrialResult> {
         progress(format!("[{n}/{total}] {model} · {label}: applying config + loading…"));
         let mut trial_cfg = cfg.clone();
         let mut ov = base_ov.clone();
         ov.extra.extend(extra.iter().cloned());
+        if let Some(b) = no_mmproj {
+            ov.no_mmproj = b;
+        }
         trial_cfg.overrides.insert(model.to_string(), ov);
         let attempt = (|| -> Result<TrialResult> {
             system::write_preset(&trial_cfg, &[])?;
@@ -925,7 +1061,7 @@ pub fn run_trial(
     // returning — a temp trial config must never outlive its run.
     let body = (|| -> Result<TrialReport> {
         cancel.check()?;
-        let baseline = round(1, BASELINE, &[], progress)?;
+        let baseline = round(1, BASELINE, &[], None, progress)?;
         all.entry(model.to_string())
             .or_default()
             .insert(BASELINE.to_string(), baseline.clone());
@@ -936,7 +1072,7 @@ pub fn run_trial(
         let mut raced = std::collections::BTreeMap::new();
         for (i, v) in variants.iter().enumerate() {
             cancel.check()?;
-            let r = round(i + 2, &v.label, &v.extra, progress)?;
+            let r = round(i + 2, &v.label, &v.extra, v.no_mmproj, progress)?;
             raced.insert(v.label.clone(), r.clone());
             all.entry(model.to_string())
                 .or_default()
@@ -985,6 +1121,9 @@ pub fn keep_variant(
             .find(|v| v.label == label)
             .ok_or_else(|| anyhow::anyhow!("unknown variant {label:?}"))?;
         ov.extra.extend(v.extra.iter().cloned());
+        if let Some(b) = v.no_mmproj {
+            ov.no_mmproj = b;
+        }
     }
     if ov == router::ModelOverrides::default() {
         new_cfg.overrides.remove(model);
@@ -1150,7 +1289,7 @@ mod tests {
     fn explain_narrates_the_ornith_table() {
         // The real ornith-1.5 verdict dialog (2026-08-25).
         let mut raced = std::collections::BTreeMap::new();
-        let mut mk = |novel: f64, rewrite: f64, ctx: u64, acc: Option<f64>| {
+        let mk = |novel: f64, rewrite: f64, ctx: u64, acc: Option<f64>| {
             let mut t = r(novel, rewrite, ctx);
             t.accept_rewrite = acc;
             t.pp_prefill = Some(3050.0);
@@ -1367,6 +1506,55 @@ mod tests {
             applied_keys(&cfg, "m", "ub"),
             vec![("ubatch-size".to_string(), "2048".to_string())]
         );
+    }
+
+    #[test]
+    fn agent_turn_goal_rewards_lower_second_turn_ms() {
+        // The probe measures time — a candidate that HALVES second-turn
+        // prefill must win, and one that doubles it must lose, even with
+        // every other column identical.
+        let mk = |ms: f64| {
+            let mut t = r(40.0, 40.0, 100_000);
+            t.turn2_prompt_ms = Some(ms);
+            t.turn2_reuse = Some(0.5);
+            t
+        };
+        let base = mk(2000.0);
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("cache-reuse-1024".to_string(), mk(900.0));
+        c.insert("cache-reuse-0".to_string(), mk(4000.0));
+        let v = verdict(Goal::AgentTurn, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("cache-reuse-1024"), "{}", v.reason);
+        assert!(
+            improvement(Goal::AgentTurn, 2000.0, 900.0) > 2.0,
+            "halving the time should read as >2x improvement"
+        );
+    }
+
+    #[test]
+    fn vision_menu_baseline_serves_with_projector() {
+        // A user who already toggled vision off still gets a fair race:
+        // the vision menu's baseline forces the projector back ON, and
+        // keeping the text-only winner persists no_mmproj.
+        let mut cfg = settings::AppConfig::default();
+        cfg.overrides.insert(
+            "m".into(),
+            router::ModelOverrides {
+                no_mmproj: true,
+                ..Default::default()
+            },
+        );
+        let variants = vision_variants();
+        assert!(!baseline_override(&cfg, "m", &variants).no_mmproj);
+        // ...but a menu that never touches vision leaves the toggle alone.
+        assert!(baseline_override(&cfg, "m", &spec_decode_variants()).no_mmproj);
+        // applied_keys surfaces the toggle as a pseudo-key for the vision
+        // menu only.
+        assert_eq!(
+            applied_keys(&cfg, "m", "vision"),
+            vec![("no-mmproj".to_string(), "true".to_string())]
+        );
+        assert!(applied_keys(&cfg, "m", "spec").is_empty());
     }
 
     #[test]

@@ -139,6 +139,8 @@ struct App {
     lab_load: bool,
     lab_dials: bool,
     lab_moe: bool,
+    lab_vision: bool,
+    lab_cache: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
 }
@@ -161,6 +163,8 @@ enum AfterStart {
         load: bool,
         dials: bool,
         moe: bool,
+        vision: bool,
+        cache: bool,
     },
 }
 
@@ -227,6 +231,8 @@ impl App {
             lab_load: false,
             lab_dials: false,
             lab_moe: false,
+            lab_vision: false,
+            lab_cache: false,
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
@@ -563,6 +569,7 @@ impl App {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
                 AfterStart::Lab {
                     id, measure, bench, spec, ub, kv, quality, load, dials, moe,
+                    vision, cache,
                 } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
@@ -607,6 +614,12 @@ impl App {
                     }
                     if moe {
                         trial_worker(&cfg, &id, "moe", &cancel_token, tx);
+                    }
+                    if vision {
+                        trial_worker(&cfg, &id, "vision", &cancel_token, tx);
+                    }
+                    if cache {
+                        trial_worker(&cfg, &id, "cache", &cancel_token, tx);
                     }
                     if quality {
                         let tx2 = tx.clone();
@@ -1676,12 +1689,13 @@ impl App {
                 });
                 let has_spec_kept =
                     !trial::applied_keys(&self.cfg, &id, "spec").is_empty();
+                let has_mmproj = sel_row.is_some_and(|r| r.vision);
                 ui.horizontal(|ui| {
                     ui.strong("Campaigns");
                     if ui
                         .small_button("select relevant")
                         .on_hover_text(
-                            "Checks the campaigns that apply to this model: MoE offload                              only for MoE models bigger than VRAM; speculation dials only                              once a speculation mode is kept; the core set for everything.",
+                            "Checks the campaigns that apply to this model: MoE offload                              only for MoE models bigger than VRAM; speculation dials only                              once a speculation mode is kept; vision cost only for models                              with a projector; the core set for everything.",
                         )
                         .clicked()
                     {
@@ -1694,6 +1708,8 @@ impl App {
                         self.lab_load = true;
                         self.lab_dials = has_spec_kept;
                         self.lab_moe = is_moe_over_vram;
+                        self.lab_vision = has_mmproj;
+                        self.lab_cache = true;
                     }
                     if ui.small_button("select all").clicked() {
                         self.lab_measure = true;
@@ -1705,6 +1721,8 @@ impl App {
                         self.lab_load = true;
                         self.lab_dials = true;
                         self.lab_moe = true;
+                        self.lab_vision = true;
+                        self.lab_cache = true;
                     }
                     if ui.small_button("select none").clicked() {
                         self.lab_measure = false;
@@ -1716,6 +1734,8 @@ impl App {
                         self.lab_load = false;
                         self.lab_dials = false;
                         self.lab_moe = false;
+                        self.lab_vision = false;
+                        self.lab_cache = false;
                     }
                 });
                 ui.checkbox(
@@ -1762,6 +1782,26 @@ impl App {
                 } else {
                     "Only applies to MoE models bigger than your VRAM — this model                      fits (or is dense), so --cpu-moe would only slow it down."
                 });
+                ui.checkbox(
+                    &mut self.lab_vision,
+                    "Vision-cost trial (serve text-only vs with projector — measures \
+                     the agent-turn cache tax, ~8 min)",
+                )
+                .on_hover_text(if has_mmproj {
+                    "This model serves a vision projector, and llama.cpp disables                      prompt-cache reuse for multimodal serving: every agent turn                      reprocesses the whole conversation. This measures what turning                      vision off is actually worth on YOUR hardware."
+                } else {
+                    "Only applies to models serving a vision projector — this one                      has none, so there is nothing to turn off."
+                });
+                ui.checkbox(
+                    &mut self.lab_cache,
+                    "Cache-reuse trial (--cache-reuse 0/256/1024 — second-turn \
+                     prefill after a mid-prompt edit, ~8 min)",
+                )
+                .on_hover_text(
+                    "Coding agents edit the middle of the prompt every turn; \
+                     cache-reuse decides how much of the KV cache survives that. \
+                     Measured with a two-turn probe, not guessed.",
+                );
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
@@ -1771,7 +1811,9 @@ impl App {
                     || self.lab_quality
                     || self.lab_load
                     || self.lab_dials
-                    || self.lab_moe;
+                    || self.lab_moe
+                    || self.lab_vision
+                    || self.lab_cache;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1793,7 +1835,7 @@ impl App {
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
-                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe"] {
+                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe", "vision", "cache"] {
                             let Some(report) = trial::stored_report(menu_name, table) else {
                                 continue;
                             };
@@ -1816,7 +1858,9 @@ impl App {
                                     "kv" => "KV precision",
                                     "load" => "Load mode",
                                     "dials" => "Speculation dials",
-                                    _ => "MoE offload",
+                                    "moe" => "MoE offload",
+                                    "vision" => "Vision cost",
+                                    _ => "Cache reuse",
                                 },
                                 report.verdict.reason
                             ));
@@ -1936,6 +1980,8 @@ impl App {
                 load: self.lab_load,
                 dials: self.lab_dials,
                 moe: self.lab_moe,
+                vision: self.lab_vision,
+                cache: self.lab_cache,
             };
             self.run_or_offer_start(action);
         }
@@ -3075,8 +3121,8 @@ fn trial_table_grid(
 ) {
     egui::Grid::new(salt).striped(true).show(ui, |ui| {
         for h in [
-            "", "novel t/s", "rewrite t/s", "prefill t/s", "context", "load s", "fidelity",
-            "accepted",
+            "", "novel t/s", "rewrite t/s", "prefill t/s", "context", "load s",
+            "2nd-turn ms", "fidelity", "accepted",
         ] {
             ui.strong(h);
         }
@@ -3100,6 +3146,17 @@ fn trial_table_grid(
             ui.label(
                 r.load_secs
                     .map(|l| format!("{l:.1}"))
+                    .unwrap_or_else(|| "—".into()),
+            );
+            ui.label(
+                r.turn2_prompt_ms
+                    .map(|m| {
+                        let reuse = r
+                            .turn2_reuse
+                            .map(|f| format!(" ({:.0}% cached)", f * 100.0))
+                            .unwrap_or_default();
+                        format!("{m:.0}{reuse}")
+                    })
                     .unwrap_or_else(|| "—".into()),
             );
             ui.label(
