@@ -20,8 +20,8 @@ pub struct ReportInputs<'a> {
     pub date: String,
     pub os: String,
     pub ram_mib: u64,
-    /// (device id, total MiB) pairs from the scan.
-    pub devices: Vec<(String, u64)>,
+    /// Physical GPUs, deduped across backend views.
+    pub gpus: Vec<crate::core::discover::PhysicalGpu>,
     /// Binary build serving right now.
     pub build: Option<u64>,
     pub upstream: Option<&'a UpstreamStatus>,
@@ -75,8 +75,27 @@ pub fn render(i: &ReportInputs) -> String {
     );
 
     push(&mut out, "\n## Machine".to_string());
-    for (id, mib) in &i.devices {
-        push(&mut out, format!("- GPU: {id} ({mib} MiB)"));
+    for g in &i.gpus {
+        if g.shared_memory {
+            push(
+                &mut out,
+                format!(
+                    "- iGPU: {} (shared system memory — not used for serving, not \
+                     counted as VRAM)",
+                    g.name
+                ),
+            );
+        } else {
+            push(
+                &mut out,
+                format!(
+                    "- GPU: {} — {} MiB usable (backend views: {})",
+                    g.name,
+                    g.vram_mib,
+                    g.ids.join(", ")
+                ),
+            );
+        }
     }
     push(&mut out, format!("- RAM: {} MiB", i.ram_mib));
     push(&mut out, format!("- OS: {}", i.os));
@@ -194,32 +213,75 @@ pub fn render(i: &ReportInputs) -> String {
     out
 }
 
-/// Gather this machine's data, render, and write the report file.
-/// Returns its path. The caller shows it to the user — nothing is sent.
+/// The machine-readable twin of the markdown report — same sanitized
+/// inputs, serialized whole so a future ingestion home (sharing tier 2)
+/// needs no format work. Written alongside as findings-report.json.
+#[derive(serde::Serialize)]
+struct FindingsJson<'a> {
+    generator: &'static str,
+    date: &'a str,
+    os: &'a str,
+    ram_mib: u64,
+    gpus: &'a [crate::core::discover::PhysicalGpu],
+    llamacpp_build: Option<u64>,
+    upstream_build: Option<u64>,
+    measurements: &'a Measurements,
+    trials: &'a Trials,
+    history: &'a [history::Entry],
+}
+
+/// Gather this machine's data, render, and write BOTH report files
+/// (markdown for humans, JSON for machines). Returns the markdown path.
+/// The caller shows it to the user — nothing is sent.
 pub fn generate(cfg: &crate::core::settings::AppConfig) -> anyhow::Result<std::path::PathBuf> {
-    use crate::core::{advisor, router, rows, system};
+    use crate::core::{advisor, discover, router, rows, system};
     let scan = system::scan_report(cfg, &[]);
     let dir = router::state_dir();
     let upstream = advisor::read_upstream_status(&dir);
-    let measurements = router::read_measurements(&dir);
+    let home = std::env::home_dir().map(|h| h.display().to_string());
+    // Sanitize ONCE, at the source, so both output formats inherit it —
+    // error strings are where filesystem paths hide.
+    let mut measurements = router::read_measurements(&dir);
+    for m in measurements.values_mut() {
+        if let Some(e) = &m.error {
+            m.error = Some(sanitize(e, home.as_deref()));
+        }
+    }
+    let mut hist = history::read_all(&dir);
+    for e in &mut hist {
+        if let Some(err) = &e.error {
+            e.error = Some(sanitize(err, home.as_deref()));
+        }
+    }
     let trials = trial::read_trials(&dir);
-    let hist = history::read_all(&dir);
     let inputs = ReportInputs {
         date: date_from_epoch(advisor::now_epoch()),
         os: format!("{} {}", std::env::consts::OS, std::env::consts::ARCH),
         ram_mib: rows::read_ram_mib(),
-        devices: scan
-            .devices
-            .iter()
-            .map(|d| (d.id.clone(), d.total_mib))
-            .collect(),
+        gpus: discover::physical_gpus(&scan.devices),
         build: system::env_build(&scan),
         upstream: upstream.as_ref(),
         measurements: &measurements,
         trials: &trials,
         history: &hist,
-        home: std::env::home_dir().map(|h| h.display().to_string()),
+        home,
     };
+    let json = FindingsJson {
+        generator: "llamacppCodeConf",
+        date: &inputs.date,
+        os: &inputs.os,
+        ram_mib: inputs.ram_mib,
+        gpus: &inputs.gpus,
+        llamacpp_build: inputs.build,
+        upstream_build: inputs.upstream.and_then(|u| u.upstream_build),
+        measurements: inputs.measurements,
+        trials: inputs.trials,
+        history: inputs.history,
+    };
+    std::fs::write(
+        dir.join("findings-report.json"),
+        serde_json::to_string_pretty(&json)?,
+    )?;
     let text = render(&inputs);
     let path = dir.join("findings-report.md");
     std::fs::write(&path, text)?;
@@ -273,7 +335,20 @@ mod tests {
             date: date_from_epoch(1_787_700_000),
             os: "linux".into(),
             ram_mib: 64_000,
-            devices: vec![("CUDA0: NVIDIA GeForce RTX 3090 Ti".into(), 24_564)],
+            gpus: vec![
+                crate::core::discover::PhysicalGpu {
+                    name: "NVIDIA GeForce RTX 3090 Ti".into(),
+                    vram_mib: 24_111,
+                    ids: vec!["CUDA0".into(), "Vulkan0".into()],
+                    shared_memory: false,
+                },
+                crate::core::discover::PhysicalGpu {
+                    name: "Intel(R) UHD Graphics 770".into(),
+                    vram_mib: 48_012,
+                    ids: vec!["Vulkan1".into()],
+                    shared_memory: true,
+                },
+            ],
             build: Some(10_630),
             upstream: None,
             measurements: &m,
@@ -281,7 +356,15 @@ mod tests {
             history: &hist,
             home: Some("/home/buck".into()),
         });
-        assert!(text.contains("RTX 3090 Ti"));
+        assert!(
+            text.contains("RTX 3090 Ti — 24111 MiB usable (backend views: CUDA0, Vulkan0)"),
+            "one card, one line, conservative figure: {text}"
+        );
+        assert!(
+            text.contains("iGPU") && text.contains("not counted as VRAM"),
+            "shared memory never masquerades as VRAM: {text}"
+        );
+        assert!(!text.contains("48012"), "the phantom heap number must not appear");
         assert!(text.contains("| qwen3.8-27b-ud-q4_k_xl | 118016 |"));
         assert!(text.contains("b10454: 120064 → b10630: 111872"), "{text}");
         assert!(text.contains("'~/models/x.gguf'"), "home sanitized: {text}");

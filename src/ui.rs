@@ -257,18 +257,13 @@ impl App {
     }
 
     fn hardware(&self) -> rows::Hardware {
+        // Physical, deduped, dedicated-only: the old first-CUDA pick was
+        // right on this machine but a Vulkan-only box would have taken the
+        // iGPU's phantom shared-RAM heap as VRAM.
         let vram_mib = self
             .scan
             .as_ref()
-            .map(|s| {
-                s.devices
-                    .iter()
-                    .filter(|d| d.id.starts_with("CUDA"))
-                    .chain(s.devices.iter())
-                    .map(|d| d.total_mib)
-                    .next()
-                    .unwrap_or(0)
-            })
+            .map(|s| discover::advice_vram_mib(&s.devices))
             .unwrap_or(0);
         rows::Hardware {
             vram_mib,

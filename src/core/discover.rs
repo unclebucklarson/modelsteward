@@ -38,6 +38,65 @@ pub struct Device {
     pub free_mib: u64,
 }
 
+/// One physical GPU, deduped across backend views: the same card appears
+/// as CUDA0 AND Vulkan0 (with different memory figures — CUDA reports
+/// usable, Vulkan the raw heap), and an iGPU advertises borrowed system
+/// RAM as if it were VRAM. Summing the raw device list triples reality
+/// (user-caught 2026-08-26 reading the findings report).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PhysicalGpu {
+    pub name: String,
+    /// The smallest figure across backend views — the conservative
+    /// usable number.
+    pub vram_mib: u64,
+    /// Backend ids that are views of this card ("CUDA0", "Vulkan0", …).
+    pub ids: Vec<String>,
+    /// Integrated / shared-memory device: its "VRAM" is system RAM in a
+    /// costume and must not count toward serving capacity.
+    pub shared_memory: bool,
+}
+
+/// Marker heuristic for shared-memory graphics; wrong in exotic cases,
+/// but wrong in the safe direction (a discrete card misread as shared
+/// only shrinks advice thresholds, never inflates them).
+fn is_shared_memory_gpu(name: &str) -> bool {
+    ["UHD Graphics", "Iris", "Radeon(TM) Graphics", "Radeon Graphics", "llvmpipe"]
+        .iter()
+        .any(|m| name.contains(m))
+}
+
+/// Group backend device views into physical GPUs by name, first-seen order.
+pub fn physical_gpus(devices: &[Device]) -> Vec<PhysicalGpu> {
+    let mut out: Vec<PhysicalGpu> = Vec::new();
+    for d in devices {
+        if let Some(g) = out.iter_mut().find(|g| g.name == d.name) {
+            g.ids.push(d.id.clone());
+            g.vram_mib = g.vram_mib.min(d.total_mib);
+        } else {
+            out.push(PhysicalGpu {
+                name: d.name.clone(),
+                vram_mib: d.total_mib,
+                ids: vec![d.id.clone()],
+                shared_memory: is_shared_memory_gpu(&d.name),
+            });
+        }
+    }
+    out
+}
+
+/// The VRAM figure serving advice should use: the largest DEDICATED
+/// physical GPU. Falls back to the largest anything only when no
+/// dedicated card exists at all.
+pub fn advice_vram_mib(devices: &[Device]) -> u64 {
+    let gpus = physical_gpus(devices);
+    gpus.iter()
+        .filter(|g| !g.shared_memory)
+        .map(|g| g.vram_mib)
+        .max()
+        .or_else(|| gpus.iter().map(|g| g.vram_mib).max())
+        .unwrap_or(0)
+}
+
 /// Conventional places a self-built or vendored llama-server lives, relative
 /// to $HOME. Checked in addition to PATH and manual paths.
 const HOME_CANDIDATES: &[&str] = &[
@@ -243,6 +302,45 @@ fn parse_device_list(out: &str) -> Vec<Device> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn dev(id: &str, name: &str, mib: u64) -> Device {
+        Device {
+            id: id.into(),
+            name: name.into(),
+            total_mib: mib,
+            free_mib: mib,
+        }
+    }
+
+    #[test]
+    fn physical_gpus_dedupe_backend_views_and_flag_shared_memory() {
+        // This machine's real shape: one 3090 Ti seen by CUDA and Vulkan
+        // (different figures), plus an iGPU advertising ~48GB of borrowed
+        // system RAM.
+        let devices = vec![
+            dev("CUDA0", "NVIDIA GeForce RTX 3090 Ti", 24_111),
+            dev("Vulkan0", "NVIDIA GeForce RTX 3090 Ti", 24_564),
+            dev("Vulkan1", "Intel(R) UHD Graphics 770 (ADL-S GT1)", 48_012),
+        ];
+        let gpus = physical_gpus(&devices);
+        assert_eq!(gpus.len(), 2, "three views, two physical devices");
+        assert_eq!(gpus[0].vram_mib, 24_111, "conservative (min) figure wins");
+        assert_eq!(gpus[0].ids, vec!["CUDA0", "Vulkan0"]);
+        assert!(!gpus[0].shared_memory);
+        assert!(gpus[1].shared_memory, "iGPU flagged");
+        assert_eq!(advice_vram_mib(&devices), 24_111, "advice never sees the phantom heap");
+
+        // Vulkan-only box (the latent-bug case): iGPU listed FIRST must
+        // still lose to the discrete card.
+        let vulkan_only = vec![
+            dev("Vulkan0", "Intel(R) UHD Graphics 770", 48_012),
+            dev("Vulkan1", "AMD Radeon RX 7900 XTX", 24_560),
+        ];
+        assert_eq!(advice_vram_mib(&vulkan_only), 24_560);
+        // All-shared fallback: better a shared figure than zero.
+        let igpu_only = vec![dev("Vulkan0", "Intel(R) UHD Graphics 770", 48_012)];
+        assert_eq!(advice_vram_mib(&igpu_only), 48_012);
+    }
 
     #[test]
     fn parses_version_output() {

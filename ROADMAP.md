@@ -411,11 +411,16 @@ mid-campaign verdict popup removed — the Lab is the one verdict surface,
 and apply buttons disable while anything runs.
 
 **Findings sharing (2026-08-26 discussion):**
-- **Tier 1 — findings-report export (IN FLIGHT)**: a sanitized markdown
-  bundle (hardware, build, measured tables, trial verdicts, history
-  highlights; NO paths/usernames) written locally for the user to review
-  and post where maintainers look (llama.cpp discussions, quant repos).
-  Verify loop flags report-worthy regressions. Tools menu + `--report`.
+- ✔ **Tier 1 — findings-report export (DONE 2026-08-26)**: sanitized
+  markdown + JSON sidecar (same inputs, sanitized once at the source)
+  written locally for user review; Tools menu + `--report`; verify loop
+  flags report-worthy regressions. User-caught fix: the Machine section
+  now reports PHYSICAL GPUs (backend views deduped by name, conservative
+  min figure, iGPU shared-RAM heaps labeled and never counted) — the raw
+  device list showed ~96GB on a 24GB machine. Same model now feeds the
+  Library advice VRAM figure (discover::advice_vram_mib), fixing a
+  latent bug where a Vulkan-only box would have taken the iGPU's phantom
+  heap as its VRAM.
 - **Tier 2 (future)**: automated submission IF a community dataset home
   ever exists — the tier-1 format is deliberately the ingestible
   primitive. Not ours to host (server/moderation/abuse = its own
