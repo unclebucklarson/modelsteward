@@ -1664,7 +1664,31 @@ impl App {
                     ));
                 }
                 ui.add_space(6.0);
-                ui.strong("Campaigns");
+                ui.horizontal(|ui| {
+                    ui.strong("Campaigns");
+                    if ui.small_button("select all").clicked() {
+                        self.lab_measure = true;
+                        self.lab_bench = true;
+                        self.lab_spec = true;
+                        self.lab_ub = true;
+                        self.lab_kv = true;
+                        self.lab_quality = true;
+                        self.lab_load = true;
+                        self.lab_dials = true;
+                        self.lab_moe = true;
+                    }
+                    if ui.small_button("select none").clicked() {
+                        self.lab_measure = false;
+                        self.lab_bench = false;
+                        self.lab_spec = false;
+                        self.lab_ub = false;
+                        self.lab_kv = false;
+                        self.lab_quality = false;
+                        self.lab_load = false;
+                        self.lab_dials = false;
+                        self.lab_moe = false;
+                    }
+                });
                 ui.checkbox(
                     &mut self.lab_measure,
                     "Measure (settled context + tool calls; adds to OpenCode, ~2 min)",

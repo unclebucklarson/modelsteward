@@ -761,7 +761,15 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
         novel.push(timed_generation(port, model, p, 512)?.tps);
     }
     let rw = timed_generation(port, model, &rewrite_prompt(), 1024)?;
-    let pf = timed_generation(port, model, &prefill_prompt(), 8)?;
+    // The prefill probe is ~6k tokens; a config whose context settled
+    // below that (an over-VRAM model at default placement crushes to
+    // 4096) would 400 the request and fail the WHOLE round — found live
+    // with the 80B MoE. Skip the probe instead; pp stays unmeasured.
+    let pf = if settled_ctx >= 8192 {
+        Some(timed_generation(port, model, &prefill_prompt(), 8)?)
+    } else {
+        None
+    };
     Ok(TrialResult {
         tg_novel: Some(novel.iter().sum::<f64>() / novel.len() as f64),
         tg_rewrite: Some(rw.tps),
@@ -769,7 +777,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
             (Some(a), Some(n)) if n > 0 => Some(a as f64 / n as f64),
             _ => None,
         },
-        pp_prefill: pf.prompt_tps,
+        pp_prefill: pf.and_then(|g| g.prompt_tps),
         fidelity: Some(rewrite_fidelity(&rewrite_code(), &rw.content)),
         settled_ctx: Some(settled_ctx),
         load_secs: None, // stamped by the round, which owns the load
