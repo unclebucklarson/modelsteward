@@ -576,7 +576,23 @@ pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
 /// timeouts and the router's request-scoped kill paths) → read `/props`
 /// with autoload off.
 pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
-    load_model(port, model)?;
+    // A load request for a model that is already loaded/loading returns
+    // 400 — "already underway", not a failure. Found live with the 80B
+    // MoE: its multi-minute load made every re-request a 400 that got
+    // recorded as a model fault. Only POST when the model is idle; in
+    // every in-flight state, fall through to the poll loop.
+    let in_flight = fetch_models(port)?
+        .into_iter()
+        .find(|m| m.id == model)
+        .is_some_and(|m| {
+            matches!(
+                m.status.as_str(),
+                "loaded" | "sleeping" | "loading" | "downloading" | "downloaded"
+            )
+        });
+    if !in_flight {
+        load_model(port, model)?;
+    }
     const LOAD_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
     let mut deadline = std::time::Instant::now() + LOAD_BUDGET;
     loop {
