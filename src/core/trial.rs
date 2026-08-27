@@ -70,6 +70,45 @@ pub enum Goal {
     Prefill,
     /// A bigger settled context for the same VRAM (KV-precision menus).
     Context,
+    /// A faster model load/swap (load-mode menus) — LOWER is better; the
+    /// harness handles direction via `improvement`.
+    LoadTime,
+}
+
+/// The goal metric of one result, whatever its direction.
+fn primary_of(goal: Goal, r: &TrialResult) -> Option<f64> {
+    match goal {
+        Goal::RewriteTg => r.tg_rewrite,
+        Goal::Prefill => r.pp_prefill,
+        Goal::Context => r.settled_ctx.map(|c| c as f64),
+        Goal::LoadTime => r.load_secs,
+    }
+}
+
+/// Improvement RATIO of candidate over baseline on the goal metric:
+/// >1.0 = better, direction-aware (LoadTime inverts — smaller is better).
+fn improvement(goal: Goal, baseline: f64, candidate: f64) -> f64 {
+    match goal {
+        Goal::LoadTime => {
+            if candidate > 0.0 { baseline / candidate } else { 0.0 }
+        }
+        _ => {
+            if baseline > 0.0 { candidate / baseline } else { 0.0 }
+        }
+    }
+}
+
+/// The load-mode menu: how model bytes reach memory. Direct IO can cut
+/// the multi-second hot-swap; mlock pins pages (needs RLIMIT_MEMLOCK —
+/// a failing variant is recorded, not fatal). Judged by LoadTime.
+pub fn load_mode_variants() -> Vec<Variant> {
+    ["dio", "mlock"]
+        .into_iter()
+        .map(|m| Variant {
+            label: format!("load-{m}"),
+            extra: vec![("load-mode".into(), m.into())],
+        })
+        .collect()
 }
 
 /// A named menu: which variants to race and how to judge them.
@@ -78,6 +117,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "spec" => Some((spec_decode_variants(), Goal::RewriteTg)),
         "ub" => Some((ubatch_variants(), Goal::Prefill)),
         "kv" => Some((kv_variants(), Goal::Context)),
+        "load" => Some((load_mode_variants(), Goal::LoadTime)),
         _ => None,
     }
 }
@@ -100,6 +140,8 @@ pub struct TrialResult {
     pub fidelity: Option<f64>,
     /// Context `--fit` settled on under this config.
     pub settled_ctx: Option<u64>,
+    /// Wall seconds from load request to loaded — the hot-swap cost.
+    pub load_secs: Option<f64>,
     /// Load or generation failure — the result is still recorded so a
     /// crashing variant is remembered, not retried forever.
     pub error: Option<String>,
@@ -174,10 +216,12 @@ pub fn near_misses(
     else {
         return Vec::new();
     };
-    let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match goal {
-        Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite generation"),
-        Goal::Prefill => (|r| r.pp_prefill, "prefill"),
-        Goal::Context => (|r| r.settled_ctx.map(|c| c as f64), "context"),
+    let primary = |r: &TrialResult| primary_of(goal, r);
+    let metric = match goal {
+        Goal::RewriteTg => "rewrite generation",
+        Goal::Prefill => "prefill",
+        Goal::Context => "context",
+        Goal::LoadTime => "load time",
     };
     let Some(b_primary) = primary(baseline) else {
         return Vec::new();
@@ -192,7 +236,7 @@ pub fn near_misses(
         else {
             continue;
         };
-        if p < b_primary * 1.10 {
+        if improvement(goal, b_primary, p) < 1.10 {
             continue; // never beat the goal — not interesting
         }
         let mut costs = Vec::new();
@@ -231,8 +275,8 @@ pub fn near_misses(
         out.push(NearMiss {
             label: label.clone(),
             gain: format!(
-                "+{:.0}% {metric} ({b_primary:.0} → {p:.0} t/s)",
-                (p / b_primary - 1.0) * 100.0
+                "+{:.0}% {metric} ({b_primary:.0} → {p:.0})",
+                (improvement(goal, b_primary, p) - 1.0) * 100.0
             ),
             cost: costs.join(" and "),
         });
@@ -254,11 +298,7 @@ pub fn verdict(
         };
     };
     // The metric a candidate must improve ≥10%; everything else is a guard.
-    let primary = |r: &TrialResult| match goal {
-        Goal::RewriteTg => r.tg_rewrite,
-        Goal::Prefill => r.pp_prefill,
-        Goal::Context => r.settled_ctx.map(|c| c as f64),
-    };
+    let primary = |r: &TrialResult| primary_of(goal, r);
     let Some(b_primary) = primary(baseline) else {
         return Verdict {
             winner: None,
@@ -288,10 +328,12 @@ pub fn verdict(
         {
             continue;
         }
-        if p < b_primary * 1.10 {
+        if improvement(goal, b_primary, p) < 1.10 {
             continue; // doesn't earn its keep
         }
-        if best.is_none_or(|(_, p0)| p > p0) {
+        if best.is_none_or(|(_, p0)| {
+            improvement(goal, b_primary, p) > improvement(goal, b_primary, p0)
+        }) {
             best = Some((label, p));
         }
     }
@@ -299,19 +341,21 @@ pub fn verdict(
         Goal::RewriteTg => "rewrite",
         Goal::Prefill => "prefill",
         Goal::Context => "context",
+        Goal::LoadTime => "load time",
     };
     let fmt_val = |v: f64| match goal {
         Goal::Context => format!("{v:.0} tokens"),
+        Goal::LoadTime => format!("{v:.1}s"),
         _ => format!("{v:.1} t/s"),
     };
     match best {
         Some((label, p)) => Verdict {
             winner: Some(label.clone()),
             reason: format!(
-                "{label}: {metric} {} vs baseline {} ({:+.0}%), everything else preserved",
+                "{label}: {metric} {} vs baseline {} ({:+.0}% better), everything else preserved",
                 fmt_val(p),
                 fmt_val(b_primary),
-                (p / b_primary - 1.0) * 100.0
+                (improvement(goal, b_primary, p) - 1.0) * 100.0
             ),
         },
         None => Verdict {
@@ -401,10 +445,13 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         out.push("The baseline itself failed to measure, so nothing can be compared.".into());
         return out;
     };
-    let (primary, metric): (fn(&TrialResult) -> Option<f64>, &str) = match report.goal {
-        Goal::RewriteTg => (|r| r.tg_rewrite, "rewrite"),
-        Goal::Prefill => (|r| r.pp_prefill, "prefill"),
-        Goal::Context => (|r| r.settled_ctx.map(|c| c as f64), "context"),
+    let goal = report.goal;
+    let primary = move |r: &TrialResult| primary_of(goal, r);
+    let metric = match goal {
+        Goal::RewriteTg => "rewrite",
+        Goal::Prefill => "prefill",
+        Goal::Context => "context",
+        Goal::LoadTime => "load time",
     };
     let (Some(b_novel), Some(b_rewrite), Some(b_ctx), Some(b_p)) =
         (base.tg_novel, base.tg_rewrite, base.settled_ctx, primary(base))
@@ -412,7 +459,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         out.push("The baseline lacks the goal metric — re-run the trial.".into());
         return out;
     };
-    let pct = |new: f64, old: f64| (new / old - 1.0) * 100.0;
+    let pct = |new: f64, old: f64| (improvement(goal, old, new) - 1.0) * 100.0;
 
     // The winner, with its evidence.
     if let Some(w) = &report.verdict.winner
@@ -421,6 +468,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
     {
         let unit = match report.goal {
             Goal::Context => "tokens",
+            Goal::LoadTime => "s",
             _ => "t/s",
         };
         out.push(format!(
@@ -668,6 +716,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
         pp_prefill: pf.prompt_tps,
         fidelity: Some(rewrite_fidelity(&rewrite_code(), &rw.content)),
         settled_ctx: Some(settled_ctx),
+        load_secs: None, // stamped by the round, which owns the load
         error: None,
         build: None,
     })
@@ -1087,6 +1136,28 @@ mod tests {
         let nm = near_misses(Goal::Context, &base, &c2);
         assert_eq!(nm.len(), 1);
         assert!(nm[0].cost.contains("QUALITY"), "{}", nm[0].cost);
+    }
+
+    #[test]
+    fn load_time_goal_inverts_direction() {
+        let mk = |secs: f64| {
+            let mut t = r(40.0, 40.0, 100_000);
+            t.pp_prefill = Some(1400.0);
+            t.load_secs = Some(secs);
+            t
+        };
+        let base = mk(12.0);
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("load-dio".to_string(), mk(7.5));
+        c.insert("load-mlock".to_string(), mk(11.8));
+        let v = verdict(Goal::LoadTime, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("load-dio"), "{}", v.reason);
+        assert!(v.reason.contains("7.5s"), "{}", v.reason);
+        assert!(v.reason.contains("+60% better"), "lower is better: {}", v.reason);
+        // A SLOWER load can never win.
+        let mut c2 = std::collections::BTreeMap::new();
+        c2.insert("load-mlock".to_string(), mk(15.0));
+        assert_eq!(verdict(Goal::LoadTime, &base, &c2).winner, None);
     }
 
     #[test]
