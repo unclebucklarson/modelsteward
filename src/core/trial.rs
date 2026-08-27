@@ -144,11 +144,14 @@ pub fn spec_dial_variants() -> Vec<Variant> {
 }
 
 /// The MoE-offload menu (M8 #4/#8): for a MoE model bigger than VRAM,
-/// `--cpu-moe` keeps attention on the GPU and expert weights in RAM —
-/// usually far faster than the default partial layer-offload, because
-/// A3B-class models activate only a few B parameters per token. Thread
-/// count folds in here (the knob review's rule: threads only matter once
-/// experts live on CPU). Judged like generation work: rewrite speed.
+/// `--cpu-moe` keeps attention on the GPU and expert weights in RAM.
+/// Judged by CONTEXT, not speed — live lesson from the 80B A3B: default
+/// placement crushed context to 4096 while generating at the same ~40
+/// t/s as cpu-moe (A3B actives are that light), so a speed goal saw
+/// "no win" while a 64x context restoration sat invisible in the guard
+/// column. Speed and fidelity remain guards: a placement that pays for
+/// context with generation still gets caught. Thread count folds in
+/// here (threads only matter once experts live on CPU).
 pub fn moe_variants() -> Vec<Variant> {
     let mk = |label: &str, extra: Vec<(&str, &str)>| Variant {
         label: label.into(),
@@ -173,7 +176,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "kv" => Some((kv_variants(), Goal::Context)),
         "load" => Some((load_mode_variants(), Goal::LoadTime)),
         "dials" => Some((spec_dial_variants(), Goal::RewriteTg)),
-        "moe" => Some((moe_variants(), Goal::RewriteTg)),
+        "moe" => Some((moe_variants(), Goal::Context)),
         _ => None,
     }
 }
