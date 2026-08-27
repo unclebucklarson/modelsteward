@@ -255,7 +255,19 @@ speculative-decoding trial ran (classic draft measured and REJECTED on
 this hardware, ngram adopted instead — spike 5); results-next-to-
 recommendations became the Lab's standing recommendation blocks.
 
-## Where things stand (2026-08-26, 110 tests green)
+## Where things stand (2026-08-27, 122 tests green — v0.2.0)
+
+Since the 08-26 stamp: quality gate v2 + quant-choice advisor (live,
+with measured quality parity on the qwen3.8 quants); cache-effectiveness
+monitor (found vision silently disabling cache-reuse on both daily
+drivers) + the ⚙ vision toggle; lower-is-better trial goals + load-mode
+menu (verdict: keep baseline — warm loads are 4s and dio measured 2x
+slower) + speculation-dials menu (built, first run pending); Lab detail
+scrollbar; Cancel for long-running work; findings report physical-GPU
+truth + JSON sidecar; ghost auto-comment; published as modelsteward on
+GitHub + crates.io with tag-triggered releases.
+
+### (2026-08-26 stamp)
 
 Since the 08-25 stamp: M6p2 verification loop DONE (`--verify-rebuild` +
 auto-chained after guided rebuilds; live verdict: b10630 unlocked

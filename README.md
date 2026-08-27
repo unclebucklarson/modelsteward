@@ -43,8 +43,10 @@ downstream from those measurements.
   and shown in the Library's Speed column, re-measured only when the build
   changes.
 - **Tunes with trials, not folklore** (⚡ Lab tab, or `--trial <id>
-  [spec|ub|kv]`): pick a model, pick campaigns — Measure, Bench,
-  speculation modes, prefill batch, KV precision — and Run. Each trial
+  [spec|ub|kv|load|dials]`): pick a model, pick campaigns — Measure,
+  Bench, speculation modes and their dials, prefill batch, KV precision,
+  load mode, the quality probe — and Run (with a Cancel that stops at
+  the next safe boundary, keeping partial results). Each trial
   races baseline vs candidates on fixed prompts, server-timed, including
   a **quality gate** (how much of a known-answer rewrite came back
   verbatim — no speed win survives degraded output). Strict rules pick
@@ -57,9 +59,17 @@ downstream from those measurements.
   four models (up to +118% generation on edit-heavy agent work, zero
   VRAM) while the folklore-favorite classic draft model was measured and
   rejected (on a single 24GB card it costs 96% of your context and is 6x
-  slower — `docs/spikes.md`). Measurements that collide with your own
-  coding session are skipped as "server busy", never recorded as model
-  failures.
+  slower — `docs/spikes.md`), and direct-IO loading measured 2x SLOWER
+  than the page cache it bypasses on a warm rotation. Measurements that
+  collide with your own coding session are skipped as "server busy",
+  never recorded as model failures.
+- **Judges quants and configs honestly**: a fixed eval battery and
+  N-shot tool-reliability probe make quality a number, so the Library
+  can say "prefer the Q4: +11% speed, +88% context (quality parity
+  measured)" — with a veto when a faster config measurably answers
+  worse. A cache-effectiveness monitor mines your real sessions'
+  prompt-token reuse and flags the hidden vision/cache-reuse tradeoff,
+  which is one ⚙ checkbox to decide per model.
 - **Remembers every measurement** (history.jsonl): each context measure
   and bench result is journaled with its llama.cpp build — hover the
   Measured ctx or Speed cells for the trail, so "what did that rebuild
