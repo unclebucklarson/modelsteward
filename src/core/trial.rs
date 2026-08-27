@@ -295,9 +295,18 @@ pub fn near_misses(
         else {
             continue;
         };
-        if improvement(goal, b_primary, p) < 1.10 {
+        let imp = improvement(goal, b_primary, p);
+        if imp < 1.10 {
             continue; // never beat the goal — not interesting
         }
+        // Mirror the verdict's magnitude-scaled floors exactly.
+        let (speed_floor, ctx_floor) = if imp >= 2.0 {
+            (0.90, 0.90)
+        } else if imp >= 1.25 {
+            (0.95, 0.97)
+        } else {
+            (0.97, 0.98)
+        };
         let mut costs = Vec::new();
         if let (Some(bf), Some(cf)) = (baseline.fidelity, r.fidelity)
             && cf < bf - 0.05
@@ -310,19 +319,19 @@ pub fn near_misses(
                 cf * 100.0
             ));
         }
-        if novel < b_novel * 0.97 {
+        if novel < b_novel * speed_floor {
             costs.push(format!(
                 "{:.0}% of novel-code speed ({b_novel:.0} → {novel:.0} t/s)",
                 (1.0 - novel / b_novel) * 100.0
             ));
         }
-        if rewrite < b_rewrite * 0.97 {
+        if rewrite < b_rewrite * speed_floor {
             costs.push(format!(
                 "{:.0}% of rewrite speed ({b_rewrite:.0} → {rewrite:.0} t/s)",
                 (1.0 - rewrite / b_rewrite) * 100.0
             ));
         }
-        if (ctx as f64) < b_ctx as f64 * 0.98 {
+        if (ctx as f64) < b_ctx as f64 * ctx_floor {
             costs.push(format!(
                 "{:.0}% of context ({b_ctx} → {ctx})",
                 (1.0 - ctx as f64 / b_ctx as f64) * 100.0
@@ -365,6 +374,7 @@ pub fn verdict(
         };
     };
     let mut best: Option<(&String, f64)> = None;
+    let mut guard_rejected = 0usize;
     for (label, r) in candidates {
         if label == BASELINE {
             continue;
@@ -374,25 +384,31 @@ pub fn verdict(
         else {
             continue; // failed variants can't win
         };
-        if novel < b_novel * 0.97
-            || rewrite < b_rewrite * 0.97
-            || (ctx as f64) < b_ctx as f64 * 0.98
-        {
-            continue; // costs something baseline work can't spare
-        }
-        // The quality gate: measured output degradation disqualifies a
-        // candidate outright, no matter what it wins elsewhere.
-        if let (Some(bf), Some(cf)) = (baseline.fidelity, r.fidelity)
-            && cf < bf - 0.05
-        {
-            continue;
-        }
-        if improvement(goal, b_primary, p) < 1.10 {
+        let imp = improvement(goal, b_primary, p);
+        if imp < 1.10 {
             continue; // doesn't earn its keep
         }
-        if best.is_none_or(|(_, p0)| {
-            improvement(goal, b_primary, p) > improvement(goal, b_primary, p0)
-        }) {
+        // Guards SCALE with the size of the win (80B lesson: a fixed 3%
+        // speed guard — inside run-to-run noise — vetoed a 64x context
+        // restoration). A modest win spends nothing; a ≥25% win may spend
+        // up to 5% on speed; a ≥2x win up to 10%. The fidelity gate NEVER
+        // relaxes — quality is not a currency.
+        let (speed_floor, ctx_floor) = if imp >= 2.0 {
+            (0.90, 0.90)
+        } else if imp >= 1.25 {
+            (0.95, 0.97)
+        } else {
+            (0.97, 0.98)
+        };
+        let guarded = novel < b_novel * speed_floor
+            || rewrite < b_rewrite * speed_floor
+            || (ctx as f64) < b_ctx as f64 * ctx_floor
+            || matches!((baseline.fidelity, r.fidelity), (Some(bf), Some(cf)) if cf < bf - 0.05);
+        if guarded {
+            guard_rejected += 1;
+            continue;
+        }
+        if best.is_none_or(|(_, p0)| imp > improvement(goal, b_primary, p0)) {
             best = Some((label, p));
         }
     }
@@ -415,6 +431,14 @@ pub fn verdict(
                 fmt_val(p),
                 fmt_val(b_primary),
                 (improvement(goal, b_primary, p) - 1.0) * 100.0
+            ),
+        },
+        None if guard_rejected > 0 => Verdict {
+            winner: None,
+            reason: format!(
+                "{guard_rejected} candidate(s) beat baseline on {metric} but paid too \
+                 much elsewhere — no clean winner; the tradeoffs and their numbers are \
+                 listed below, and the choice is yours"
             ),
         },
         None => Verdict {
@@ -571,12 +595,12 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
                  change must earn to be worth carrying.",
                 pct(p, b_p)
             ));
-        } else if novel < b_novel * 0.97 || rewrite < b_rewrite * 0.97
-            || (ctx as f64) < b_ctx as f64 * 0.98
-        {
+        } else if let Some(nm) = report.near_misses.iter().find(|nm| &nm.label == label) {
             out.push(format!(
-                "{label} beat the goal but paid for it elsewhere — that tradeoff is offered \
-                 as a separate choice rather than silently picked."
+                "{label} beat the goal — {} — but costs {}. That tradeoff is offered as \
+                 a button, not silently picked; for a win this size it is often worth \
+                 taking.",
+                nm.gain, nm.cost
             ));
         } else {
             out.push(format!(
@@ -625,7 +649,7 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
     // Context framing for the window this config affords.
     if b_ctx < 2 * crate::core::rows::AGENT_MIN_CTX {
         out.push(format!(
-            "Separate observation: this config settles at {b_ctx} tokens of context — \
+            "Separate observation: the BASELINE config settles at {b_ctx} tokens of context — \
              above the ~{} floor where agent work gets painful, but modest. Think \"fast \
              helper\", not \"whole repo in the window\".",
             crate::core::rows::AGENT_MIN_CTX
@@ -1212,6 +1236,36 @@ mod tests {
         let nm = near_misses(Goal::Context, &base, &c2);
         assert_eq!(nm.len(), 1);
         assert!(nm[0].cost.contains("QUALITY"), "{}", nm[0].cost);
+    }
+
+    #[test]
+    fn massive_wins_relax_speed_guards_but_never_fidelity() {
+        // The live 80B case: cpu-moe restored context 4096 → 262144 (64x)
+        // while novel speed dipped ~4% — inside run-to-run noise. A fixed
+        // 3% guard vetoed it; the scaled guard must crown it.
+        let mk = |novel: f64, ctx: u64, fid: f64| {
+            let mut t = r(novel, 39.6, ctx);
+            t.pp_prefill = Some(250.0);
+            t.fidelity = Some(fid);
+            t
+        };
+        let base = mk(41.5, 4096, 1.0);
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("cpu-moe".to_string(), mk(39.9, 262_144, 1.0));
+        let v = verdict(Goal::Context, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("cpu-moe"), "{}", v.reason);
+        // And it is no longer double-listed as a near-miss.
+        assert!(near_misses(Goal::Context, &base, &c).is_empty());
+        // A real speed collapse still fails even the widest floor…
+        let mut c2 = std::collections::BTreeMap::new();
+        c2.insert("cpu-moe-t24".to_string(), mk(23.0, 262_144, 1.0));
+        assert_eq!(verdict(Goal::Context, &base, &c2).winner, None);
+        // …and fidelity never relaxes, no matter the win.
+        let mut c3 = std::collections::BTreeMap::new();
+        c3.insert("cheat".to_string(), mk(41.0, 262_144, 0.80));
+        let v3 = verdict(Goal::Context, &base, &c3);
+        assert_eq!(v3.winner, None);
+        assert!(v3.reason.contains("paid too much elsewhere"), "{}", v3.reason);
     }
 
     #[test]
