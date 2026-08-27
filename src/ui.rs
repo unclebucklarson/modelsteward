@@ -1664,8 +1664,37 @@ impl App {
                     ));
                 }
                 ui.add_space(6.0);
+                // Which campaigns actually apply to THIS model — the same
+                // detection the advice column uses, offered as a one-click
+                // selection (user request: guidance, not guesswork).
+                let sel_row = self.rows.iter().find(|r| {
+                    r.router_id.as_deref() == Some(id.as_str())
+                });
+                let is_moe_over_vram = sel_row.is_some_and(|r| {
+                    rows::looks_moe(None, &r.display)
+                        && r.size_bytes / (1024 * 1024) > self.hardware().vram_mib
+                });
+                let has_spec_kept =
+                    !trial::applied_keys(&self.cfg, &id, "spec").is_empty();
                 ui.horizontal(|ui| {
                     ui.strong("Campaigns");
+                    if ui
+                        .small_button("select relevant")
+                        .on_hover_text(
+                            "Checks the campaigns that apply to this model: MoE offload                              only for MoE models bigger than VRAM; speculation dials only                              once a speculation mode is kept; the core set for everything.",
+                        )
+                        .clicked()
+                    {
+                        self.lab_measure = true;
+                        self.lab_bench = true;
+                        self.lab_spec = true;
+                        self.lab_ub = true;
+                        self.lab_kv = true;
+                        self.lab_quality = true;
+                        self.lab_load = true;
+                        self.lab_dials = has_spec_kept;
+                        self.lab_moe = is_moe_over_vram;
+                    }
                     if ui.small_button("select all").clicked() {
                         self.lab_measure = true;
                         self.lab_bench = true;
@@ -1717,12 +1746,22 @@ impl App {
                 ui.checkbox(
                     &mut self.lab_dials,
                     "Speculation-dial trial (ngram lookup/draft lengths, ~12 min)",
-                );
+                )
+                .on_hover_text(if has_spec_kept {
+                    "Tunes the dials of the speculation mode this model has kept."
+                } else {
+                    "Applies AFTER a speculation mode is kept — run the Speculation                      trial first and Keep a winner, then tune its dials."
+                });
                 ui.checkbox(
                     &mut self.lab_moe,
                     "MoE-offload trial (--cpu-moe + thread counts — for MoE models \
                      bigger than VRAM, ~15 min)",
-                );
+                )
+                .on_hover_text(if is_moe_over_vram {
+                    "THIS model's headline trial: bigger than your VRAM and MoE —                      experts in RAM can beat default placement dramatically (an 80B                      A3B ran at full 262k context on a 24GB card)."
+                } else {
+                    "Only applies to MoE models bigger than your VRAM — this model                      fits (or is dense), so --cpu-moe would only slow it down."
+                });
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench

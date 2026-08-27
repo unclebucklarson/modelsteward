@@ -12,6 +12,13 @@ downstream from those measurements.
 
 ## What it does
 
+- **Runs models bigger than your GPU.** The headline nobody tells
+  novices: a Mixture-of-Experts model several times your VRAM can run
+  *well* with experts in system RAM and attention on the GPU — measured
+  here, an 80B A3B coder hit its full 262,144-token context at ~40
+  tokens/sec on a single 24GB card, 100% quality-gate fidelity. The
+  Library flags oversized MoE models automatically and the Lab's
+  MoE-offload trial finds (and applies) the placement that works.
 - **Discovers** your llama.cpp installations (version, backends, which build
   can actually see your GPUs) and every GGUF on the system: your own
   directories ("shelf"), Ollama's blob store (blobs are raw GGUFs served

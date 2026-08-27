@@ -118,6 +118,12 @@ documentation and simulated tests, not yet validated on AMD hardware; and
 it is a personal-scale project — one machine, one primary user — not yet
 hardened by a wider install base.
 
+The lab's most striking demonstration: models far larger than the GPU
+are usable — an 80-billion-parameter mixture-of-experts coding model ran
+at its full 262k context near 40 tokens/sec on a single consumer 24GB
+card, with expert weights in system RAM and placement chosen by
+measurement rather than folklore.
+
 The performance lab is delivering: every servable model carries a
 measured speed baseline, and the generalized trial harness A/Bs any
 config change with a measured verdict — winners apply in one click,
