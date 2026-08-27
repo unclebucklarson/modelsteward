@@ -1001,6 +1001,7 @@ mod tests {
             router::ModelOverrides {
                 cache_type_kv: Some("q8_0".into()),
                 ctx: None,
+                no_mmproj: false,
                 extra: vec![
                     ("spec-type".into(), "ngram-simple".into()),
                     ("ub".into(), "1024".into()),

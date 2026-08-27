@@ -230,6 +230,7 @@ pub fn write_preset(
         // Feature keys ride along AFTER user overrides so they survive them
         // (a user override shouldn't silently strip a model's vision half).
         if let Some(proj) = &m.mmproj
+            && !ov.no_mmproj
             && !ov.extra.iter().any(|(k, _)| k == "mmproj")
         {
             ov.extra.push(("mmproj".into(), proj.display().to_string()));

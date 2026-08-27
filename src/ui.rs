@@ -186,6 +186,10 @@ struct OverrideEditor {
     /// The optimized context baseline: what --fit measured on this machine
     /// (None = not measured yet → auto).
     optimized_ctx: Option<u64>,
+    /// This model has a vision projector available on disk.
+    has_mmproj: bool,
+    /// User chose to serve WITHOUT it (restores cache-reuse).
+    no_mmproj: bool,
 }
 
 impl App {
@@ -677,6 +681,17 @@ impl App {
             RowAction::EditOverrides(id) => {
                 let ov = self.cfg.overrides.get(&id).cloned().unwrap_or_default();
                 let optimized_ctx = self.measurements.get(&id).and_then(|m| m.n_ctx);
+                // Vision toggle only shows when a projector exists to skip;
+                // r.vision reflects a paired mmproj (or an already-active
+                // no_mmproj override, in which case the row shows no badge
+                // but the projector is still on disk — check both).
+                let has_mmproj = self
+                    .rows
+                    .iter()
+                    .find(|r| r.router_id.as_deref() == Some(id.as_str()))
+                    .map(|r| r.vision)
+                    .unwrap_or(false)
+                    || ov.no_mmproj;
                 // Show effective values: the override where set, else the
                 // optimized default — the dialog always tells the truth
                 // about what the model will get.
@@ -691,6 +706,8 @@ impl App {
                         .cache_type_kv
                         .clone()
                         .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string()),
+                    has_mmproj,
+                    no_mmproj: ov.no_mmproj,
                     extra_text: ov
                         .extra
                         .iter()
@@ -1556,6 +1573,13 @@ impl App {
                     ui.weak("Select a model on the left.");
                     return;
                 };
+                // Everything below scrolls: campaigns grow, results tables
+                // grow, and the user shouldn't have to resize the window
+                // (user request 2026-08-27).
+                egui::ScrollArea::vertical()
+                    .id_salt("lab-detail")
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
                 ui.strong(&id);
                 if let Some(m) = self.measurements.get(&id) {
                     let speed = match (m.pp_tps, m.tg_tps) {
@@ -1758,6 +1782,7 @@ impl App {
                         ui.label(format!("{b} · {what}"));
                     }
                 }
+                }); // lab-detail scroll
             });
         });
         if run_clicked {
@@ -2402,6 +2427,19 @@ impl App {
                     });
                     ui.end_row();
                 });
+                if ed.has_mmproj {
+                    let mut with_vision = !ed.no_mmproj;
+                    ui.checkbox(&mut with_vision, "Serve with vision (mmproj)")
+                        .on_hover_text(
+                            "Vision has a hidden cost: llama.cpp disables prompt-cache \
+                             reuse for multimodal serving, so every agent turn \
+                             reprocesses its full prompt. Uncheck to serve text-only and \
+                             get cache-reuse back — the projector stays on disk and one \
+                             check restores vision. OpenCode's image modality follows \
+                             automatically either way.",
+                        );
+                    ed.no_mmproj = !with_vision;
+                }
                 ui.label("Extra llama-server flags (key = value, one per line):");
                 ui.add(
                     egui::TextEdit::multiline(&mut ed.extra_text)
@@ -2429,6 +2467,7 @@ impl App {
                             .unwrap_or_default();
                         ed.kv_text = router::DEFAULT_KV_TYPE.to_string();
                         ed.extra_text.clear();
+                        ed.no_mmproj = false;
                     }
                     if ui.button("Cancel").clicked() {
                         cancel = true;
@@ -2472,6 +2511,7 @@ impl App {
                 cache_type_kv: kv,
                 ctx: ctx_val,
                 extra,
+                no_mmproj: ed.no_mmproj,
             };
             if ov == router::ModelOverrides::default() {
                 self.cfg.overrides.remove(&ed.id);

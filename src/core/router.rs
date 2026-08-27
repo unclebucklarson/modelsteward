@@ -29,6 +29,7 @@ pub struct RouterConfig {
 /// Per-model knobs the app exposes; everything unset inherits `[*]` or
 /// llama-server's own defaults (notably `--fit on` and `-ngl auto`).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ModelOverrides {
     /// KV cache type; `None` inherits the global default (q8_0).
     pub cache_type_kv: Option<String>,
@@ -36,6 +37,11 @@ pub struct ModelOverrides {
     pub ctx: Option<u64>,
     /// Extra raw `key = value` INI lines for anything we don't model yet.
     pub extra: Vec<(String, String)>,
+    /// Serve WITHOUT the vision projector even though one exists on disk
+    /// (user toggle in ⚙): llama.cpp disables cache-reuse for multimodal
+    /// serving, so text-only work pays a real prefill cost for unused
+    /// vision. Off by default — vision serves when the file is there.
+    pub no_mmproj: bool,
 }
 
 /// The KV cache type the generated preset's `[*]` section applies to every
@@ -950,6 +956,7 @@ mod tests {
                     cache_type_kv: Some("f16".into()),
                     ctx: Some(16384),
                     extra: vec![("fit-target".into(), "2048".into())],
+                    ..Default::default()
                 },
             ),
         ];
