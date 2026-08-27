@@ -191,11 +191,23 @@ struct DiagnosisView {
 /// Edit buffers for one model's preset overrides. Fields show EFFECTIVE
 /// values (override if set, else the optimized default); on save, anything
 /// equal to optimized is stored as "no override" so it keeps auto-adapting.
+/// A knob promoted out of the free-form "extra flags" box into its own
+/// field (M8 #9): proven trial targets show their measured optimum;
+/// sampling defaults are config surface only (never a trial target —
+/// agents override them per request).
+struct PromotedField {
+    key: &'static str,
+    label: &'static str,
+    text: String,
+    hint: String,
+}
+
 struct OverrideEditor {
     id: String,
     ctx_text: String,
     kv_text: String,
     extra_text: String,
+    promoted: Vec<PromotedField>,
     /// The optimized context baseline: what --fit measured on this machine
     /// (None = not measured yet → auto).
     optimized_ctx: Option<u64>,
@@ -761,9 +773,63 @@ impl App {
                     .map(|r| r.vision)
                     .unwrap_or(false)
                     || ov.no_mmproj;
+                // Promoted knobs: what THIS model's trials measured, shown
+                // beside the field (empty = not pinned, keeps the default).
+                let measured = |menu: &str, untrialed: &str| -> String {
+                    match self.trials.get(&id).and_then(|t| trial::stored_report(menu, t)) {
+                        Some(r) => match &r.verdict.winner {
+                            Some(w) => format!("measured best: {w}"),
+                            None => "measured: baseline wins here".into(),
+                        },
+                        None => untrialed.into(),
+                    }
+                };
+                let sampling_hint =
+                    "default for clients that don't send their own (agents always do)";
+                let mut promoted = vec![
+                    PromotedField {
+                        key: "spec-type",
+                        label: "Speculation",
+                        text: String::new(),
+                        hint: measured("spec", "not trialed yet — ⚡ Lab races the ngram modes"),
+                    },
+                    PromotedField {
+                        key: "ubatch-size",
+                        label: "Prefill batch (-ub)",
+                        text: String::new(),
+                        hint: measured("ub", "default 512 — ⚡ Lab races 1024/2048"),
+                    },
+                    PromotedField {
+                        key: "temp",
+                        label: "temp",
+                        text: String::new(),
+                        hint: sampling_hint.into(),
+                    },
+                    PromotedField {
+                        key: "top-k",
+                        label: "top-k",
+                        text: String::new(),
+                        hint: sampling_hint.into(),
+                    },
+                    PromotedField {
+                        key: "top-p",
+                        label: "top-p",
+                        text: String::new(),
+                        hint: sampling_hint.into(),
+                    },
+                ];
                 // Show effective values: the override where set, else the
                 // optimized default — the dialog always tells the truth
-                // about what the model will get.
+                // about what the model will get. Promoted keys leave the
+                // free-form box and land in their own fields.
+                let mut extra_rest: Vec<String> = Vec::new();
+                for (k, v) in &ov.extra {
+                    if let Some(f) = promoted.iter_mut().find(|f| f.key == k.as_str()) {
+                        f.text = v.clone();
+                    } else {
+                        extra_rest.push(format!("{k} = {v}"));
+                    }
+                }
                 self.override_editor = Some(OverrideEditor {
                     id,
                     ctx_text: ov
@@ -777,12 +843,8 @@ impl App {
                         .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string()),
                     has_mmproj,
                     no_mmproj: ov.no_mmproj,
-                    extra_text: ov
-                        .extra
-                        .iter()
-                        .map(|(k, v)| format!("{k} = {v}"))
-                        .collect::<Vec<_>>()
-                        .join("\n"),
+                    extra_text: extra_rest.join("\n"),
+                    promoted,
                     optimized_ctx,
                 });
             }
@@ -2090,6 +2152,26 @@ impl App {
                 }
             }
         }
+        // What the last rebuild actually did, measured — the journal's
+        // build-over-build advisory (M8 #5). Confounded comparisons
+        // (config changed between builds) are excluded by construction.
+        if let Some(line) = history::build_advisory(&self.history) {
+            let regressed = line.contains("worst:");
+            if regressed {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!("Rebuild scorecard: {line}"),
+                )
+            } else {
+                ui.weak(format!("Rebuild scorecard: {line}"))
+            }
+            .on_hover_text(
+                "Measured from your history journal: each model's newest numbers \
+                 on the current build vs the build before it. Context deltas only \
+                 compare identical configs; generation deltas come from llama-bench \
+                 baselines. Re-measure/re-bench after a rebuild to feed this.",
+            );
+        }
         let state = self.router_state.clone();
         match &state {
             None => {
@@ -2648,6 +2730,34 @@ impl App {
                         ));
                     });
                     ui.end_row();
+                    for f in ed
+                        .promoted
+                        .iter_mut()
+                        .filter(|f| matches!(f.key, "spec-type" | "ubatch-size"))
+                    {
+                        ui.label(f.label);
+                        ui.horizontal(|ui| {
+                            ui.text_edit_singleline(&mut f.text);
+                            ui.small(&f.hint);
+                        });
+                        ui.end_row();
+                    }
+                    ui.label("Sampling defaults");
+                    ui.horizontal(|ui| {
+                        for f in ed
+                            .promoted
+                            .iter_mut()
+                            .filter(|f| matches!(f.key, "temp" | "top-k" | "top-p"))
+                        {
+                            ui.small(f.label);
+                            ui.add(
+                                egui::TextEdit::singleline(&mut f.text).desired_width(48.0),
+                            )
+                            .on_hover_text(&f.hint);
+                        }
+                        ui.small("(config only — never a trial target)");
+                    });
+                    ui.end_row();
                 });
                 if ed.has_mmproj {
                     let mut with_vision = !ed.no_mmproj;
@@ -2689,6 +2799,9 @@ impl App {
                             .unwrap_or_default();
                         ed.kv_text = router::DEFAULT_KV_TYPE.to_string();
                         ed.extra_text.clear();
+                        for f in &mut ed.promoted {
+                            f.text.clear();
+                        }
                         ed.no_mmproj = false;
                     }
                     if ui.button("Cancel").clicked() {
@@ -2727,7 +2840,17 @@ impl App {
                 let (k, v) = line
                     .split_once('=')
                     .ok_or_else(|| format!("not `key = value`: {line:?}"))?;
-                extra.push((k.trim().to_string(), v.trim().to_string()));
+                let k = k.trim();
+                if ed.promoted.iter().any(|f| f.key == k) {
+                    return Err(format!("{k} has its own field above — set it there"));
+                }
+                extra.push((k.to_string(), v.trim().to_string()));
+            }
+            for f in &ed.promoted {
+                let t = f.text.trim();
+                if !t.is_empty() {
+                    extra.push((f.key.to_string(), t.to_string()));
+                }
             }
             let ov = router::ModelOverrides {
                 cache_type_kv: kv,

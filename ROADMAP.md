@@ -389,27 +389,42 @@ measurements + journal. Then:
    llama.cpp for the latter. Snapshot files scale with conversation
    length (GBs); restore speed is disk-bound. Still open:
    `models_max = 2` topology advice.
-5. **Build advisory**: the history journal records build-over-build
-   lineage — surface "b10630: −9% ctx vs b10454" as advice, and (if the
-   app-managed-checkout idea lands) offer pinning the best-measured
-   build rather than blindly tracking master.
+5. **Build advisory**: ✔ DONE 2026-08-27 — `history::build_advisory`
+   compares each model's newest numbers on the current build vs the
+   build before it (context only under identical args fingerprints —
+   config changes between builds would confound it; generation from
+   llama-bench baselines, config-free). Surfaced as the "Rebuild
+   scorecard" line on the Server tab (warn-colored when a model lost
+   ≥5% context) and atop the findings report's history section. Still
+   open: pinning the best-measured build (waits on the
+   app-managed-checkout decision).
 6. **Speculation-dial trials** (2026-08-26 knob review): the adopted
    ngram modes have untouched dials (`--spec-draft-p-min`, draft-length)
    — sweep them as a trial menu on top of the kept winners; the likeliest
    source of further free tokens/sec.
-7. **FA-engaged check** (Advisor): verify FlashAttention actually engaged
-   per model by mining the load log — a check, not a knob (`-fa auto`
-   already chooses correctly; forcing it is only ever worse).
+7. **FA-engaged check** (Advisor): PARKED 2026-08-27 with evidence —
+   the premise fails: router-mode child servers filter llama internals
+   below warning level out of router.log (verified on a 1.1MB live log:
+   zero `flash_attn`/`llama_context` lines; only srv/slot/cmn I-lines
+   survive). Mining can't see what isn't logged, and raising child
+   verbosity fleet-wide would flood the log for a check whose expected
+   answer is "fine" (`-fa auto` chooses correctly upstream). Revisit
+   only if llama-server grows an FA field in `/props` or a slot
+   endpoint.
 8. **cpu-moe trial folds in thread count**: ✔ DONE (t8/t24 sub-variants;
    the 80B proved t8 — P-cores only — and t24 cost 45%). v2 landed
    2026-08-27: partial offload via `--n-cpu-moe 40/32/24` — each layer's
    experts pulled back to the GPU is generation speed reclaimed; a step
    that over-commits VRAM fails its round honestly and the table says so.
-9. **⚙ field promotion**: proven knobs (spec-type, ubatch-size; later
-   cache-type-v) graduate from "extra flags" to first-class override
-   fields with their measured optimum shown; plus sampling DEFAULTS
-   (temp/top-k/top-p) for Connections clients that don't set their own —
-   config surface only, never a trial target.
+9. **⚙ field promotion**: ✔ DONE 2026-08-27 — spec-type and
+   ubatch-size have their own fields in the override dialog with this
+   model's measured optimum beside them (trial winner, "baseline wins
+   here", or a pointer at the Lab); temp/top-k/top-p sit in a compact
+   sampling-defaults row (config only, never a trial target — agents
+   send their own). Promoted keys typed into the free-form box are
+   rejected with a pointer at their field; storage is unchanged
+   (still ov.extra), so trial keeps interoperate. Later: cache-type-v
+   once the kv menu's winner deserves its own field.
 10. **cache-reuse sweep**: ✔ DONE 2026-08-27 — the `cache` Lab campaign
     races `--cache-reuse 0/1024` against the shipped 256, judged by the
     new agent-turn probe (a big prompt re-sent with a MIDDLE edit;

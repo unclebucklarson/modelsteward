@@ -109,6 +109,143 @@ fn prune(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One model's numbers on the current build vs the build before it —
+/// the journal answering "what did the last rebuild actually do here?".
+#[derive(Debug, Clone, PartialEq)]
+pub struct BuildDelta {
+    pub model: String,
+    pub prev_build: u64,
+    pub cur_build: u64,
+    /// (previous, current) measured context — only when both builds were
+    /// measured under the SAME args fingerprint (a config change between
+    /// builds would confound the comparison; those models are skipped).
+    pub ctx: Option<(u64, u64)>,
+    /// (previous, current) llama-bench tg t/s — config-independent
+    /// baselines, so no fingerprint gate.
+    pub tg: Option<(f64, f64)>,
+}
+
+/// Compare each model's newest numbers on the newest build in the journal
+/// against its newest numbers on the build seen just before it. Models
+/// measured on only one build produce nothing — advice never extrapolates.
+pub fn build_deltas(all: &[Entry]) -> Vec<BuildDelta> {
+    let cur_build = match all.iter().filter_map(|e| e.build).max() {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let mut models: Vec<&str> = all.iter().map(|e| e.model.as_str()).collect();
+    models.sort();
+    models.dedup();
+    let mut out = Vec::new();
+    for model in models {
+        let mine: Vec<&Entry> = all
+            .iter()
+            .filter(|e| e.model == model && e.build.is_some() && e.error.is_none())
+            .collect();
+        let prev_build = match mine
+            .iter()
+            .filter_map(|e| e.build)
+            .filter(|b| *b < cur_build)
+            .max()
+        {
+            Some(b) => b,
+            None => continue,
+        };
+        let latest = |build: u64, pick: &dyn Fn(&Entry) -> bool| -> Option<&Entry> {
+            mine.iter()
+                .filter(|e| e.build == Some(build) && pick(e))
+                .max_by_key(|e| e.when)
+                .copied()
+        };
+        let ctx = match (
+            latest(prev_build, &|e| e.n_ctx.is_some()),
+            latest(cur_build, &|e| e.n_ctx.is_some()),
+        ) {
+            (Some(p), Some(c)) if p.args_fp == c.args_fp && p.args_fp.is_some() => {
+                Some((p.n_ctx.unwrap(), c.n_ctx.unwrap()))
+            }
+            _ => None,
+        };
+        let tg = match (
+            latest(prev_build, &|e| e.tg_tps.is_some()),
+            latest(cur_build, &|e| e.tg_tps.is_some()),
+        ) {
+            (Some(p), Some(c)) => Some((p.tg_tps.unwrap(), c.tg_tps.unwrap())),
+            _ => None,
+        };
+        if ctx.is_some() || tg.is_some() {
+            out.push(BuildDelta {
+                model: model.to_string(),
+                prev_build,
+                cur_build,
+                ctx,
+                tg,
+            });
+        }
+    }
+    out
+}
+
+/// The fleet-level one-liner for the Server tab and findings report:
+/// what the newest build cost or bought vs the one before, averaged over
+/// the models measured on both. None until two builds share evidence.
+pub fn build_advisory(all: &[Entry]) -> Option<String> {
+    let deltas = build_deltas(all);
+    let (mut ctx_pct, mut tg_pct) = (Vec::new(), Vec::new());
+    for d in &deltas {
+        if let Some((p, c)) = d.ctx
+            && p > 0
+        {
+            ctx_pct.push((c as f64 / p as f64 - 1.0) * 100.0);
+        }
+        if let Some((p, c)) = d.tg
+            && p > 0.0
+        {
+            tg_pct.push((c / p - 1.0) * 100.0);
+        }
+    }
+    if ctx_pct.is_empty() && tg_pct.is_empty() {
+        return None;
+    }
+    let d = &deltas[0];
+    let avg = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+    let mut parts = Vec::new();
+    if !ctx_pct.is_empty() {
+        parts.push(format!(
+            "context {:+.0}% avg ({} model{})",
+            avg(&ctx_pct),
+            ctx_pct.len(),
+            if ctx_pct.len() == 1 { "" } else { "s" }
+        ));
+    }
+    if !tg_pct.is_empty() {
+        parts.push(format!(
+            "generation {:+.0}% avg ({} model{})",
+            avg(&tg_pct),
+            tg_pct.len(),
+            if tg_pct.len() == 1 { "" } else { "s" }
+        ));
+    }
+    let worst = deltas
+        .iter()
+        .filter_map(|d| {
+            d.ctx
+                .filter(|(p, _)| *p > 0)
+                .map(|(p, c)| (d.model.clone(), (c as f64 / p as f64 - 1.0) * 100.0))
+        })
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .filter(|(_, pct)| *pct <= -5.0)
+        .map(|(m, pct)| format!("; worst: {m} {pct:+.0}% context"))
+        .unwrap_or_default();
+    Some(format!(
+        "b{} vs b{}: {}{}",
+        d.cur_build,
+        d.prev_build,
+        parts.join(", "),
+        worst
+    ))
+}
+
 /// A model's entries, newest first — what the hover trails render.
 pub fn for_model<'a>(all: &'a [Entry], model: &str) -> Vec<&'a Entry> {
     let mut v: Vec<&Entry> = all.iter().filter(|e| e.model == model).collect();
@@ -142,6 +279,45 @@ mod tests {
         assert_eq!(a.len(), 2);
         assert_eq!(a[0].when, 3, "newest first");
         assert_eq!(a[0].n_ctx, Some(90));
+    }
+
+    #[test]
+    fn build_deltas_compare_builds_not_configs() {
+        let mk = |when, model: &str, build, ctx: Option<u64>, tg: Option<f64>, fp: &str| Entry {
+            when,
+            model: model.into(),
+            build: Some(build),
+            n_ctx: ctx,
+            tg_tps: tg,
+            args_fp: if fp.is_empty() { None } else { Some(fp.into()) },
+            ..Default::default()
+        };
+        let all = vec![
+            // model "a": measured on both builds, same fingerprint — the
+            // 9% ctx regression b10630 really cost this machine.
+            mk(1, "a", 10_454, Some(128_000), None, "fp1"),
+            mk(2, "a", 10_630, Some(116_480), None, "fp1"),
+            // bench baselines: no fingerprint needed.
+            mk(3, "a", 10_454, None, Some(40.0), ""),
+            mk(4, "a", 10_630, None, Some(41.0), ""),
+            // model "b": config changed between builds — ctx delta is
+            // confounded and must be skipped.
+            mk(5, "b", 10_454, Some(100_000), None, "fp1"),
+            mk(6, "b", 10_630, Some(50_000), None, "fp2"),
+            // model "c": only ever on the new build — nothing to compare.
+            mk(7, "c", 10_630, Some(9000), None, "fp1"),
+        ];
+        let d = build_deltas(&all);
+        assert_eq!(d.len(), 1, "b confounded, c single-build: {d:?}");
+        assert_eq!(d[0].model, "a");
+        assert_eq!(d[0].ctx, Some((128_000, 116_480)));
+        assert_eq!(d[0].tg, Some((40.0, 41.0)));
+        let line = build_advisory(&all).unwrap();
+        assert!(line.contains("b10630 vs b10454"), "{line}");
+        assert!(line.contains("context -9% avg (1 model)"), "{line}");
+        assert!(line.contains("worst: a -9% context"), "{line}");
+        // One build only → no advisory (never extrapolate).
+        assert!(build_advisory(&all[6..]).is_none());
     }
 
     #[test]

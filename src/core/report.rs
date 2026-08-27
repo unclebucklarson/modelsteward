@@ -170,6 +170,10 @@ pub fn render(i: &ReportInputs) -> String {
 
     // Build-over-build shifts a maintainer would want to know about.
     push(&mut out, "\n## Build-over-build history".to_string());
+    if let Some(line) = history::build_advisory(i.history) {
+        push(&mut out, format!("**Rebuild scorecard:** {line}"));
+        push(&mut out, String::new());
+    }
     let mut any = false;
     let mut by_model: std::collections::BTreeMap<&str, Vec<&history::Entry>> = Default::default();
     for e in i.history {
