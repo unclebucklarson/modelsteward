@@ -814,11 +814,16 @@ pub fn run_trial(
         let attempt = (|| -> Result<TrialResult> {
             system::write_preset(&trial_cfg, &[])?;
             router::reload(cfg.port)?;
+            let t0 = std::time::Instant::now();
             let ctx = router::fetch_settled_ctx(cfg.port, model)?;
+            let load_secs = t0.elapsed().as_secs_f64();
             progress(format!(
-                "[{n}/{total}] {model} · {label}: loaded (ctx {ctx}), timing generations…"
+                "[{n}/{total}] {model} · {label}: loaded in {load_secs:.1}s (ctx {ctx}), \
+                 timing generations…"
             ));
-            measure_loaded(cfg.port, model, ctx)
+            let mut r = measure_loaded(cfg.port, model, ctx)?;
+            r.load_secs = Some(load_secs);
+            Ok(r)
         })();
         let _ = router::unload_model(cfg.port, model);
         router::wait_until_not_loaded(cfg.port, model, std::time::Duration::from_secs(30));
