@@ -466,6 +466,11 @@ pub struct Measurement {
     /// throughput without touching any model file, so this is the bench
     /// half's staleness signal.
     pub bench_build: Option<u64>,
+    /// Quality gate v2 (M8): fraction of the fixed eval battery answered
+    /// correctly, and N-shot tool-call reliability, measured on demand
+    /// via the Lab's Quality campaign.
+    pub eval_score: Option<f64>,
+    pub tool_reliability: Option<f64>,
 }
 
 impl Default for Measurement {
@@ -479,6 +484,8 @@ impl Default for Measurement {
             pp_tps: None,
             tg_tps: None,
             bench_build: None,
+            eval_score: None,
+            tool_reliability: None,
         }
     }
 }
@@ -545,6 +552,8 @@ pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) 
         m.pp_tps = old.pp_tps;
         m.tg_tps = old.tg_tps;
         m.bench_build = old.bench_build;
+        m.eval_score = old.eval_score;
+        m.tool_reliability = old.tool_reliability;
     }
     all.insert(id.to_string(), m);
 }

@@ -30,6 +30,10 @@
 //!                                        re-measure stale, sync, and report
 //!                                        what changed (unlocked / still
 //!                                        locked / context shifts)
+//!   modelsteward --quality <id> [shots]
+//!                                        eval battery + N-shot tool probe
+//!                                        (quality gate v2; feeds the
+//!                                        quant-choice advisor)
 //!   modelsteward --report            write the sanitized findings report
 //!                                        (hardware + build + measurements +
 //!                                        trial verdicts) for manual sharing
@@ -107,6 +111,7 @@ fn main() {
         Some("--bench") => bench_baselines(&cfg, &args[1..]),
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--verify-rebuild") => verify_rebuild(&cfg),
+        Some("--quality") => quality_cmd(&cfg, &args[1..]),
         Some("--report") => match modelsteward::core::report::generate(&cfg) {
             Ok(path) => {
                 println!("findings report written: {}", path.display());
@@ -126,7 +131,7 @@ fn main() {
         }),
         _ => {
             eprintln!(
-                "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --report | --advise | --install-service | --stop"
+                "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --quality <id> [shots] | --report | --advise | --install-service | --stop"
             );
             std::process::exit(2);
         }
@@ -192,6 +197,33 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     for para in trial::explain(&report) {
         println!("  {para}");
     }
+    Ok(())
+}
+
+/// Quality gate v2: eval battery + N-shot tool probe for one model.
+fn quality_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
+    let Some(model) = rest.first() else {
+        anyhow::bail!("--quality needs a model id");
+    };
+    let shots: u32 = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+    match router::status(&router::state_dir(), &system::router_config(cfg)) {
+        router::RouterState::Ours { .. } => {}
+        other => anyhow::bail!(
+            "quality probe needs our router on port {}; state is {other:?}",
+            cfg.port
+        ),
+    }
+    let score = modelsteward::core::quality::run_and_record(cfg, model, shots, &mut |l| {
+        println!("{l}")
+    })?;
+    println!(
+        "{model}: eval battery {:.0}% ({}/{}), tool-call reliability {:.0}% over {} shots",
+        score.eval_score * 100.0,
+        score.evals_passed,
+        score.evals_total,
+        score.tool_reliability * 100.0,
+        score.tool_shots
+    );
     Ok(())
 }
 

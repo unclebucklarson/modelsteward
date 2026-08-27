@@ -25,6 +25,8 @@ pub struct Entry {
     pub n_ctx: Option<u64>,
     pub pp_tps: Option<f64>,
     pub tg_tps: Option<f64>,
+    pub eval_score: Option<f64>,
+    pub tool_reliability: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -38,6 +40,8 @@ impl Default for Entry {
             n_ctx: None,
             pp_tps: None,
             tg_tps: None,
+            eval_score: None,
+            tool_reliability: None,
             error: None,
         }
     }

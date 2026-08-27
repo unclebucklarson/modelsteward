@@ -129,6 +129,7 @@ struct App {
     lab_spec: bool,
     lab_ub: bool,
     lab_kv: bool,
+    lab_quality: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
 }
@@ -147,6 +148,7 @@ enum AfterStart {
         spec: bool,
         ub: bool,
         kv: bool,
+        quality: bool,
     },
 }
 
@@ -203,6 +205,7 @@ impl App {
             lab_spec: true,
             lab_ub: false,
             lab_kv: false,
+            lab_quality: false,
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
@@ -512,7 +515,7 @@ impl App {
             }
             match action {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
-                AfterStart::Lab { id, measure, bench, spec, ub, kv } => {
+                AfterStart::Lab { id, measure, bench, spec, ub, kv, quality } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
                     // frees the GPU itself, each trial restores the preset.
@@ -541,6 +544,21 @@ impl App {
                     }
                     if kv {
                         trial_worker(&cfg, &id, "kv", tx);
+                    }
+                    if quality {
+                        let tx2 = tx.clone();
+                        let mut progress = move |line: String| {
+                            let _ = tx2.send(Msg::Progress(line));
+                        };
+                        if let Err(e) =
+                            crate::core::quality::run_and_record(&cfg, &id, 5, &mut progress)
+                        {
+                            let _ = tx.send(Msg::Error(format!("quality: {e:#}")));
+                            return;
+                        }
+                        let _ = tx.send(Msg::Measurements(router::read_measurements(
+                            &router::state_dir(),
+                        )));
                     }
                     let _ = tx.send(Msg::Finished(format!(
                         "Lab: campaigns for {id} complete"
@@ -1523,8 +1541,14 @@ impl App {
                         }
                         _ => ", speed not benched yet".into(),
                     };
+                    let qual = match (m.eval_score, m.tool_reliability) {
+                        (Some(e), Some(t)) => {
+                            format!(", evals {:.0}% / tools {:.0}%", e * 100.0, t * 100.0)
+                        }
+                        _ => String::new(),
+                    };
                     ui.label(format!(
-                        "Currently: ctx {}{speed}",
+                        "Currently: ctx {}{speed}{qual}",
                         m.n_ctx.map(|c| c.to_string()).unwrap_or_else(|| "unmeasured".into()),
                     ));
                 }
@@ -1547,12 +1571,17 @@ impl App {
                     &mut self.lab_kv,
                     "KV-precision trial (ctv q4_0 — more context if quality holds, ~6 min)",
                 );
+                ui.checkbox(
+                    &mut self.lab_quality,
+                    "Quality probe (eval battery + 5-shot tool calls, ~3-8 min)",
+                );
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
                     || self.lab_spec
                     || self.lab_ub
-                    || self.lab_kv;
+                    || self.lab_kv
+                    || self.lab_quality;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
                     .on_hover_text(
@@ -1709,6 +1738,7 @@ impl App {
                 spec: self.lab_spec,
                 ub: self.lab_ub,
                 kv: self.lab_kv,
+                quality: self.lab_quality,
             };
             self.run_or_offer_start(action);
         }
