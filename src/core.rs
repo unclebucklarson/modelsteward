@@ -3,6 +3,7 @@
 
 pub mod advisor;
 pub mod bench;
+pub mod cancel;
 pub mod diagnose;
 pub mod discover;
 pub mod evidence;

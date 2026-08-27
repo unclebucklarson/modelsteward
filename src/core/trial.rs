@@ -779,6 +779,7 @@ pub fn run_trial(
     model: &str,
     variants: &[Variant],
     goal: Goal,
+    cancel: &crate::core::cancel::CancelToken,
     progress: &mut dyn FnMut(String),
 ) -> Result<TrialReport> {
     let dir = router::state_dir();
@@ -863,6 +864,7 @@ pub fn run_trial(
     // On any bail (contention included), restore the real preset before
     // returning — a temp trial config must never outlive its run.
     let body = (|| -> Result<TrialReport> {
+        cancel.check()?;
         let baseline = round(1, BASELINE, &[], progress)?;
         all.entry(model.to_string())
             .or_default()
@@ -873,6 +875,7 @@ pub fn run_trial(
         // other menus stay in trials.json for display but can't win here.
         let mut raced = std::collections::BTreeMap::new();
         for (i, v) in variants.iter().enumerate() {
+            cancel.check()?;
             let r = round(i + 2, &v.label, &v.extra, progress)?;
             raced.insert(v.label.clone(), r.clone());
             all.entry(model.to_string())

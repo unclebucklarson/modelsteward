@@ -12,8 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, bench, diagnose, discover, evidence, history, ollama, opencode, router, rows,
-    settings, system, trial,
+    advisor, bench, cancel, diagnose, discover, evidence, history, ollama, opencode, router,
+    rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -125,6 +125,9 @@ struct App {
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
     cache_stats: Vec<evidence::ModelCacheStats>,
+    /// Token for the CURRENT long-running operation; Cancel flips it and
+    /// workers stop at their next safe boundary.
+    cancel_token: cancel::CancelToken,
     start_prompt: Option<AfterStart>,
     lab_selected: Option<String>,
     lab_measure: bool,
@@ -210,6 +213,7 @@ impl App {
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
             cache_stats: Vec::new(),
+            cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
             lab_selected: None,
             lab_measure: true,
@@ -415,12 +419,22 @@ impl App {
         } else {
             "benching new/stale models (speed)"
         };
+        let cancel_token = {
+            self.cancel_token = cancel::CancelToken::default();
+            self.cancel_token.clone()
+        };
         self.spawn(label, move |tx| {
             let tx2 = tx.clone();
             let mut progress = move |line: String| {
                 let _ = tx2.send(Msg::Progress(line));
             };
-            let _ = tx.send(match bench::run_baselines(&cfg, None, force, &mut progress) {
+            let _ = tx.send(match bench::run_baselines(
+                &cfg,
+                None,
+                force,
+                &cancel_token,
+                &mut progress,
+            ) {
                 Ok(0) => Msg::Finished("bench: nothing to do — all baselines current".into()),
                 Ok(n) => Msg::Finished(format!(
                     "benched {n} model(s) — Speed column updated (pp/tg tokens per second)"
@@ -531,6 +545,8 @@ impl App {
 
     fn dispatch(&mut self, action: AfterStart, start_first: bool) {
         let cfg = self.cfg.clone();
+        self.cancel_token = cancel::CancelToken::default();
+        let cancel_token = self.cancel_token.clone();
         let label = if start_first {
             format!("starting router, then: {}", action.describe())
         } else {
@@ -548,6 +564,7 @@ impl App {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
                     // frees the GPU itself, each trial restores the preset.
+                    let cancelled = || cancel_token.is_cancelled();
                     if measure && !measure_and_sync(&cfg, &id, false, false, tx) {
                         return; // reported; don't pile campaigns on a broken load
                     }
@@ -556,8 +573,13 @@ impl App {
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
                         };
-                        match bench::run_baselines(&cfg, Some(id.clone()), true, &mut progress)
-                        {
+                        match bench::run_baselines(
+                            &cfg,
+                            Some(id.clone()),
+                            true,
+                            &cancel_token,
+                            &mut progress,
+                        ) {
                             Ok(_) => {}
                             Err(e) => {
                                 let _ = tx.send(Msg::Error(format!("bench: {e:#}")));
@@ -566,28 +588,32 @@ impl App {
                         }
                     }
                     if spec {
-                        trial_worker(&cfg, &id, "spec", tx);
+                        trial_worker(&cfg, &id, "spec", &cancel_token, tx);
                     }
                     if ub {
-                        trial_worker(&cfg, &id, "ub", tx);
+                        trial_worker(&cfg, &id, "ub", &cancel_token, tx);
                     }
                     if kv {
-                        trial_worker(&cfg, &id, "kv", tx);
+                        trial_worker(&cfg, &id, "kv", &cancel_token, tx);
                     }
                     if load {
-                        trial_worker(&cfg, &id, "load", tx);
+                        trial_worker(&cfg, &id, "load", &cancel_token, tx);
                     }
                     if dials {
-                        trial_worker(&cfg, &id, "dials", tx);
+                        trial_worker(&cfg, &id, "dials", &cancel_token, tx);
                     }
                     if quality {
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
                         };
-                        if let Err(e) =
-                            crate::core::quality::run_and_record(&cfg, &id, 5, &mut progress)
-                        {
+                        if let Err(e) = crate::core::quality::run_and_record(
+                            &cfg,
+                            &id,
+                            5,
+                            &cancel_token,
+                            &mut progress,
+                        ) {
                             let _ = tx.send(Msg::Error(format!("quality: {e:#}")));
                             return;
                         }
@@ -595,9 +621,11 @@ impl App {
                             &router::state_dir(),
                         )));
                     }
-                    let _ = tx.send(Msg::Finished(format!(
-                        "Lab: campaigns for {id} complete"
-                    )));
+                    let _ = tx.send(Msg::Finished(if cancelled() {
+                        format!("Lab: campaigns for {id} stopped by Cancel — partial results kept")
+                    } else {
+                        format!("Lab: campaigns for {id} complete")
+                    }));
                 }
             }
         });
@@ -2812,6 +2840,19 @@ impl App {
             if let Some(b) = &self.busy {
                 ui.spinner();
                 ui.label(b);
+                if self.cancel_token.is_cancelled() {
+                    ui.weak("cancelling — stopping at the next safe point…");
+                } else if ui
+                    .small_button("✖ Cancel")
+                    .on_hover_text(
+                        "Stops the running measurement at its next safe boundary \
+                         (between rounds/models/items) — cleanup still runs, partial \
+                         results are kept, and your config is restored.",
+                    )
+                    .clicked()
+                {
+                    self.cancel_token.cancel();
+                }
             }
         });
     }
@@ -2996,7 +3037,13 @@ fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
 }
 
 /// One trial-menu run for one model, off-thread.
-fn trial_worker(cfg: &settings::AppConfig, id: &str, menu: &str, tx: &Sender<Msg>) {
+fn trial_worker(
+    cfg: &settings::AppConfig,
+    id: &str,
+    menu: &str,
+    cancel_token: &cancel::CancelToken,
+    tx: &Sender<Msg>,
+) {
     let Some((variants, goal)) = trial::menu(menu) else {
         let _ = tx.send(Msg::Error(format!("unknown trial menu {menu:?}")));
         return;
@@ -3005,7 +3052,7 @@ fn trial_worker(cfg: &settings::AppConfig, id: &str, menu: &str, tx: &Sender<Msg
     let mut progress = move |line: String| {
         let _ = tx2.send(Msg::Progress(line));
     };
-    let _ = match trial::run_trial(cfg, id, &variants, goal, &mut progress) {
+    let _ = match trial::run_trial(cfg, id, &variants, goal, cancel_token, &mut progress) {
         Ok(report) => tx.send(Msg::TrialDone {
             model: id.to_string(),
             menu: menu.to_string(),

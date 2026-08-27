@@ -41,7 +41,7 @@
 //!
 //! Ports default to the configured value (~/.config/modelsteward/config.json).
 
-use modelsteward::core::{advisor, bench, discover, opencode, router, settings, system, trial};
+use modelsteward::core::{advisor, bench, cancel, discover, opencode, router, settings, system, trial};
 use std::path::PathBuf;
 
 fn main() {
@@ -148,7 +148,9 @@ fn main() {
 fn bench_baselines(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let force = rest.iter().any(|a| a == "force");
     let target = rest.iter().find(|a| *a != "force").cloned();
-    let n = bench::run_baselines(cfg, target, force, &mut |line| println!("{line}"))?;
+    let n = bench::run_baselines(cfg, target, force, &cancel::CancelToken::default(), &mut |line| {
+        println!("{line}")
+    })?;
     if n > 0 {
         println!("{n} model(s) benched — Speed column and measurements.json updated");
     }
@@ -180,7 +182,14 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         sync(cfg)?;
         return Ok(());
     }
-    let report = trial::run_trial(cfg, model, &variants, goal, &mut |line| println!("{line}"))?;
+    let report = trial::run_trial(
+        cfg,
+        model,
+        &variants,
+        goal,
+        &cancel::CancelToken::default(),
+        &mut |line| println!("{line}"),
+    )?;
     match &report.verdict.winner {
         Some(w) => println!(
             "verdict: {w} wins — apply with: modelsteward --trial {model} {menu_name} keep {w}"
@@ -213,9 +222,13 @@ fn quality_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()>
             cfg.port
         ),
     }
-    let score = modelsteward::core::quality::run_and_record(cfg, model, shots, &mut |l| {
-        println!("{l}")
-    })?;
+    let score = modelsteward::core::quality::run_and_record(
+        cfg,
+        model,
+        shots,
+        &cancel::CancelToken::default(),
+        &mut |l| println!("{l}"),
+    )?;
     println!(
         "{model}: eval battery {:.0}% ({}/{}), tool-call reliability {:.0}% over {} shots",
         score.eval_score * 100.0,

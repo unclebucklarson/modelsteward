@@ -148,12 +148,14 @@ pub fn run_quality(
     port: u16,
     model: &str,
     tool_shots: u32,
+    cancel: &crate::core::cancel::CancelToken,
     progress: &mut dyn FnMut(String),
 ) -> Result<QualityScore> {
     let battery = eval_battery();
     let total = battery.len() as u32;
     let mut passed = 0u32;
     for (i, item) in battery.iter().enumerate() {
+        cancel.check()?;
         let ok = ask(port, model, item.prompt)
             .map(|r| score_response(&item.check, &r))
             .unwrap_or(false);
@@ -169,6 +171,7 @@ pub fn run_quality(
     }
     let mut tool_ok = 0u32;
     for i in 0..tool_shots {
+        cancel.check()?;
         let ok = router::probe_tool_call(port, model).unwrap_or(false);
         if ok {
             tool_ok += 1;
@@ -195,12 +198,13 @@ pub fn run_and_record(
     cfg: &crate::core::settings::AppConfig,
     model: &str,
     tool_shots: u32,
+    cancel: &crate::core::cancel::CancelToken,
     progress: &mut dyn FnMut(String),
 ) -> Result<QualityScore> {
     use crate::core::{discover, history, system};
     progress(format!("quality {model}: loading…"));
     router::fetch_settled_ctx(cfg.port, model)?;
-    let score = run_quality(cfg.port, model, tool_shots, progress)?;
+    let score = run_quality(cfg.port, model, tool_shots, cancel, progress)?;
     let dir = router::state_dir();
     let mut all = router::read_measurements(&dir);
     let mut entry = all.get(model).cloned().unwrap_or_default();

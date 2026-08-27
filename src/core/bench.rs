@@ -99,6 +99,7 @@ pub fn run_baselines(
     cfg: &crate::core::settings::AppConfig,
     target: Option<String>,
     force: bool,
+    cancel: &crate::core::cancel::CancelToken,
     progress: &mut dyn FnMut(String),
 ) -> Result<usize> {
     use crate::core::{discover, library, router, rows, system};
@@ -180,6 +181,7 @@ pub fn run_baselines(
     let total = targets.len();
     let mut benched = 0;
     for (i, id) in targets.iter().enumerate() {
+        cancel.check()?;
         let n = i + 1;
         let file = by_id[id];
         let kv = cfg
