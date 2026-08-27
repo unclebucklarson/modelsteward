@@ -386,16 +386,23 @@ measurements + journal. Then:
 7. **FA-engaged check** (Advisor): verify FlashAttention actually engaged
    per model by mining the load log — a check, not a knob (`-fa auto`
    already chooses correctly; forcing it is only ever worse).
-8. **cpu-moe trial folds in thread count**: `n_threads` only matters once
-   expert weights live in RAM — it's a sub-variant of that trial, not a
-   standalone knob.
+8. **cpu-moe trial folds in thread count**: ✔ DONE (t8/t24 sub-variants;
+   the 80B proved t8 — P-cores only — and t24 cost 45%). v2 landed
+   2026-08-27: partial offload via `--n-cpu-moe 40/32/24` — each layer's
+   experts pulled back to the GPU is generation speed reclaimed; a step
+   that over-commits VRAM fails its round honestly and the table says so.
 9. **⚙ field promotion**: proven knobs (spec-type, ubatch-size; later
    cache-type-v) graduate from "extra flags" to first-class override
    fields with their measured optimum shown; plus sampling DEFAULTS
    (temp/top-k/top-p) for Connections clients that don't set their own —
    config surface only, never a trial target.
-10. **cache-reuse sweep**: confirm 256 is the right Tier A value once;
-    expected flat.
+10. **cache-reuse sweep**: ✔ DONE 2026-08-27 — the `cache` Lab campaign
+    races `--cache-reuse 0/1024` against the shipped 256, judged by the
+    new agent-turn probe (a big prompt re-sent with a MIDDLE edit;
+    second-turn prefill ms + %-served-from-cache recorded as the
+    `2nd-turn ms` column). Same probe powers the `vision` campaign,
+    which PRICES the multimodal cache tax the evidence miner found
+    (text-only vs with-projector, fair baseline forces vision back on).
 
 **Evaluated and REJECTED (2026-08-26 knob review, with reasoning — so
 they don't resurface):**

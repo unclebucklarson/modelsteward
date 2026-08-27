@@ -165,20 +165,31 @@ pub fn spec_dial_variants() -> Vec<Variant> {
 /// column. Speed and fidelity remain guards: a placement that pays for
 /// context with generation still gets caught. Thread count folds in
 /// here (threads only matter once experts live on CPU).
+///
+/// v2 adds PARTIAL offload: `--n-cpu-moe N` keeps only the first N
+/// layers' experts on CPU and gives the rest to the GPU — every layer
+/// pulled back is generation speed reclaimed, until VRAM runs out. The
+/// steps are absolute (big MoE models run 36–48 layers); one that
+/// over-commits VRAM fails its round and the table says so — that's
+/// data, not a bug.
 pub fn moe_variants() -> Vec<Variant> {
     let mk = |label: &str, extra: Vec<(&str, &str)>| Variant {
         label: label.into(),
-        extra: std::iter::once(("cpu-moe".to_string(), "true".to_string()))
-            .chain(extra.into_iter().map(|(k, v)| (k.to_string(), v.to_string())))
+        extra: extra
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         no_mmproj: None,
     };
     vec![
-        mk("cpu-moe", vec![]),
+        mk("cpu-moe", vec![("cpu-moe", "true")]),
         // P-cores only vs all threads: E-core scheduling can hurt or help
         // expert matmuls — measured, not assumed (i9-12900K: 8P+8E/24T).
-        mk("cpu-moe-t8", vec![("threads", "8")]),
-        mk("cpu-moe-t24", vec![("threads", "24")]),
+        mk("cpu-moe-t8", vec![("cpu-moe", "true"), ("threads", "8")]),
+        mk("cpu-moe-t24", vec![("cpu-moe", "true"), ("threads", "24")]),
+        mk("ncpu-moe-40", vec![("n-cpu-moe", "40")]),
+        mk("ncpu-moe-32", vec![("n-cpu-moe", "32")]),
+        mk("ncpu-moe-24", vec![("n-cpu-moe", "24")]),
     ]
 }
 

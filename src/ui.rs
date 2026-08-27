@@ -1774,8 +1774,8 @@ impl App {
                 });
                 ui.checkbox(
                     &mut self.lab_moe,
-                    "MoE-offload trial (--cpu-moe + thread counts — for MoE models \
-                     bigger than VRAM, ~15 min)",
+                    "MoE-offload trial (--cpu-moe, partial --n-cpu-moe + thread \
+                     counts — for MoE models bigger than VRAM, ~25 min)",
                 )
                 .on_hover_text(if is_moe_over_vram {
                     "THIS model's headline trial: bigger than your VRAM and MoE —                      experts in RAM can beat default placement dramatically (an 80B                      A3B ran at full 262k context on a 24GB card)."
