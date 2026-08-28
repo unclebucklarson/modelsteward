@@ -33,6 +33,12 @@ pub struct AppConfig {
     /// options, selectable for building; the active binary's checkout
     /// and the managed clone are always offered).
     pub checkouts: Vec<PathBuf>,
+    /// Autonomy for the managed checkout (user decision 2026-08-28):
+    /// when the daily freshness check finds a new release, BUILD and
+    /// ARCHIVE it automatically — but never pin it: what the router
+    /// serves changes only by explicit choice (the b10630 −9%-context
+    /// lesson, institutionalized). Default off.
+    pub managed_auto_build: bool,
 }
 
 impl Default for AppConfig {
@@ -49,6 +55,7 @@ impl Default for AppConfig {
             models_max: 1,
             overrides: Default::default(),
             checkouts: Vec::new(),
+            managed_auto_build: false,
         }
     }
 }

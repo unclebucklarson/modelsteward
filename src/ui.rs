@@ -136,6 +136,7 @@ struct App {
     /// binary's (rung 1 of the checkout ladder, user decision 2026-08-28).
     sel_checkout: Option<PathBuf>,
     archive_label: String,
+    managed_auto_edit: bool,
     show_advisor: bool,
     build_check: Option<advisor::BuildCheck>,
     backend_sel: Option<advisor::BackendSelection>,
@@ -295,6 +296,7 @@ impl App {
             managed_status: None,
             sel_checkout: None,
             archive_label: String::new(),
+            managed_auto_edit: false,
             show_advisor: false,
             build_check: None,
             backend_sel: None,
@@ -324,6 +326,7 @@ impl App {
             .unwrap_or_default();
         self.edit_ollama_port = self.cfg.ollama_port.to_string();
         self.edit_models_max = self.cfg.models_max.to_string();
+        self.managed_auto_edit = self.cfg.managed_auto_build;
     }
 
     fn log(&mut self, line: impl Into<String>) {
@@ -448,6 +451,46 @@ impl App {
                     let build = discover::build_of(&server);
                     let s = advisor::upstream_probe(&server, build);
                     advisor::write_upstream_status(&router::state_dir(), &s);
+                    // Managed autonomy (opt-in): a NEW release the archive
+                    // doesn't have yet gets built + archived here in the
+                    // poller thread — CPU-only, never touches serving.
+                    if cfg.managed_auto_build
+                        && managed::checkout_present()
+                        && let Some(up) = s.upstream_build
+                        && !managed::list_archives().iter().any(|a| a.build == Some(up))
+                    {
+                        // Own thread: a multi-minute cmake build must not
+                        // freeze the status poller. The daily stamp was
+                        // already written above, so this can't re-trigger.
+                        let tx2 = tx.clone();
+                        let server = server.clone();
+                        std::thread::spawn(move || {
+                            let tx3 = tx2.clone();
+                            let mut progress = move |line: String| {
+                                let _ =
+                                    tx3.send(Msg::Progress(format!("[auto-build] {line}")));
+                            };
+                            let measurements =
+                                router::read_measurements(&router::state_dir());
+                            let check =
+                                advisor::check(Some(server), build, &measurements, None);
+                            let sel = advisor::default_backends(&check);
+                            let result = (|| -> anyhow::Result<()> {
+                                managed::checkout_build(up, &mut progress)?;
+                                managed::build(&check, sel, &mut progress)?;
+                                managed::archive_build(up, &mut progress)?;
+                                Ok(())
+                            })();
+                            let _ = tx2.send(Msg::Managed(managed::status()));
+                            let _ = tx2.send(Msg::Progress(match result {
+                                Ok(()) => format!(
+                                    "[auto-build] b{up} built + archived — pin it in \
+                                     the Build Advisor when you want to serve it"
+                                ),
+                                Err(e) => format!("[auto-build] b{up} failed: {e:#}"),
+                            }));
+                        });
+                    }
                     let _ = tx.send(Msg::Upstream(s));
                 }
                 ctx.request_repaint();
@@ -2754,31 +2797,40 @@ impl App {
             && !scan.installs.is_empty()
         {
             ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.managed_auto_edit,
+                "Keep managed llama.cpp current (build + archive new releases \
+                 automatically; never changes what's served)",
+            )
+            .on_hover_text(
+                "When the daily upstream check finds a new bNNNN release and the \
+                 managed checkout exists, the app builds it in the background \
+                 (CPU-only work) and archives the binaries. Pinning — actually \
+                 serving a build — always stays your explicit click. Save to apply.",
+            );
+            ui.add_space(4.0);
             ui.strong("Detected llama-server installs");
             let installs = scan.installs.clone();
+            let picked = system::pick_server(&self.cfg).ok();
             for inst in &installs {
                 ui.horizontal(|ui| {
                     if ui.button("Use").clicked() {
                         self.edit_server_bin = inst.server_path.display().to_string();
                     }
-                    let build = inst
-                        .build
-                        .map(|b| format!("b{b}"))
-                        .unwrap_or_else(|| "?".into());
-                    let backends = if inst.backends.is_empty() {
-                        String::new()
+                    // Feature-alias naming (user idea 2026-08-28): the
+                    // build number plus the backends it was compiled with
+                    // IS the build's identity — b10672-cuda-vulkan.
+                    let alias = discover::install_alias(inst);
+                    let text = format!("{alias} — {}", inst.server_path.display());
+                    let is_current = picked.as_deref() == Some(inst.server_path.as_path());
+                    if is_current {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(0, 170, 0),
+                            format!("{text}   (current)"),
+                        );
                     } else {
-                        // cpu-<arch> variants are noise at a glance.
-                        let mut names: Vec<&str> = inst
-                            .backends
-                            .iter()
-                            .map(String::as_str)
-                            .filter(|b| !b.starts_with("cpu-"))
-                            .collect();
-                        names.dedup();
-                        format!(" [{}]", names.join(", "))
-                    };
-                    ui.label(format!("{build}{backends} — {}", inst.server_path.display()));
+                        ui.label(text);
+                    }
                 });
             }
         }
@@ -2868,6 +2920,7 @@ impl App {
             ollama_port,
             models_max,
             checkouts: self.cfg.checkouts.clone(),
+            managed_auto_build: self.managed_auto_edit,
             overrides: self.cfg.overrides.clone(),
         })
     }
@@ -3721,8 +3774,16 @@ impl App {
                                         .desired_width(160.0)
                                         .hint_text(
                                             check
-                                                .current_build
-                                                .map(|b| format!("b{b}-myvariant"))
+                                                .server_bin
+                                                .as_deref()
+                                                .map(|p| {
+                                                    let insts =
+                                                        discover::find_installs(&[p.to_path_buf()]);
+                                                    insts
+                                                        .first()
+                                                        .map(discover::install_alias)
+                                                        .unwrap_or_else(|| "label".into())
+                                                })
                                                 .unwrap_or_else(|| "label".into()),
                                         ),
                                 );

@@ -203,6 +203,28 @@ fn parse_version_output(out: &str) -> (Option<u64>, Option<String>, Option<Strin
 
 /// Backend names from `libggml-<backend>.so*` files next to the binary.
 /// "base" is plumbing, not a backend, and is excluded.
+/// The feature-alias for an install: build number + compiled backends,
+/// e.g. "b10672-cuda-vulkan" (user naming idea 2026-08-28) — enough to
+/// tell two same-number variant builds apart at a glance.
+pub fn install_alias(inst: &LlamaInstall) -> String {
+    let build = inst
+        .build
+        .map(|b| format!("b{b}"))
+        .unwrap_or_else(|| "b?".into());
+    let mut names: Vec<&str> = inst
+        .backends
+        .iter()
+        .map(String::as_str)
+        .filter(|b| !b.starts_with("cpu"))
+        .collect();
+    names.dedup();
+    if names.is_empty() {
+        build
+    } else {
+        format!("{build}-{}", names.join("-"))
+    }
+}
+
 fn sibling_backends(server: &Path) -> Vec<String> {
     let Some(dir) = server.parent() else {
         return Vec::new();
