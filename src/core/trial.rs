@@ -197,11 +197,14 @@ pub fn moe_variants() -> Vec<Variant> {
     ]
 }
 
-/// The vision menu: serve WITHOUT the projector. llama.cpp disables
-/// prompt-cache reuse for multimodal serving, so vision quietly costs
-/// every agent turn a full reprocess — this trial PRICES that cost with
-/// the agent-turn probe instead of leaving it an orange warning. Only
-/// meaningful for models that have a projector.
+/// The vision menu: serve WITHOUT the projector. Vision's measured
+/// costs (revised 2026-08-28 after the night investigation): VRAM — a
+/// smaller fitted context — and, only on models whose KV cache can
+/// shift, the loss of mid-edit cache-reuse (multimodal serving zeroes
+/// it; append-style turns stay prefix-cached either way, and SWA
+/// models never had cache-reuse to lose). This trial prices what
+/// text-only is actually worth per model instead of guessing from the
+/// log line. Only meaningful for models that have a projector.
 pub fn vision_variants() -> Vec<Variant> {
     vec![Variant {
         label: "text-only".into(),

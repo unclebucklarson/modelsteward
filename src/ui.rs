@@ -1929,7 +1929,7 @@ impl App {
                      the agent-turn cache tax, ~8 min)",
                 )
                 .on_hover_text(if has_mmproj {
-                    "This model serves a vision projector, and llama.cpp disables                      prompt-cache reuse for multimodal serving: every agent turn                      reprocesses the whole conversation. This measures what turning                      vision off is actually worth on YOUR hardware."
+                    "This model serves a vision projector. Vision's measured costs: VRAM                      (a smaller fitted context) and, on models whose cache can shift,                      the loss of mid-edit cache-reuse — append-style turns stay cached                      either way. Whether text-only helps YOUR model depends on its                      attention; this trial answers with numbers instead of a guess."
                 } else {
                     "Only applies to models serving a vision projector — this one                      has none, so there is nothing to turn off."
                 });
@@ -2215,11 +2215,10 @@ impl App {
                         )
                     } else {
                         format!(
-                            "{}: cache-reuse DISABLED — llama.cpp turns it off for \
-                             vision-served models, so every turn reprocesses the full \
-                             prompt. If you don't use images with this model, removing \
-                             its mmproj (⚙ / shelf dir) restores the biggest agent \
-                             prefill win.",
+                            "{}: cache-reuse off (vision serving disables mid-edit \
+                             chunk reuse; appended turns still cache). Whether \
+                             text-only would help depends on this model's attention — \
+                             the Lab's Vision-cost trial answers with numbers.",
                             s.model
                         )
                     };
@@ -2910,12 +2909,12 @@ impl App {
                     let mut with_vision = !ed.no_mmproj;
                     ui.checkbox(&mut with_vision, "Serve with vision (mmproj)")
                         .on_hover_text(
-                            "Vision has a hidden cost: llama.cpp disables prompt-cache \
-                             reuse for multimodal serving, so every agent turn \
-                             reprocesses its full prompt. Uncheck to serve text-only and \
-                             get cache-reuse back — the projector stays on disk and one \
-                             check restores vision. OpenCode's image modality follows \
-                             automatically either way.",
+                            "Vision costs VRAM (a smaller fitted context) and disables \
+                             mid-edit cache-reuse on models whose cache can shift — \
+                             appended turns stay cached either way. The Lab's \
+                             Vision-cost trial measures what text-only is worth on THIS \
+                             model. The projector stays on disk; one check restores \
+                             vision, and OpenCode's image modality follows either way.",
                         );
                     ed.no_mmproj = !with_vision;
                 }

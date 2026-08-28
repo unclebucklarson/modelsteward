@@ -75,7 +75,8 @@ downstream from those measurements.
   can say "prefer the Q4: +11% speed, +88% context (quality parity
   measured)" — with a veto when a faster config measurably answers
   worse. A cache-effectiveness monitor mines your real sessions'
-  prompt-token reuse and flags the hidden vision/cache-reuse tradeoff,
+  prompt-token reuse and flags models whose serving mode or attention
+  disables cache-reuse (measured, with the Lab trial that prices it),
   which is one ⚙ checkbox to decide per model.
 - **Remembers every measurement** (history.jsonl): each context measure
   and bench result is journaled with its llama.cpp build — hover the
