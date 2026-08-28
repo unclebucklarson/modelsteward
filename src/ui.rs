@@ -3748,6 +3748,62 @@ impl App {
                 if check.dirty == Some(true) {
                     ui.small("Rebuild disabled: the checkout has local changes — commit/stash them first.");
                 }
+                // Rung 2: archive the ANALYZED checkout's current
+                // build under a label — custom builds become
+                // pinnable next to release archives. Rung 3 caveat
+                // lives on the hover.
+                if check.repo.is_some() {
+                    ui.horizontal(|ui| {
+                        ui.label(format!(
+                    "Archive the analyzed checkout's build{} as:",
+                    check
+                        .current_build
+                        .map(|b| format!(" (b{b})"))
+                        .unwrap_or_default()
+                ));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.archive_label)
+                                .desired_width(160.0)
+                                .hint_text(
+                                    // From the cached scan — never
+                                    // probe binaries in a render loop.
+                                    check
+                                        .server_bin
+                                        .as_deref()
+                                        .and_then(|p| {
+                                            self.scan.as_ref()?.installs
+                                                .iter()
+                                                .find(|i| i.server_path == p)
+                                                .map(discover::install_alias)
+                                        })
+                                        .or_else(|| {
+                                            check
+                                                .current_build
+                                                .map(|b| format!("b{b}-variant"))
+                                        })
+                                        .unwrap_or_else(|| "label".into()),
+                                ),
+                        );
+                        if ui
+                            .add_enabled(
+                                self.busy.is_none()
+                                    && !self.archive_label.trim().is_empty(),
+                                egui::Button::new("Archive"),
+                            )
+                            .on_hover_text(
+                                "Snapshots the analyzed checkout's build/bin into \
+                                 the pinnable archive set. CAVEAT: measurements key \
+                                 builds by NUMBER — two variants of the same build \
+                                 look identical to bench/history/scorecard (schema \
+                                 work parked on the roadmap).",
+                            )
+                            .clicked()
+                        {
+                            archive_now = true;
+                        }
+                    });
+                }
+
                 if let (Some(cur), Some(up)) = (check.current_build, check.upstream_build)
                     && up > cur
                     && ui
@@ -3802,55 +3858,6 @@ impl App {
                             .clicked()
                         {
                             managed_build = true;
-                        }
-                        // Rung 2: archive the ANALYZED checkout's current
-                        // build under a label — custom builds become
-                        // pinnable next to release archives. Rung 3 caveat
-                        // lives on the hover.
-                        if check.repo.is_some() {
-                            ui.horizontal(|ui| {
-                                ui.label("Archive this build as:");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.archive_label)
-                                        .desired_width(160.0)
-                                        .hint_text(
-                                            // From the cached scan — never
-                                            // probe binaries in a render loop.
-                                            check
-                                                .server_bin
-                                                .as_deref()
-                                                .and_then(|p| {
-                                                    self.scan.as_ref()?.installs
-                                                        .iter()
-                                                        .find(|i| i.server_path == p)
-                                                        .map(discover::install_alias)
-                                                })
-                                                .or_else(|| {
-                                                    check
-                                                        .current_build
-                                                        .map(|b| format!("b{b}-variant"))
-                                                })
-                                                .unwrap_or_else(|| "label".into()),
-                                        ),
-                                );
-                                if ui
-                                    .add_enabled(
-                                        self.busy.is_none()
-                                            && !self.archive_label.trim().is_empty(),
-                                        egui::Button::new("Archive"),
-                                    )
-                                    .on_hover_text(
-                                        "Snapshots the analyzed checkout's build/bin into \
-                                         the pinnable archive set. CAVEAT: measurements key \
-                                         builds by NUMBER — two variants of the same build \
-                                         look identical to bench/history/scorecard (schema \
-                                         work parked on the roadmap).",
-                                    )
-                                    .clicked()
-                                {
-                                    archive_now = true;
-                                }
-                            });
                         }
                         if !ms.archives.is_empty() {
                             ui.add_space(4.0);
