@@ -51,6 +51,20 @@ pub fn is_embedding(meta: Option<&GgufMeta>) -> bool {
         })
 }
 
+/// `…-00001-of-00002.gguf` → (set key, part number, total parts).
+pub fn split_part(path: &Path) -> Option<(PathBuf, u32, u32)> {
+    let name = path.file_name()?.to_str()?;
+    let stem = name.strip_suffix(".gguf")?;
+    // …-NNNNN-of-MMMMM
+    let (rest, total) = stem.rsplit_once("-of-")?;
+    let total: u32 = total.parse().ok()?;
+    let (base, part) = rest.rsplit_once('-')?;
+    let part: u32 = part.parse().ok()?;
+    (part >= 1 && total >= 2 && rest.len() > 6).then(|| {
+        (path.with_file_name(base.to_string()), part, total)
+    })
+}
+
 fn is_mmproj_file(path: &Path) -> bool {
     path.file_stem()
         .is_some_and(|s| s.to_string_lossy().to_lowercase().contains("mmproj"))
@@ -61,10 +75,22 @@ impl ModelFile {
     /// the file stem, in that order of preference.
     pub fn display_name(&self) -> String {
         let stem = || {
-            self.path
+            let raw = self
+                .path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.path.display().to_string())
+                .unwrap_or_else(|| self.path.display().to_string());
+            // A split set's first shard represents the whole model —
+            // "GLM-4.5-Air-UD-Q3_K_XL", not "…-00001-of-00002".
+            match raw.rsplit_once("-of-") {
+                Some((rest, _)) => match rest.rsplit_once('-') {
+                    Some((base, part)) if part.chars().all(|c| c.is_ascii_digit()) => {
+                        base.to_string()
+                    }
+                    _ => raw.clone(),
+                },
+                None => raw,
+            }
         };
         match &self.source {
             Source::Ollama { name } => name.clone(),
@@ -196,6 +222,30 @@ pub fn scan(
     if let Some(hub) = hf_hub {
         out.extend(hf_hub_models(hub));
     }
+    // Split GGUFs (HF caps files at 50GB, so big quants ship as
+    // model-00001-of-00002.gguf + …): llama.cpp loads the whole model
+    // from the FIRST shard, so only that shard is a model row — with
+    // the other shards' bytes counted into its size — and the rest are
+    // support files, same policy as mmproj. A set whose first shard is
+    // missing (partial download) is no model at all.
+    let mut shard_bytes: std::collections::HashMap<PathBuf, u64> =
+        std::collections::HashMap::new();
+    for m in &out {
+        if let Some((set, part, _)) = split_part(&m.path)
+            && part != 1
+        {
+            *shard_bytes.entry(set).or_default() += m.file_size;
+        }
+    }
+    out.retain(|m| !matches!(split_part(&m.path), Some((_, part, _)) if part != 1));
+    for m in &mut out {
+        if let Some((set, 1, _)) = split_part(&m.path)
+            && let Some(extra) = shard_bytes.get(&set)
+        {
+            m.file_size += extra;
+        }
+    }
+
     // Vision pairing: mmproj*.gguf files aren't models — they're the vision
     // half of a model in the same directory. Pair, then drop them as rows.
     let mmproj_by_dir: std::collections::HashMap<PathBuf, PathBuf> = out
@@ -633,6 +683,37 @@ mod tests {
         meta.architecture = Some("qwen3".into());
         assert!(!is_embedding(Some(&meta)));
         assert!(!is_embedding(None));
+    }
+
+    #[test]
+    fn split_ggufs_are_one_model_with_summed_size() {
+        // Two shards + an unrelated single-file model on the shelf.
+        let dir = tempfile::tempdir().unwrap();
+        for (name, size) in [
+            ("GLM-4.5-Air-UD-Q3_K_XL-00001-of-00002.gguf", 100u64),
+            ("GLM-4.5-Air-UD-Q3_K_XL-00002-of-00002.gguf", 60),
+            ("small-model.gguf", 7),
+        ] {
+            std::fs::write(dir.path().join(name), vec![0u8; size as usize]).unwrap();
+        }
+        let models = scan(&[dir.path().to_path_buf()], &[], None);
+        assert_eq!(models.len(), 2, "shard 2 is a support file: {models:?}");
+        let glm = models
+            .iter()
+            .find(|m| m.path.to_string_lossy().contains("00001"))
+            .expect("first shard is the model row");
+        assert_eq!(glm.file_size, 160, "size counts every shard");
+        assert_eq!(glm.display_name(), "GLM-4.5-Air-UD-Q3_K_XL");
+        // A lone second shard (partial download) is not a model.
+        let dir2 = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir2.path().join("X-00002-of-00002.gguf"),
+            b"x",
+        )
+        .unwrap();
+        assert!(scan(&[dir2.path().to_path_buf()], &[], None).is_empty());
+        // split_part leaves normal names alone.
+        assert!(split_part(Path::new("Qwen3.8-27B-UD-Q4_K_XL.gguf")).is_none());
     }
 
     #[test]
