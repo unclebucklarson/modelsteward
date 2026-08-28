@@ -23,7 +23,7 @@ pub fn run() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1150.0, 720.0])
-            .with_title("llama.cpp Code Conf"),
+            .with_title("modelsteward"),
         ..Default::default()
     };
     eframe::run_native(
@@ -1509,7 +1509,7 @@ impl App {
                 .min_col_width(48.0)
                 .show(ui, |ui| {
                     for h in [
-                        "Model", "Source", "Size", "Quant", "Feat", "Measured ctx", "Speed",
+                        "Model", "Source", "Size", "Feat", "Quant", "Measured ctx", "Speed",
                         "Server", "OpenCode", "Load", "Tune", "Archive", "Advice", "Why",
                     ] {
                         ui.strong(h);
