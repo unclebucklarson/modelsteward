@@ -502,6 +502,60 @@ and apply buttons disable while anything runs.
   prompts every turn because mmproj disables reuse. FA-engaged check
   deferred: no FA evidence exists at this log verbosity.
 
+## M9 — The Meter (queued 2026-08-27, design talk with user)
+
+**Premise:** local AI is not free — you pay in electricity and hardware
+instead of API bills. The Meter measures what a token actually costs on
+THIS machine, in this project's spirit: measured, not guessed. (Founding
+data point: during a live OpenCode session the GPU sat at 446W of its
+450W limit — napkin math put the 27B around $0.5–0.6 per million output
+tokens at $0.15/kWh, cheaper than cloud but decidedly not free.)
+
+**Settled decisions (user):**
+- **Home:** steward core now, standalone later — `core/meter.rs` written
+  extraction-clean (inputs: log text + timestamps + power samples;
+  outputs: counters/reports; no steward-specific types in its API) so it
+  can become a shared crate if it proves out.
+- **Accounting:** BOTH, clearly separated — measured marginal
+  electricity is the headline; amortized hardware (user-entered cost +
+  lifetime) is a labeled estimate below it, never silently blended.
+- **Pure token reporting is a first-class requirement**, not a side
+  effect (user request): totals, averages, and datetime-range queries
+  over everything below.
+
+**Token metrics (phase 1 — no power hardware needed):**
+- Totals: prompt vs generated vs cache-reused tokens, per model and
+  fleet-wide (reused tokens are the "tokens you didn't pay for" —
+  ties the cache monitor into the money story).
+- Rates & shapes: tokens/turn, turns/day, prompt:generated ratio
+  (agent workloads are prompt-heavy — expect prefill to dominate),
+  realized tokens/sec vs benched ceiling (utilization).
+- Time series: per-hour/per-day buckets, queryable by datetime range;
+  busiest hour/day; duty cycle (fraction of uptime actually generating).
+- Comparative counters: lifetime tokens ≈ $X at (dated, user-editable)
+  cloud prices vs $Y measured local cost.
+- **Design constraint (learned from the log grammar):** router.log is
+  truncated on router start — token evidence must be harvested
+  continuously (poller snapshots deltas into meter.jsonl, append-only
+  like history.jsonl) or counts die with each restart.
+
+**Energy metrics (phase 2 — the instrument):**
+- NVML power sampling (GPU) + Intel RAPL energy counters (CPU package,
+  /sys/class/powercap — real joules) around generations: idle baseline
+  vs under-load → marginal J/token per model, measured not nameplate.
+- Honesty band: NVML+RAPL miss PSU losses/RAM/fans — label estimates
+  ±20%; a smart-plug/wall-meter calibration knob is a later extension.
+- **J/token as a trial column**: verdicts gain an efficiency axis
+  ("t24 was 45% slower AND burned more energy per token").
+
+**Surfaces (phase 3):** Server-tab meter line (today: N tokens, ~X Wh,
+~$Y); findings report + JSON section; datetime-range report via CLI
+(`--meter [range]`) and Lab/Tools UI.
+
+**Later / parked:** background-service mode beyond the GUI poller
+(systemd timer harvesting the log); smart-plug calibration; Ollama-peer
+metering; standalone-crate extraction.
+
 ## Sibling project: modelwarden (`~/src2/modelwarden`)
 
 Inventory / backup / archival for model files lives in its own project —
