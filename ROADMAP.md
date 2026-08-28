@@ -377,12 +377,16 @@ measurements + journal. Then:
    +10% speed, +88% context"), quality respected: parity stated when
    measured, absence said out loud, and a QUALITY VETO (faster quant
    >1 eval item worse) turns the crown into a stated tradeoff.
-3. **Speculation leftovers**: ngram-map-k / ngram-cache campaign (cheap);
-   MTP self-speculation when upstream lands the flag (⚡ models draft for
-   themselves — could win on NOVEL code, which ngram can't); investigate
-   the DeepSeek-V4-Flash BF16 "won't load standalone" blob — it lives in
-   a dspark/ dir and may be a draft-dspark aux artifact, not a broken
-   model (diagnose would learn a new category).
+3. **Speculation leftovers**: ✔ ngram-map-k + ngram-cache joined the
+   spec menu 2026-08-27 (names verified against common/speculative.cpp;
+   the full model-free ngram family now races — re-run spec campaigns to
+   rank them). ✔ DeepSeek dspark blob RESOLVED: it IS a draft-dspark
+   speculator sidecar (Markov head, confirmed in llama.cpp source);
+   diagnose learned Cause::DraftSidecar — name/path-matched (the display
+   alone doesn't say dspark; the path does), "expected and harmless"
+   wording. Still open: MTP self-speculation when upstream lands the
+   flag (⚡ models draft for themselves — could win on NOVEL code, which
+   ngram can't).
 4. **Latency-between-generations**: ✔ foundation DONE 2026-08-27 (the
    harness handles lower-is-better goals via improvement ratios; trial
    rounds time load-request→loaded) and ✔ the load-mode menu landed
@@ -401,8 +405,12 @@ measurements + journal. Then:
    evicts on the incoming request), so automation means either a manual
    "snapshot session" affordance or upstream save-on-evict — watch
    llama.cpp for the latter. Snapshot files scale with conversation
-   length (GBs); restore speed is disk-bound. Still open:
-   `models_max = 2` topology advice.
+   length (GBs); restore speed is disk-bound. ✔ `models_max = 2`
+   topology advice DONE 2026-08-27: evidence::topology_advice — fires
+   only from real usage (two models with ≥3 logged turns each whose
+   files fit together under 70% of VRAM), names the pair and the price
+   (residents split the fitted context); Server tab + a tradeoff hover
+   on the Settings control.
 5. **Build advisory**: ✔ DONE 2026-08-27 — `history::build_advisory`
    compares each model's newest numbers on the current build vs the
    build before it (context only under identical args fingerprints —
@@ -410,8 +418,11 @@ measurements + journal. Then:
    llama-bench baselines, config-free). Surfaced as the "Rebuild
    scorecard" line on the Server tab (warn-colored when a model lost
    ≥5% context) and atop the findings report's history section. Still
-   open: pinning the best-measured build (waits on the
-   app-managed-checkout decision).
+   open: pinning the best-measured build — DECIDED 2026-08-27 (option
+   B, binary archiving): snapshot verified builds' binaries into the
+   app's state dir before each guided rebuild; pin/rollback = point the
+   server path at an archive. No app-managed checkout (the user keeps
+   owning git); build in the build-corner block with rebuild triage.
 6. **Speculation-dial trials** (2026-08-26 knob review): the adopted
    ngram modes have untouched dials (`--spec-draft-p-min`, draft-length)
    — sweep them as a trial menu on top of the kept winners; the likeliest

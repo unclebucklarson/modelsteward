@@ -30,7 +30,11 @@ pub struct Variant {
 /// zero VRAM; classic draft models were measured off this hardware class
 /// (see docs/spikes.md spike 5) and aren't retried by default.
 pub fn spec_decode_variants() -> Vec<Variant> {
-    ["ngram-simple", "ngram-map-k4v", "ngram-mod"]
+    // The full model-free ngram family (M8 #3 leftovers ngram-map-k +
+    // ngram-cache added 2026-08-27; names verified against
+    // common/speculative.cpp). ngram-cache builds its lookup cache
+    // during the session — no static cache file needed to race it.
+    ["ngram-simple", "ngram-map-k", "ngram-map-k4v", "ngram-mod", "ngram-cache"]
         .into_iter()
         .map(|t| Variant {
             label: t.to_string(),

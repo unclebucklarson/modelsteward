@@ -1704,6 +1704,16 @@ impl App {
                                                 (Some(cur), Some(up)) if cur >= up
                                             )
                                         }),
+                                        // Name signal = display + path: the live
+                                        // dspark case only says so in its path.
+                                        &format!(
+                                            "{} {}",
+                                            r.display,
+                                            r.path
+                                                .as_deref()
+                                                .map(|p| p.display().to_string())
+                                                .unwrap_or_default()
+                                        ),
                                     ),
                                 });
                             }
@@ -2150,6 +2160,26 @@ impl App {
                     ));
                 }
             }
+            // Topology advice rides on the same usage evidence (M8 #4).
+            let used: Vec<(String, u32, u64)> = self
+                .cache_stats
+                .iter()
+                .filter_map(|s| {
+                    let size = self
+                        .rows
+                        .iter()
+                        .find(|r| r.router_id.as_deref() == Some(s.model.as_str()))
+                        .map(|r| r.size_bytes)?;
+                    Some((s.model.clone(), s.turns, size))
+                })
+                .collect();
+            if let Some(line) = evidence::topology_advice(
+                &used,
+                self.hardware().vram_mib,
+                self.cfg.models_max,
+            ) {
+                ui.label(line);
+            }
             ui.separator();
         }
         if let Some(s) = &self.upstream {
@@ -2594,7 +2624,14 @@ impl App {
             ui.label("Max loaded models");
             ui.horizontal(|ui| {
                 ui.text_edit_singleline(&mut self.edit_models_max);
-                ui.small("1 = one big model; raise to keep a small sidecar model resident too");
+                ui.small("1 = one big model; raise to keep a small sidecar model resident too")
+                    .on_hover_text(
+                        "Tradeoff: residents split the VRAM that --fit hands out, so \
+                         each gets a smaller context — but switching between resident \
+                         models is instant instead of a full reload. The Server tab \
+                         suggests 2 when your real usage shows you alternating between \
+                         two models that fit together.",
+                    );
             });
             ui.end_row();
             ui.label("Ollama port");

@@ -76,6 +76,42 @@ pub fn child_port(log: &str, model: &str) -> Option<u16> {
     port
 }
 
+/// M8 #4 tail — models_max topology advice, from usage evidence: when
+/// the log shows the user really alternating between 2+ models whose
+/// files fit TOGETHER in VRAM with room to breathe, suggest raising
+/// models_max so both stay resident (no swap cost). Honest about the
+/// price: residents split the VRAM --fit hands out, so each gets less
+/// context. Pure and testable; caller supplies sizes and VRAM.
+pub fn topology_advice(
+    used: &[(String, u32, u64)], // (model, turns, file bytes)
+    vram_mib: u64,
+    models_max: u32,
+) -> Option<String> {
+    if models_max != 1 || vram_mib == 0 {
+        return None;
+    }
+    let mut active: Vec<&(String, u32, u64)> =
+        used.iter().filter(|(_, turns, _)| *turns >= 3).collect();
+    if active.len() < 2 {
+        return None;
+    }
+    active.sort_by_key(|(_, turns, _)| std::cmp::Reverse(*turns));
+    let (a, b) = (active[0], active[1]);
+    let sum_mib = (a.2 + b.2) / (1024 * 1024);
+    // Files + KV caches + runtime must all fit: only advise when the
+    // pair leaves ≥30% of VRAM free for context.
+    if sum_mib * 10 > vram_mib * 7 {
+        return None;
+    }
+    Some(format!(
+        "You alternate between {} ({} turns) and {} ({} turns), and both fit \
+         in VRAM together ({sum_mib} of {vram_mib} MiB). Raising Max loaded \
+         models to 2 (Settings) keeps both resident — no swap cost — at the \
+         price of each getting a smaller fitted context. Re-measure after.",
+        a.0, a.1, b.0, b.1
+    ))
+}
+
 /// Mine the whole log. Later instances of a port override earlier ones for
 /// the port→model mapping (ports get reused across restarts within one log).
 pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
@@ -213,6 +249,30 @@ mod tests {
 [9] x I slot release: id 0 | task 3 | stop processing: n_tokens = 50, truncated = 0\n";
         assert!(cache_effectiveness(log).is_empty());
     }
+    #[test]
+    fn topology_advice_needs_real_alternation_and_room() {
+        let gib = 1024u64 * 1024 * 1024;
+        let used = vec![
+            ("small-a".to_string(), 12u32, 5 * gib),
+            ("small-b".to_string(), 8u32, 6 * gib),
+            ("rarely".to_string(), 1u32, 4 * gib),
+        ];
+        // 11 GiB pair in 24 GiB VRAM (under 70%) → advised.
+        let line = topology_advice(&used, 24_564, 1).unwrap();
+        assert!(line.contains("small-a") && line.contains("small-b"), "{line}");
+        assert!(line.contains("smaller fitted context"), "{line}");
+        // Already models_max=2 → quiet.
+        assert!(topology_advice(&used, 24_564, 2).is_none());
+        // Pair too big for the 70% budget → quiet.
+        let big = vec![
+            ("a".to_string(), 9u32, 12 * gib),
+            ("b".to_string(), 9u32, 11 * gib),
+        ];
+        assert!(topology_advice(&big, 24_564, 1).is_none());
+        // Only one model actually used → quiet.
+        assert!(topology_advice(&used[..1], 24_564, 1).is_none());
+    }
+
     #[test]
     fn child_port_takes_the_last_spawn_for_the_model() {
         let log = "load: spawning server instance with name=alpha on port 40001\n\

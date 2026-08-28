@@ -20,6 +20,11 @@ pub enum Cause {
     NotOffered,
     /// Nothing wrong — just never measured.
     Unmeasured,
+    /// A speculation-draft sidecar (e.g. a dspark/ Markov-head file):
+    /// a companion artifact for `--spec-type draft-dspark`, never meant
+    /// to load standalone. Recognized by name, since the load error is a
+    /// generic failure.
+    DraftSidecar,
     /// We genuinely don't recognize the failure.
     Unknown,
 }
@@ -42,6 +47,15 @@ pub struct Diagnosis {
     /// The single most relevant log/error line, when we have one.
     pub evidence: Option<String>,
     pub remedies: Vec<Remedy>,
+}
+
+/// Speculation-sidecar file names: hub repos ship them in dspark/ (and
+/// kindred draft dirs) next to the real model. Live case 2026-08-27:
+/// unsloth/DeepSeek-V4-Flash's `dspark/dspark-...-BF16.gguf` — a
+/// draft-dspark Markov head that 'failed(1)' as a standalone model.
+pub fn is_draft_sidecar_name(name: &str) -> bool {
+    let n = name.to_lowercase();
+    n.contains("dspark") || n.contains("draft-")
 }
 
 /// Classify a stored load-failure string.
@@ -86,9 +100,16 @@ pub fn diagnose(
     not_offered: bool,
     archivable: bool,
     build_is_current: Option<bool>,
+    name: &str,
 ) -> Diagnosis {
     if let Some(err) = error {
-        let cause = classify(err);
+        // The name outranks a generic failure string: a dspark sidecar
+        // dies with a bare failed(1), which classify() can't see through.
+        let cause = if classify(err) == Cause::Unknown && is_draft_sidecar_name(name) {
+            Cause::DraftSidecar
+        } else {
+            classify(err)
+        };
         // The mined log line rides in after "— " in stored errors; show
         // the tail as evidence when present, else the whole string.
         let evidence = Some(
@@ -137,6 +158,16 @@ pub fn diagnose(
                  fine. Re-measure when nothing is mid-request."
                     .to_string(),
                 vec![Remedy::LoadAndMeasure, Remedy::ShowLog],
+            ),
+            Cause::DraftSidecar => (
+                "This file is a speculation-draft sidecar — a small companion \
+                 model some repos ship (in a dspark/ or similar folder) to \
+                 accelerate the REAL model via speculative decoding. It is not \
+                 meant to load standalone, so this failure is expected and \
+                 harmless. Nothing to fix; it may become useful if a draft-based \
+                 speculation mode is configured for its parent model."
+                    .to_string(),
+                vec![Remedy::ShowLog],
             ),
             _ => (
                 "The load failed for a reason these rules don't recognize yet. The \
@@ -215,12 +246,37 @@ mod tests {
     }
 
     #[test]
+    fn dspark_sidecars_are_expected_failures_not_broken_models() {
+        // The live case: a generic failed(1) that classify() can't see
+        // through, but the name says draft sidecar.
+        let d = diagnose(
+            Some("retry also failed: did not load: failed(1) (see router.log)"),
+            false,
+            false,
+            None,
+            "unsloth/DeepSeek-V4-Flash-0731-GGUF:BF16 dspark/dspark-DeepSeek-V4-Flash-0731-BF16.gguf",
+        );
+        assert_eq!(d.cause, Cause::DraftSidecar);
+        assert!(d.explanation.contains("expected and"), "{}", d.explanation);
+        // A generic failure WITHOUT the name signal stays Unknown.
+        let d = diagnose(
+            Some("did not load: failed(1)"),
+            false,
+            false,
+            None,
+            "ordinary-model",
+        );
+        assert_eq!(d.cause, Cause::Unknown);
+    }
+
+    #[test]
     fn current_build_reframes_format_errors_as_ollama_specific() {
         let d = diagnose(
             Some("key qwen35.rope.dimension_sections has wrong array length; expected 4, got 3"),
             false,
             false,
             Some(true),
+            "qwen3.5-27b",
         );
         assert_eq!(d.cause, Cause::NeedsNewerBuild);
         assert!(d.explanation.contains("another tool"), "{}", d.explanation);
@@ -237,17 +293,18 @@ mod tests {
             false,
             false,
             None,
+            "some-model",
         );
         assert_eq!(d.cause, Cause::NeedsNewerBuild);
         assert!(d.remedies.contains(&Remedy::OpenBuildAdvisor));
         assert!(d.evidence.unwrap().contains("wrong array length"), "evidence is the mined tail");
         assert!(!d.explanation.contains("cmake"), "no jargon in explanations");
 
-        let d = diagnose(None, true, true, None);
+        let d = diagnose(None, true, true, None, "m");
         assert_eq!(d.cause, Cause::NotOffered);
         assert_eq!(d.remedies, vec![Remedy::ArchiveToShelf]);
 
-        let d = diagnose(None, false, false, None);
+        let d = diagnose(None, false, false, None, "m");
         assert_eq!(d.cause, Cause::Unmeasured);
         assert_eq!(d.remedies, vec![Remedy::LoadAndMeasure]);
     }
