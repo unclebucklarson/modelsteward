@@ -41,7 +41,13 @@ impl Advisor for RouterAdvisor {
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
-                    "max_tokens": 500,
+                    // Reasoning-channel models think before they answer —
+                    // a 49k-token fleet brief burned 500, then 2500 tokens
+                    // of pure thinking with zero content (found live
+                    // 2026-08-28). Ask for the answer, not the deliberation;
+                    // templates without the kwarg ignore it.
+                    "chat_template_kwargs": { "enable_thinking": false },
+                    "max_tokens": 2500,
                     "temperature": 0.2,
                 }))
                 .context("advisor request")?
@@ -53,7 +59,13 @@ impl Advisor for RouterAdvisor {
             .and_then(|s| s.as_str())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("advisor returned no content"))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "the model produced no answer (it may have spent its whole \
+                     token budget on its reasoning channel) — try again or ask a \
+                     different model"
+                )
+            })
     }
 
     fn describe(&self) -> String {
@@ -98,6 +110,32 @@ pub fn failure_prompt(
         p.push_str(&format!("\nLast server log lines for this model:\n{log_tail}\n"));
     }
     p
+}
+
+/// System prompt for the fleet brief — a longer-form synthesis than the
+/// failure explainer, still confined to the supplied data.
+pub const BRIEF_SYSTEM: &str = "You are the advisory layer of modelsteward, a tool \
+that manages llama.cpp servers and measures local models. Reason ONLY from the \
+findings report provided. Cite the numbers you use. If the data can't answer a \
+question, say so plainly. Never invent flags, models, or figures. No preamble; \
+at most 300 words.";
+
+/// The fleet brief (advisor feature #2, user-ranked; built after the
+/// first honest full-campaign sweep landed): feed the app's OWN
+/// machine-readable findings artifact to a served model and ask the
+/// three questions a user actually has. The findings JSON is already
+/// sanitized at the source — the same file a user would share.
+pub fn fleet_prompt(findings_json: &str) -> String {
+    format!(
+        "Below is this machine's full findings report (JSON) from modelsteward: \
+         hardware, measured context windows, speed baselines, quality scores, \
+         and config-trial results per model. Answer three questions:\n\
+         1. Which measured model is the best daily driver for coding-agent work, \
+         and why (cite its numbers)?\n\
+         2. What single change would most improve this machine's setup?\n\
+         3. What is unmeasured or stale and most worth measuring next?\n\n\
+         {findings_json}\n"
+    )
 }
 
 /// Rebuild triage (advisor feature #3, user-ranked): given the commit
@@ -162,6 +200,16 @@ mod tests {
         // allowed answer.
         assert!(SYSTEM.contains("Never invent"));
         assert!(SYSTEM.contains("doesn't show the cause"));
+    }
+
+    #[test]
+    fn fleet_prompt_asks_the_three_questions_over_the_findings() {
+        let p = fleet_prompt("{\"measurements\":{\"m\":{\"n_ctx\":115456}}}");
+        assert!(p.contains("115456"), "findings ride along verbatim");
+        for needle in ["daily driver", "single change", "worth measuring next"] {
+            assert!(p.contains(needle), "missing {needle}");
+        }
+        assert!(BRIEF_SYSTEM.contains("Cite the numbers"));
     }
 
     #[test]

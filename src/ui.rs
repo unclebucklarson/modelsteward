@@ -1332,6 +1332,22 @@ impl App {
                 self.advisor_open = true;
                 ui.close();
             }
+            if ui
+                .add_enabled(
+                    self.busy.is_none(),
+                    egui::Button::new("Fleet Brief (AI opinion)"),
+                )
+                .on_hover_text(
+                    "Feeds this machine's findings report (the sanitized JSON the \
+                     app already generates) to one of YOUR served models and asks: \
+                     best daily driver, the one change worth making, and what to \
+                     measure next. Labeled opinion; nothing leaves this machine.",
+                )
+                .clicked()
+            {
+                self.action_fleet_brief();
+                ui.close();
+            }
             if ui.button("Open Router Log").clicked() {
                 open_path = Some(router::state_dir().join("router.log"));
                 ui.close();
@@ -3260,6 +3276,42 @@ impl App {
                 Err(e) => Msg::Error(format!("triage: {e:#}")),
             });
             let _ = tx.send(Msg::Finished("triage finished".into()));
+        });
+    }
+
+    /// Fleet brief (advisory): regenerate the findings report, feed its
+    /// machine-readable JSON to a served model, collect the answer in
+    /// the Advisor window. The JSON is sanitized at the source — the
+    /// same artifact a user would share.
+    fn action_fleet_brief(&mut self) {
+        let Some(answerer) = self.pick_answerer(None) else {
+            self.log("the fleet brief needs a measured model to ask — measure one first".to_string());
+            return;
+        };
+        let cfg = self.cfg.clone();
+        let port = self.cfg.port;
+        self.spawn(&format!("fleet brief: asking {answerer}"), move |tx| {
+            let result = (|| -> anyhow::Result<String> {
+                crate::core::report::generate(&cfg)?;
+                let json = std::fs::read_to_string(
+                    router::state_dir().join("findings-report.json"),
+                )?;
+                let backend = aiadvisor::RouterAdvisor {
+                    port,
+                    model: answerer.clone(),
+                };
+                use aiadvisor::Advisor as _;
+                backend.ask(aiadvisor::BRIEF_SYSTEM, &aiadvisor::fleet_prompt(&json))
+            })();
+            let _ = tx.send(match result {
+                Ok(text) => Msg::Advisory {
+                    subject: "fleet brief".to_string(),
+                    model: answerer,
+                    text,
+                },
+                Err(e) => Msg::Error(format!("fleet brief: {e:#}")),
+            });
+            let _ = tx.send(Msg::Finished("fleet brief finished".into()));
         });
     }
 
