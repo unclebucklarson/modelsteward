@@ -27,14 +27,7 @@ pub const REPO_URL: &str = "https://github.com/ggml-org/llama.cpp";
 /// ~/.local/share/modelsteward (XDG_DATA_HOME respected) — code and
 /// binaries, distinct from the state dir's measurements and logs.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        // A snap-redirected XDG var points into a per-revision dir that
-        // the next snap update deletes — never persist a git checkout
-        // or build archive there (see settings::real_home).
-        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
-        .unwrap_or_else(|| crate::core::settings::real_home().join(".local/share"))
-        .join("modelsteward")
+    crate::core::settings::xdg_dir("XDG_DATA_HOME", ".local/share")
 }
 
 pub fn checkout_dir() -> PathBuf {
@@ -86,14 +79,13 @@ pub fn fetch_tags(progress: &mut dyn FnMut(String)) -> Result<()> {
     crate::core::advisor::run_steps(&[git(&["fetch", "--tags", "origin"])], progress)
 }
 
-/// Fetch + check out the tag for `build` (detached HEAD — the managed
-/// tree is always at an exact tagged release, never tracking master).
-pub fn checkout_build(build: u64, progress: &mut dyn FnMut(String)) -> Result<()> {
+/// Check out the tag for `build` (detached HEAD — the managed tree is
+/// always at an exact tagged release, never tracking master). Callers
+/// fetch first (build_release does); the fetch used to live here too
+/// and every build paid for it twice.
+pub fn checkout_release(build: u64, progress: &mut dyn FnMut(String)) -> Result<()> {
     crate::core::advisor::run_steps(
-        &[
-            git(&["fetch", "--tags", "origin"]),
-            git(&["checkout", "--force", &format!("b{build}")]),
-        ],
+        &[git(&["checkout", "--force", &format!("b{build}")])],
         progress,
     )
     .with_context(|| format!("checking out b{build}"))
@@ -118,7 +110,7 @@ pub fn parse_newest_tag(tags: &str) -> Option<u64> {
 
 /// Build the managed checkout with the same backend selection logic the
 /// guided rebuild uses (no git step — the tree is tag-pinned).
-pub fn build(
+pub fn build_tree(
     c: &crate::core::advisor::BuildCheck,
     sel: crate::core::advisor::BackendSelection,
     progress: &mut dyn FnMut(String),
@@ -152,7 +144,19 @@ pub fn archive_from(
         !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
         "label must be filesystem-plain (letters, digits, -_.)"
     );
+    // "." and ".." pass the character test but escape or alias the
+    // archive dir (review catch 2026-08-28); a leading dot also hides
+    // the entry from listings.
+    anyhow::ensure!(
+        !label.starts_with('.'),
+        "label can't start with a dot"
+    );
     let dst = archive_dir().join(label);
+    anyhow::ensure!(
+        !dst.join("llama-server").exists(),
+        "an archive named {label:?} already exists — pick another label \
+         (overwriting could swap the binary behind an existing pin)"
+    );
     anyhow::ensure!(
         src.join("llama-server").is_file(),
         "no built llama-server at {}",
@@ -211,6 +215,56 @@ pub fn list_archives_in(dir: &Path) -> Vec<Archive> {
         (None, None) => a.label.cmp(&b.label),
     });
     out
+}
+
+/// One managed build at a time: the daily auto-build thread and the
+/// Build Advisor button share the same checkout, and two concurrent
+/// `git checkout --force` + cmake runs would archive an interleaved
+/// binary (review catch 2026-08-28). Try-lock; the loser narrates and
+/// walks away.
+static BUILD_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub struct BuildGuard;
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        BUILD_LOCK.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+pub fn try_lock_build() -> Option<BuildGuard> {
+    BUILD_LOCK
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::SeqCst,
+            std::sync::atomic::Ordering::SeqCst,
+        )
+        .is_ok()
+        .then_some(BuildGuard)
+}
+
+/// The whole release pipeline in one place — clone if needed, fetch
+/// tags, check out the newest release, build, archive — so the button,
+/// the auto-build poller, and any future CLI produce identical
+/// artifacts (review catch 2026-08-28: two hand-rolled copies had
+/// already drifted). Holds the build lock for the duration.
+pub fn build_release(
+    c: &crate::core::advisor::BuildCheck,
+    sel: crate::core::advisor::BackendSelection,
+    progress: &mut dyn FnMut(String),
+) -> Result<u64> {
+    let Some(_guard) = try_lock_build() else {
+        anyhow::bail!("a managed build is already running — let it finish");
+    };
+    ensure_clone(progress)?;
+    fetch_tags(progress)?;
+    let build = newest_known_build()
+        .ok_or_else(|| anyhow::anyhow!("no bNNNN release tags found"))?;
+    progress(format!("newest release: b{build} — checking out + building"));
+    checkout_release(build, progress)?;
+    build_tree(c, sel, progress)?;
+    archive_build(build, progress)?;
+    Ok(build)
 }
 
 /// What the Settings/Build-Advisor surface shows about the managed side.

@@ -358,7 +358,17 @@ impl App {
                 by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
                 by_build.first().map(|i| i.server_path.clone())
             })
-            .or_else(|| scan.installs.first().map(|i| i.server_path.clone()))
+            .or_else(|| {
+                // Managed-only machine: newest managed, same order the
+                // prober uses — never discovery-order-first (review catch).
+                let mut managed: Vec<_> = scan
+                    .installs
+                    .iter()
+                    .filter(|i| system::is_managed_install(&i.server_path))
+                    .collect();
+                managed.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
+                managed.first().map(|i| i.server_path.clone())
+            })
     }
 
     fn hardware(&self) -> rows::Hardware {
@@ -492,7 +502,12 @@ impl App {
                 if due {
                     rcfg = Some(system::router_config(&cfg)); // daily re-pick
                 }
-                if due && let Ok(server) = system::pick_server(&cfg) {
+                if due && let Some(server) =
+                    rcfg.as_ref().map(|r| r.server_bin.clone()).filter(|p| p.is_file())
+                {
+                    // Reuse the pick the re-pick just made — a second
+                    // pick_server here re-ran the whole probe sweep
+                    // back-to-back (review catch 2026-08-28).
                     let build = discover::build_of(&server);
                     let s = advisor::upstream_probe(&server, build);
                     advisor::write_upstream_status(&router::state_dir(), &s);
@@ -520,19 +535,14 @@ impl App {
                             let check =
                                 advisor::check(Some(server), build, &measurements, None);
                             let sel = advisor::default_backends(&check);
-                            let result = (|| -> anyhow::Result<()> {
-                                managed::checkout_build(up, &mut progress)?;
-                                managed::build(&check, sel, &mut progress)?;
-                                managed::archive_build(up, &mut progress)?;
-                                Ok(())
-                            })();
+                            let result = managed::build_release(&check, sel, &mut progress);
                             let _ = tx2.send(Msg::Managed(managed::status()));
                             let _ = tx2.send(Msg::Progress(match result {
-                                Ok(()) => format!(
-                                    "[auto-build] b{up} built + archived — pin it in \
+                                Ok(b) => format!(
+                                    "[auto-build] b{b} built + archived — pin it in \
                                      the Build Advisor when you want to serve it"
                                 ),
-                                Err(e) => format!("[auto-build] b{up} failed: {e:#}"),
+                                Err(e) => format!("[auto-build] failed: {e:#}"),
                             }));
                         });
                     }
@@ -923,28 +933,28 @@ impl App {
                         label: "Prefill batch (-ub)",
                         text: String::new(),
                         hint: measured("ub", "default 512 — ⚡ Lab races 1024/2048"),
-                        default_text: "512",
+                        default_text: router::DEFAULT_UBATCH,
                     },
                     PromotedField {
                         key: "temp",
                         label: "temp",
                         text: String::new(),
                         hint: sampling_hint.into(),
-                        default_text: "0.8",
+                        default_text: router::DEFAULT_TEMP,
                     },
                     PromotedField {
                         key: "top-k",
                         label: "top-k",
                         text: String::new(),
                         hint: sampling_hint.into(),
-                        default_text: "40",
+                        default_text: router::DEFAULT_TOP_K,
                     },
                     PromotedField {
                         key: "top-p",
                         label: "top-p",
                         text: String::new(),
                         hint: sampling_hint.into(),
-                        default_text: "0.95",
+                        default_text: router::DEFAULT_TOP_P,
                     },
                 ];
                 for f in &mut promoted {
@@ -3200,11 +3210,30 @@ impl App {
             .evidence
             .clone()
             .unwrap_or_else(|| d.explanation.clone());
-        let build = self
+        // The SERVING binary's build — not discovery-order-first, which
+        // could feed the model a false fact (review catch 2026-08-28).
+        let served = self.picked_server();
+        let build = self.scan.as_ref().and_then(|s| {
+            s.installs
+                .iter()
+                .find(|i| Some(&i.server_path) == served.as_ref())
+                .and_then(|i| i.build)
+        });
+        let gpus = self
             .scan
             .as_ref()
-            .and_then(|s| s.installs.first().and_then(|i| i.build));
-        let vram = self.hardware().vram_mib;
+            .map(|s| {
+                let phys = discover::physical_gpus(&s.devices);
+                if phys.is_empty() {
+                    "none detected".to_string()
+                } else {
+                    phys.iter()
+                        .map(|g| format!("{} ({} MiB)", g.name, g.vram_mib))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                }
+            })
+            .unwrap_or_else(|| "unknown".into());
         let file_gib = path
             .as_ref()
             .and_then(|p| std::fs::metadata(p).ok())
@@ -3218,7 +3247,7 @@ impl App {
                 &subject,
                 &error,
                 build,
-                vram,
+                &gpus,
                 rows::read_ram_mib(),
                 file_gib,
                 &tail,
@@ -3290,17 +3319,7 @@ impl App {
             let mut progress = move |line: String| {
                 let _ = tx2.send(Msg::Progress(line));
             };
-            let result = (|| -> anyhow::Result<u64> {
-                managed::ensure_clone(&mut progress)?;
-                managed::fetch_tags(&mut progress)?;
-                let build = managed::newest_known_build()
-                    .ok_or_else(|| anyhow::anyhow!("no bNNNN release tags found"))?;
-                progress(format!("newest release: b{build} — checking out + building"));
-                managed::checkout_build(build, &mut progress)?;
-                managed::build(&check, sel, &mut progress)?;
-                managed::archive_build(build, &mut progress)?;
-                Ok(build)
-            })();
+            let result = managed::build_release(&check, sel, &mut progress);
             let _ = tx.send(Msg::Managed(managed::status()));
             let _ = tx.send(match result {
                 Ok(b) => Msg::Finished(format!(
@@ -3617,7 +3636,6 @@ impl App {
         let mut triage = false;
         let mut managed_build = false;
         let mut pin: Option<Option<PathBuf>> = None;
-        let mut recheck_sel = false;
         let mut archive_now = false;
         egui::Window::new("Build Advisor")
             .collapsible(false)
@@ -3635,7 +3653,7 @@ impl App {
                     };
                     let current = name(&self.sel_checkout);
                     let mut choices: Vec<Option<PathBuf>> = vec![None];
-                    if managed::checkout_present() {
+                    if self.managed_status.as_ref().is_some_and(|m| m.present) {
                         choices.push(Some(managed::checkout_dir()));
                     }
                     for c in &self.cfg.checkouts {
@@ -3652,7 +3670,7 @@ impl App {
                                     && self.sel_checkout != choice
                                 {
                                     self.sel_checkout = choice;
-                                    recheck_sel = true;
+                                    recheck = true;
                                 }
                             }
                         });
@@ -3670,7 +3688,7 @@ impl App {
                             self.cfg.checkouts.push(dir.clone());
                             let _ = self.cfg.save(&system::config_file());
                             self.sel_checkout = Some(dir);
-                            recheck_sel = true;
+                            recheck = true;
                         } else {
                             self.log(format!(
                                 "not a git checkout: {} (no .git)",
@@ -3735,17 +3753,19 @@ impl App {
                         ui.small("Fast-forward pull only — your local changes are never overwritten. Backends not selected are set OFF explicitly so stale cmake caches can't resurrect them.");
                     });
                 ui.separator();
-                let analyzing_managed =
-                    check.repo.as_deref() == Some(managed::checkout_dir().as_path());
-                if analyzing_managed {
+                // Tag-pinned = detached HEAD, wherever the checkout lives
+                // (a user-added pinned checkout hits the same pull wall).
+                let tag_pinned = check.detached == Some(true)
+                    || check.repo.as_deref() == Some(managed::checkout_dir().as_path());
+                if tag_pinned {
                     ui.small(
-                        "This is the managed checkout — tag-pinned, so branch-style \
-                         Update & Rebuild doesn't apply. Use \"Fetch + build newest \
-                         release\" below.",
+                        "This checkout is pinned to an exact commit (detached HEAD) — \
+                         branch-style Update & Rebuild doesn't apply. For the managed \
+                         checkout, use \"Fetch + build newest release\" below.",
                     );
                 }
                 ui.horizontal(|ui| {
-                    let can_rebuild = !analyzing_managed
+                    let can_rebuild = !tag_pinned
                         && check.repo.is_some()
                         && check.cmake
                         && check.dirty != Some(true);
@@ -3908,9 +3928,6 @@ impl App {
             self.action_rebuild();
         }
         if recheck {
-            self.action_build_check();
-        }
-        if recheck_sel {
             self.action_build_check();
         }
         if archive_now

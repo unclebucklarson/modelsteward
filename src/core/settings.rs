@@ -14,15 +14,32 @@ use std::path::{Path, PathBuf};
 /// checkout vanished with an OS update). Strip the redirect.
 pub fn real_home() -> PathBuf {
     let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
-    let mut parts = home.components();
-    let mut real = PathBuf::new();
-    for c in parts.by_ref() {
-        if c.as_os_str() == "snap" {
-            return real;
-        }
-        real.push(c);
-    }
-    home
+    strip_snap_redirect(&home).unwrap_or(home)
+}
+
+/// Some(prefix-before-snap) when `p` looks like a snap HOME redirect:
+/// .../snap/<app>/<revision>[/...] — "snap" must be followed by at
+/// least two components, so a user literally named snap
+/// (/home/snap) or a path like /data/snap/scott is left alone
+/// (review catch 2026-08-28: the first cut truncated at any "snap").
+fn strip_snap_redirect(p: &Path) -> Option<PathBuf> {
+    let comps: Vec<_> = p.components().collect();
+    let idx = comps
+        .iter()
+        .position(|c| c.as_os_str() == "snap")
+        .filter(|&i| comps.len() >= i + 3)?;
+    Some(comps[..idx].iter().collect())
+}
+
+/// The one XDG-with-snap-guard resolver every persistent dir uses —
+/// three hand-rolled copies had already grown (review catch): a
+/// snap-redirected env var or HOME never decides where data lives.
+pub fn xdg_dir(var: &str, fallback_rel: &str) -> PathBuf {
+    std::env::var_os(var)
+        .map(PathBuf::from)
+        .filter(|p| strip_snap_redirect(p).is_none())
+        .unwrap_or_else(|| real_home().join(fallback_rel))
+        .join("modelsteward")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -92,6 +109,26 @@ impl AppConfig {
         }
         std::fs::write(path, serde_json::to_string_pretty(self)?)
             .with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests_snap {
+    use super::*;
+
+    #[test]
+    fn snap_redirects_strip_but_snap_users_survive() {
+        let strip = |p: &str| strip_snap_redirect(Path::new(p)).map(|r| r.display().to_string());
+        // The real redirect shape: home/snap/<app>/<revision>.
+        assert_eq!(strip("/home/buck/snap/code/258"), Some("/home/buck".into()));
+        assert_eq!(
+            strip("/home/buck/snap/code/258/.local/share"),
+            Some("/home/buck".into())
+        );
+        // A user literally named snap, or snap as a plain dir: untouched.
+        assert_eq!(strip("/home/snap"), None);
+        assert_eq!(strip("/data/snap/scott"), None);
+        assert_eq!(strip("/home/buck"), None);
     }
 }
 

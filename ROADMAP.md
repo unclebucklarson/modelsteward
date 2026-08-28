@@ -559,6 +559,19 @@ and apply buttons disable while anything runs.
   1024/256/256-x64 under the agent-turn goal. The [*] cache-reuse=256
   default stays (a no-op on SWA models, real on shiftable ones).
 
+## Code-review debt (2026-08-28 pre-v0.4.0 review; 13 findings fixed —
+see the release commit — these consolidations deliberately deferred):
+- One shared advisory-ask helper (3 copies in ui.rs workers).
+- One pure install-pick policy fn shared by system::pick_server and
+  App::picked_server (aligned today, still two copies).
+- Per-frame caching for build_advisory / topology_advice /
+  stored_report in the Server and Lab panes (correct, just re-computed
+  per repaint).
+- newest_known_build on advisor::run + parse_build_tag.
+- topology_advice does scalar-VRAM fit math in core (CLAUDE.md
+  tension, accepted for advisory-only use; becomes real work when
+  multi-GPU hardware exists to test against).
+
 ## M9 — The Meter (queued 2026-08-27, design talk with user)
 
 **Premise:** local AI is not free — you pay in electricity and hardware

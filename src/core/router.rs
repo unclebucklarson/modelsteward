@@ -60,6 +60,17 @@ pub const DEFAULT_CACHE_REUSE: u32 = 256;
 /// sessions benefit from more on RAM-rich machines.
 pub const DEFAULT_CACHE_RAM_MIB: u32 = 24_576;
 
+/// llama-server's own effective defaults, shown prefilled in the ⚙
+/// dialog (its promise: the values the model will actually use) with
+/// leave-equal-means-not-pinned semantics. Read from llama.cpp
+/// common.h at b10630 — bump alongside upstream default changes; they
+/// live HERE, not in ui.rs, because they are config-truth policy
+/// (review catch 2026-08-28).
+pub const DEFAULT_UBATCH: &str = "512";
+pub const DEFAULT_TEMP: &str = "0.8";
+pub const DEFAULT_TOP_K: &str = "40";
+pub const DEFAULT_TOP_P: &str = "0.95";
+
 /// Where slot KV snapshots live. Setting `slot-save-path` in `[*]` turns
 /// on llama-server's `/slots/{id}?action=save|restore` API for every
 /// served model — pure enablement, zero cost until something calls it.
@@ -163,11 +174,7 @@ pub struct Marker {
 }
 
 pub fn state_dir() -> PathBuf {
-    std::env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
-        .unwrap_or_else(|| crate::core::settings::real_home().join(".local/state"))
-        .join("modelsteward")
+    crate::core::settings::xdg_dir("XDG_STATE_HOME", ".local/state")
 }
 
 fn marker_path(dir: &Path) -> PathBuf {

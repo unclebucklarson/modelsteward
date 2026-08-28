@@ -878,12 +878,24 @@ struct GenStats {
 /// measure what the second turn actually reprocesses. Returns
 /// (turn2 prefill ms, fraction of turn2's prompt served from cache).
 fn agent_turn_probe(port: u16, model: &str) -> Result<(f64, Option<f64>)> {
-    let _t1 = agent_turn_ask(port, model, false)?;
+    let t1 = agent_turn_ask(port, model, false)?;
     let t2 = agent_turn_ask(port, model, true)?;
     let ms = t2
         .prompt_ms
         .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
-    Ok((ms, reuse_of(&t2)))
+    Ok((ms, reuse_of(&t2).or_else(|| reuse_ratio(&t1, &t2))))
+}
+
+/// Inferential fallback for builds whose timings lack cache_n (pinned
+/// archives predating it): what fraction of turn 1's processed tokens
+/// turn 2 did NOT have to reprocess. Coarser than cache_n, better than
+/// a blank column (review catch 2026-08-28 — rollback-to-archive is a
+/// feature of this very release).
+fn reuse_ratio(t1: &GenStats, t2: &GenStats) -> Option<f64> {
+    match (t1.prompt_n, t2.prompt_n) {
+        (Some(n1), Some(n2)) if n1 > 0 => Some(1.0 - (n2 as f64 / n1 as f64).min(1.0)),
+        _ => None,
+    }
 }
 
 /// The probe's synthetic module: ~40 Python functions (a few thousand
@@ -1140,7 +1152,7 @@ pub fn run_slot_trial(
         // Pass 2 — restore: turn 1 fills the cache, save snapshots it,
         // the reload wipes the process, restore brings it back.
         let _ = reload_fresh(progress)?;
-        let _t1 = agent_turn_ask(cfg.port, model, false)?;
+        let t1 = agent_turn_ask(cfg.port, model, false)?;
         let saved = slot_action(child(model)?, "save", filename)?;
         let mib = saved
             .get("n_written")
@@ -1158,7 +1170,7 @@ pub fn run_slot_trial(
         let warm_ms = warm
             .prompt_ms
             .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
-        let reuse = reuse_of(&warm);
+        let reuse = reuse_of(&warm).or_else(|| reuse_ratio(&t1, &warm));
         record(
             &mut all,
             SLOT_RESTORE,
@@ -1341,9 +1353,11 @@ pub fn run_trial(
         all.entry(model.to_string())
             .or_default()
             .insert(baseline_label(menu_name), baseline.clone());
-        // Retire this model's legacy shared row so stale cross-menu
-        // reference points can't shadow the scoped ones.
-        all.entry(model.to_string()).or_default().remove(BASELINE);
+        // The legacy shared BASELINE row stays: scoped rows outrank it
+        // for THIS menu, but it is the only reference point other menus'
+        // pre-upgrade results have — deleting it (review catch
+        // 2026-08-28) silently erased their standing verdicts until
+        // every menu was re-raced.
         write_trials(&dir, &all)?;
 
         // Verdicts only compare what THIS run raced — stored results from

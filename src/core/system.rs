@@ -20,11 +20,7 @@ pub struct ScanReport {
 }
 
 pub fn config_dir() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
-        .unwrap_or_else(|| settings::real_home().join(".config"))
-        .join("modelsteward")
+    settings::xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
 pub fn config_file() -> PathBuf {
@@ -77,6 +73,48 @@ pub fn migrate_rename() -> Vec<String> {
     notes
 }
 
+/// Rescue data written under a snap HOME redirect (the app launched
+/// from e.g. VS Code's snap terminal wrote into
+/// ~/snap/<app>/<revision>/...; the next snap update orphans it —
+/// live casualty 2026-08-28). For each persistent dir: if the real
+/// location is empty and a snap revision holds one, move it home.
+pub fn migrate_snap_strays() -> Vec<String> {
+    let mut notes = Vec::new();
+    let snap_root = settings::real_home().join("snap");
+    let targets = [
+        (".config/modelsteward", config_dir()),
+        (".local/state/modelsteward", router::state_dir()),
+        (
+            ".local/share/modelsteward",
+            crate::core::managed::data_dir(),
+        ),
+    ];
+    let Ok(apps) = std::fs::read_dir(&snap_root) else {
+        return notes;
+    };
+    for app in apps.flatten() {
+        let Ok(revs) = std::fs::read_dir(app.path()) else {
+            continue;
+        };
+        for rev in revs.flatten() {
+            for (rel, new) in &targets {
+                let old = rev.path().join(rel);
+                if old.is_dir() && !new.exists() {
+                    notes.push(match std::fs::rename(&old, new) {
+                        Ok(()) => format!(
+                            "rescued snap-stranded data: {} → {}",
+                            old.display(),
+                            new.display()
+                        ),
+                        Err(e) => format!("could NOT rescue {}: {e}", old.display()),
+                    });
+                }
+            }
+        }
+    }
+    notes
+}
+
 pub fn load_config() -> settings::AppConfig {
     settings::AppConfig::load(&config_file())
 }
@@ -91,7 +129,13 @@ pub fn preset_path() -> PathBuf {
 /// checkout and auto-pick silently started preferring it, which also
 /// pointed the guided rebuild at the tag-pinned managed tree).
 pub fn is_managed_install(path: &std::path::Path) -> bool {
-    path.starts_with(crate::core::managed::data_dir())
+    // find_installs stores canonicalized paths; canonicalize the data
+    // dir too or a symlinked home defeats the guard and the newest
+    // managed archive silently wins auto-pick again (review catch).
+    let data = crate::core::managed::data_dir();
+    let data = data.canonicalize().unwrap_or(data);
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    path.starts_with(data)
 }
 
 /// The llama-server to run: the configured override if set, else the newest
@@ -145,8 +189,16 @@ pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanRep
     let installs = discover::find_installs(&[]);
     let mut by_build: Vec<_> = installs.iter().collect();
     by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
-    let (devices, devices_from) = by_build
+    // Non-managed first: the device probe's install stamps env_build /
+    // env_fingerprint into every measurement, and a newer managed
+    // ARCHIVE that never serves must not claim measurements made on the
+    // user's real binary (review catch 2026-08-28).
+    let (own, managed_installs): (Vec<_>, Vec<_>) = by_build
+        .into_iter()
+        .partition(|i| !is_managed_install(&i.server_path));
+    let (devices, devices_from) = own
         .iter()
+        .chain(managed_installs.iter())
         .find_map(|i| {
             let d = discover::list_devices(&i.server_path);
             (!d.is_empty()).then(|| (d, Some(i.server_path.clone())))

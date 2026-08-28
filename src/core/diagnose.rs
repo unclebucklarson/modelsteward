@@ -54,8 +54,11 @@ pub struct Diagnosis {
 /// unsloth/DeepSeek-V4-Flash's `dspark/dspark-...-BF16.gguf` — a
 /// draft-dspark Markov head that 'failed(1)' as a standalone model.
 pub fn is_draft_sidecar_name(name: &str) -> bool {
-    let n = name.to_lowercase();
-    n.contains("dspark") || n.contains("draft-")
+    // dspark only — the one VERIFIED sidecar convention. A broader
+    // "draft-" match told any model merely NAMED draft-something that
+    // its real failure was "expected and harmless" (review catch
+    // 2026-08-28); new conventions join when confirmed, not guessed.
+    name.to_lowercase().contains("dspark")
 }
 
 /// Classify a stored load-failure string.

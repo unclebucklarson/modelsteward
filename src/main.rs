@@ -47,6 +47,9 @@ use std::path::PathBuf;
 fn main() {
     // Runs before anything reads config/state: the 2026-08-26 rename
     // moved both directories, and the data must follow the name.
+    for note in system::migrate_snap_strays() {
+        eprintln!("{note}");
+    }
     for note in system::migrate_rename() {
         eprintln!("{note}");
     }

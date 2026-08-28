@@ -124,9 +124,6 @@ pub fn find_installs(manual: &[PathBuf]) -> Vec<LlamaInstall> {
     // The app-managed checkout's build and its pinnable archives are
     // installs like any other — offered, never forced.
     candidates.push(crate::core::managed::managed_server_bin());
-    for a in crate::core::managed::list_archives() {
-        candidates.push(a.server);
-    }
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
@@ -136,6 +133,24 @@ pub fn find_installs(manual: &[PathBuf]) -> Vec<LlamaInstall> {
             continue;
         }
         out.push(probe_install(&real));
+    }
+    // Archives join WITHOUT a --version spawn each: their build number
+    // is the directory label, and probing every archive made scans
+    // (and everything calling them) slower with each release the
+    // auto-build accumulated (review catch 2026-08-28). Backends still
+    // come from a cheap sibling read_dir.
+    for a in crate::core::managed::list_archives() {
+        let Ok(real) = a.server.canonicalize() else { continue };
+        if !real.is_file() || !seen.insert(real.clone()) {
+            continue;
+        }
+        out.push(LlamaInstall {
+            backends: sibling_backends(&real),
+            server_path: real,
+            build: a.build,
+            commit: None,
+            built_with: None,
+        });
     }
     out
 }
@@ -201,8 +216,6 @@ fn parse_version_output(out: &str) -> (Option<u64>, Option<String>, Option<Strin
     (build, commit, built_with)
 }
 
-/// Backend names from `libggml-<backend>.so*` files next to the binary.
-/// "base" is plumbing, not a backend, and is excluded.
 /// The feature-alias for an install: build number + compiled backends,
 /// e.g. "b10672-cuda-vulkan" (user naming idea 2026-08-28) — enough to
 /// tell two same-number variant builds apart at a glance.
@@ -225,6 +238,8 @@ pub fn install_alias(inst: &LlamaInstall) -> String {
     }
 }
 
+/// Backend names from `libggml-<backend>.so*` files next to the binary.
+/// "base" is plumbing, not a backend, and is excluded.
 fn sibling_backends(server: &Path) -> Vec<String> {
     let Some(dir) = server.parent() else {
         return Vec::new();

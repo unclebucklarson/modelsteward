@@ -190,7 +190,19 @@ pub fn build_deltas(all: &[Entry]) -> Vec<BuildDelta> {
 /// what the newest build cost or bought vs the one before, averaged over
 /// the models measured on both. None until two builds share evidence.
 pub fn build_advisory(all: &[Entry]) -> Option<String> {
-    let deltas = build_deltas(all);
+    let mut deltas = build_deltas(all);
+    // Only average comparisons that share ONE (prev, cur) pair — a
+    // model whose previous build differs would fold multi-release
+    // drift into a line labeled as a single rebuild (review catch
+    // 2026-08-28). The most-observed pair wins the headline.
+    let pair = {
+        let mut counts: std::collections::BTreeMap<(u64, u64), usize> = Default::default();
+        for d in &deltas {
+            *counts.entry((d.prev_build, d.cur_build)).or_default() += 1;
+        }
+        counts.into_iter().max_by_key(|(_, n)| *n)?.0
+    };
+    deltas.retain(|d| (d.prev_build, d.cur_build) == pair);
     let (mut ctx_pct, mut tg_pct) = (Vec::new(), Vec::new());
     for d in &deltas {
         if let Some((p, c)) = d.ctx

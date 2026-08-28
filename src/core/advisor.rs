@@ -30,6 +30,11 @@ pub struct BuildCheck {
     pub behind: Option<u64>,
     /// Uncommitted changes in the checkout (a pull would be risky).
     pub dirty: Option<bool>,
+    /// Checkout is on a detached HEAD (tag-pinned — branch-style
+    /// `pull --ff-only` cannot apply; review catch 2026-08-28: a
+    /// user-registered tag-pinned checkout hit the same wall the
+    /// managed tree did, and a path compare only covered the latter).
+    pub detached: Option<bool>,
     /// e.g. "86" for compute capability 8.6.
     pub cuda_arch: Option<String>,
     pub nvcc: Option<String>,
@@ -443,6 +448,10 @@ pub fn check(
         .as_deref()
         .and_then(parse_build_tag);
     c.dirty = run("git", &["-C", &repo_s, "status", "--porcelain"]).map(|s| !s.is_empty());
+    // symbolic-ref succeeds only on a branch; a tag-pinned checkout
+    // (the managed tree, or any user-added one) is detached.
+    c.detached =
+        Some(run("git", &["-C", &repo_s, "symbolic-ref", "-q", "HEAD"]).is_none());
     // Fetch is the only network step; failure leaves upstream unknown.
     let fetched = Command::new("git")
         // --tags: release tags (bNNNN) are how builds are addressed by
@@ -706,11 +715,16 @@ pub fn clear_stale_build_cache(repo: &Path, progress: &mut dyn FnMut(String)) {
     };
     if !same {
         progress(format!(
-            "build cache was created at {} — checkout has moved; clearing build/ \
-             for a fresh configure",
+            "build cache was created at {} — checkout has moved; clearing the \
+             cmake cache for a fresh configure (built binaries kept until the \
+             new build succeeds)",
             recorded.trim()
         ));
-        let _ = std::fs::remove_dir_all(&build);
+        // Only the configure state — never build/bin: if the rebuild then
+        // fails, the machine must still have its working llama-server
+        // (review catch 2026-08-28; the old code wiped all of build/).
+        let _ = std::fs::remove_file(build.join("CMakeCache.txt"));
+        let _ = std::fs::remove_dir_all(build.join("CMakeFiles"));
     }
 }
 
@@ -932,8 +946,16 @@ mod tests {
             "CMAKE_HOME_DIRECTORY:INTERNAL=/home/u/snap/code/258/.local/share/modelsteward/llama.cpp\n",
         )
         .unwrap();
+        std::fs::create_dir_all(build.join("CMakeFiles")).unwrap();
+        std::fs::create_dir_all(build.join("bin")).unwrap();
+        std::fs::write(build.join("bin/llama-server"), b"precious").unwrap();
         clear_stale_build_cache(&repo, &mut progress);
-        assert!(!build.exists(), "stale cache must clear the build dir");
+        assert!(!build.join("CMakeCache.txt").exists(), "cache file cleared");
+        assert!(!build.join("CMakeFiles").exists(), "cmake state cleared");
+        assert!(
+            build.join("bin/llama-server").exists(),
+            "built binaries must survive a cache clear"
+        );
         assert!(log.borrow()[0].contains("checkout has moved"), "{:?}", log.borrow());
 
         // Cache matching the real location → untouched.

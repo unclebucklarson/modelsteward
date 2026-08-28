@@ -47,6 +47,11 @@ impl Advisor for RouterAdvisor {
                     // 2026-08-28). Ask for the answer, not the deliberation;
                     // templates without the kwarg ignore it.
                     "chat_template_kwargs": { "enable_thinking": false },
+                    // Advisory prompts must not seed the server's prompt
+                    // cache — the app MEASURES that cache (review catch
+                    // 2026-08-28: a 49k-token brief would have skewed the
+                    // agent-turn and cache-effectiveness numbers).
+                    "cache_prompt": false,
                     "max_tokens": 2500,
                     "temperature": 0.2,
                 }))
@@ -87,7 +92,7 @@ pub fn failure_prompt(
     model: &str,
     error: &str,
     build: Option<u64>,
-    vram_mib: u64,
+    gpus: &str,
     ram_mib: u64,
     file_gib: Option<f64>,
     log_tail: &str,
@@ -100,7 +105,7 @@ pub fn failure_prompt(
          Model: {model}\n\
          Stored error: {error}\n\
          llama.cpp build: {}\n\
-         GPU VRAM: {vram_mib} MiB; system RAM: {ram_mib} MiB\n",
+         GPUs: {gpus}; system RAM: {ram_mib} MiB\n",
         build.map(|b| format!("b{b}")).unwrap_or_else(|| "unknown".into()),
     );
     if let Some(g) = file_gib {
@@ -184,7 +189,7 @@ mod tests {
             "ornith-1.5",
             "exit status 1",
             Some(10_630),
-            24_564,
+            "RTX 4090 (24564 MiB)",
             64_000,
             Some(18.6),
             "[40001] E ggml_cuda_init failed",
@@ -193,7 +198,7 @@ mod tests {
             "ornith-1.5",
             "exit status 1",
             "b10630",
-            "24564 MiB",
+            "RTX 4090 (24564 MiB)",
             "18.6 GiB",
             "ggml_cuda_init failed",
         ] {
