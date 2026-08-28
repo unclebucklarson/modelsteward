@@ -123,6 +123,7 @@ pub fn build(
     sel: crate::core::advisor::BackendSelection,
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
+    crate::core::advisor::clear_stale_build_cache(&checkout_dir(), progress);
     let repo = checkout_dir().display().to_string();
     crate::core::advisor::run_steps(
         &crate::core::advisor::build_commands(&repo, c, sel),

@@ -675,7 +675,43 @@ pub fn run_rebuild(
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
     anyhow::ensure!(c.repo.is_some(), "no git checkout to rebuild");
+    if let Some(repo) = &c.repo {
+        clear_stale_build_cache(repo, progress);
+    }
     run_steps(&rebuild_commands(c, sel), progress)
+}
+
+/// A moved checkout leaves a CMakeCache.txt whose recorded source dir
+/// no longer matches — cmake refuses it outright (live casualty
+/// 2026-08-28: the managed checkout migrated out of a snap-redirected
+/// path and every build failed until the cache was wiped by hand). The
+/// build dir is pure machine-generated artifact: when its cache names
+/// a different source, delete it and configure fresh.
+pub fn clear_stale_build_cache(repo: &Path, progress: &mut dyn FnMut(String)) {
+    let build = repo.join("build");
+    let Ok(text) = std::fs::read_to_string(build.join("CMakeCache.txt")) else {
+        return;
+    };
+    let Some(recorded) = text
+        .lines()
+        .find_map(|l| l.strip_prefix("CMAKE_HOME_DIRECTORY:INTERNAL="))
+    else {
+        return;
+    };
+    let recorded_p = Path::new(recorded.trim());
+    let same = match (recorded_p.canonicalize(), repo.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        // Old path gone (the snap case) → definitely stale.
+        _ => recorded_p == repo,
+    };
+    if !same {
+        progress(format!(
+            "build cache was created at {} — checkout has moved; clearing build/ \
+             for a fresh configure",
+            recorded.trim()
+        ));
+        let _ = std::fs::remove_dir_all(&build);
+    }
 }
 
 /// Run a command sequence with streamed, heartbeat-throttled output —
@@ -880,5 +916,34 @@ mod tests {
         let out = "  Marketing Name:  AMD Radeon RX 7900\n  Name:                    gfx1100\n  Name: amdgcn-amd-amdhsa--gfx1100\n";
         assert_eq!(parse_gfx_target(out), Some("gfx1100".into()));
         assert_eq!(parse_gfx_target("Name: some-cpu"), None);
+    }
+    #[test]
+    fn moved_checkouts_get_a_fresh_build_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("llama.cpp");
+        let build = repo.join("build");
+        std::fs::create_dir_all(&build).unwrap();
+        let log = std::cell::RefCell::new(Vec::new());
+        let mut progress = |l: String| log.borrow_mut().push(l);
+
+        // Cache from a DIFFERENT (now nonexistent) source dir → wiped.
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            "CMAKE_HOME_DIRECTORY:INTERNAL=/home/u/snap/code/258/.local/share/modelsteward/llama.cpp\n",
+        )
+        .unwrap();
+        clear_stale_build_cache(&repo, &mut progress);
+        assert!(!build.exists(), "stale cache must clear the build dir");
+        assert!(log.borrow()[0].contains("checkout has moved"), "{:?}", log.borrow());
+
+        // Cache matching the real location → untouched.
+        std::fs::create_dir_all(&build).unwrap();
+        std::fs::write(
+            build.join("CMakeCache.txt"),
+            format!("CMAKE_HOME_DIRECTORY:INTERNAL={}\n", repo.canonicalize().unwrap().display()),
+        )
+        .unwrap();
+        clear_stale_build_cache(&repo, &mut progress);
+        assert!(build.exists(), "matching cache must survive");
     }
 }
