@@ -393,14 +393,22 @@ pub fn near_misses(
         if imp < 1.10 {
             continue; // never beat the goal — not interesting
         }
-        // Mirror the verdict's magnitude-scaled floors exactly.
-        let (speed_floor, ctx_floor) = if imp >= 2.0 {
+        // Mirror the verdict's magnitude-scaled floors — and its
+        // purpose waiver — exactly (waived guards produce no phantom
+        // near-misses; the winner's tradeoff line carries the cost).
+        let (mut speed_floor, ctx_floor) = if imp >= 2.0 {
             (0.90, 0.90)
         } else if imp >= 1.25 {
             (0.95, 0.97)
         } else {
             (0.97, 0.98)
         };
+        if goal == Goal::Context
+            && b_ctx < crate::core::rows::AGENT_MIN_CTX
+            && ctx >= crate::core::rows::AGENT_MIN_CTX
+        {
+            speed_floor = 0.0;
+        }
         let mut costs = Vec::new();
         if let (Some(bf), Some(cf)) = (baseline.fidelity, r.fidelity)
             && cf < bf - 0.05
@@ -494,15 +502,43 @@ pub fn verdict(
         } else {
             (0.97, 0.98)
         };
-        let guarded = novel < b_novel * speed_floor
-            || rewrite < b_rewrite * speed_floor
-            || (ctx as f64) < b_ctx as f64 * ctx_floor
+        // A baseline that cannot serve the goal's PURPOSE doesn't set the
+        // price floor (2026-08-28, the b10675 rematch: the 4096-ctx
+        // default placement generated a quick 59 t/s and its speed guard
+        // vetoed every full-262k config — but 4096 can't run a coding
+        // agent at all, so 'losing' to it is losing to nothing). For the
+        // Context goal, speed guards are waived when the baseline is
+        // below agent-usable context and the candidate is above it.
+        // Fidelity is NEVER waived — quality is not a currency.
+        let purpose_waiver = goal == Goal::Context
+            && b_ctx < crate::core::rows::AGENT_MIN_CTX
+            && ctx >= crate::core::rows::AGENT_MIN_CTX;
+        let guarded = (!purpose_waiver
+            && (novel < b_novel * speed_floor
+                || rewrite < b_rewrite * speed_floor
+                || (ctx as f64) < b_ctx as f64 * ctx_floor))
             || matches!((baseline.fidelity, r.fidelity), (Some(bf), Some(cf)) if cf < bf - 0.05);
         if guarded {
             guard_rejected += 1;
             continue;
         }
-        if best.is_none_or(|(_, p0)| imp > improvement(goal, b_primary, p0)) {
+        // Equal-primary candidates (every full-context config settles at
+        // the same 262144) tie-break on rewrite speed — the metric agents
+        // feel most.
+        let better = match best {
+            None => true,
+            Some((b_label, p0)) => {
+                let imp0 = improvement(goal, b_primary, p0);
+                imp > imp0 * 1.01
+                    || (imp >= imp0 * 0.99
+                        && rewrite
+                            > candidates
+                                .get(b_label)
+                                .and_then(|c| c.tg_rewrite)
+                                .unwrap_or(0.0))
+            }
+        };
+        if better {
             best = Some((label, p));
         }
     }
@@ -520,15 +556,35 @@ pub fn verdict(
         _ => format!("{v:.1} t/s"),
     };
     match best {
-        Some((label, p)) => Verdict {
-            winner: Some(label.clone()),
-            reason: format!(
-                "{label}: {metric} {} vs baseline {} ({:+.0}% better), everything else preserved",
-                fmt_val(p),
-                fmt_val(b_primary),
-                (improvement(goal, b_primary, p) - 1.0) * 100.0
-            ),
-        },
+        Some((label, p)) => {
+            let waived = goal == Goal::Context
+                && b_ctx < crate::core::rows::AGENT_MIN_CTX
+                && candidates
+                    .get(label)
+                    .and_then(|c| c.settled_ctx)
+                    .is_some_and(|c| c >= crate::core::rows::AGENT_MIN_CTX);
+            let tradeoff = if waived {
+                let rw = candidates
+                    .get(label)
+                    .and_then(|c| c.tg_rewrite)
+                    .unwrap_or(0.0);
+                format!(
+                    " — baseline's {b_ctx} context can't run a coding agent, so its \
+                     {b_rewrite:.0} t/s set no floor; this config generates at {rw:.0} t/s"
+                )
+            } else {
+                ", everything else preserved".to_string()
+            };
+            Verdict {
+                winner: Some(label.clone()),
+                reason: format!(
+                    "{label}: {metric} {} vs baseline {} ({:+.0}% better){tradeoff}",
+                    fmt_val(p),
+                    fmt_val(b_primary),
+                    (improvement(goal, b_primary, p) - 1.0) * 100.0
+                ),
+            }
+        }
         None if guard_rejected > 0 => Verdict {
             winner: None,
             reason: format!(
@@ -1690,16 +1746,53 @@ mod tests {
         assert_eq!(v.winner.as_deref(), Some("cpu-moe"), "{}", v.reason);
         // And it is no longer double-listed as a near-miss.
         assert!(near_misses(Goal::Context, &base, &c).is_empty());
-        // A real speed collapse still fails even the widest floor…
+        // REVISED with the purpose waiver (b10675 rematch): a slow
+        // full-context config still beats an agent-UNUSABLE baseline —
+        // 16 t/s at 262k serves; 60 t/s at 4096 serves nothing. The
+        // cost stays visible in the winner's tradeoff narration.
         let mut c2 = std::collections::BTreeMap::new();
         c2.insert("cpu-moe-t24".to_string(), mk(23.0, 262_144, 1.0));
-        assert_eq!(verdict(Goal::Context, &base, &c2).winner, None);
+        assert_eq!(
+            verdict(Goal::Context, &base, &c2).winner.as_deref(),
+            Some("cpu-moe-t24")
+        );
         // …and fidelity never relaxes, no matter the win.
         let mut c3 = std::collections::BTreeMap::new();
         c3.insert("cheat".to_string(), mk(41.0, 262_144, 0.80));
         let v3 = verdict(Goal::Context, &base, &c3);
         assert_eq!(v3.winner, None);
         assert!(v3.reason.contains("paid too much elsewhere"), "{}", v3.reason);
+    }
+
+    #[test]
+    fn unusable_baselines_dont_set_the_price_floor() {
+        // The b10675 rematch, exact live numbers: default placement got
+        // FASTER (59-60 t/s) at its unusable 4096 ctx, and its speed
+        // guard vetoed every full-262k config — a 64x context win lost
+        // to a config that can't run an agent at all. The purpose
+        // waiver ends that; equal-context winners tie-break on rewrite
+        // speed, crowning the measured sweet spot.
+        let mk = |novel: f64, rewrite: f64, ctx: u64| {
+            let mut t = r(novel, rewrite, ctx);
+            t.fidelity = Some(1.0);
+            t
+        };
+        let base = mk(59.2, 60.0, 4096);
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("cpu-moe".to_string(), mk(39.7, 40.1, 262_144));
+        c.insert("cpu-moe-t8".to_string(), mk(39.7, 39.9, 262_144));
+        c.insert("cpu-moe-t24".to_string(), mk(16.5, 16.3, 262_144));
+        c.insert("ncpu-moe-40".to_string(), mk(45.2, 45.2, 262_144));
+        c.insert("ncpu-moe-32".to_string(), mk(52.0, 52.3, 262_144));
+        let v = verdict(Goal::Context, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("ncpu-moe-32"), "{}", v.reason);
+        // No phantom near-misses for waived speed guards.
+        assert!(near_misses(Goal::Context, &base, &c).is_empty());
+        // A USABLE baseline keeps its speed guards: same candidates
+        // against a 100k-ctx baseline must still respect the floors.
+        let base_usable = mk(59.2, 60.0, 100_000);
+        let v2 = verdict(Goal::Context, &base_usable, &c);
+        assert_eq!(v2.winner, None, "{}", v2.reason);
     }
 
     #[test]
