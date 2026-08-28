@@ -273,9 +273,20 @@ pub fn verify_summary(r: &VerifyReport) -> Vec<String> {
 }
 
 /// Locate the git checkout for a llama-server at `<repo>/build/bin/llama-server`.
+/// A PINNED ARCHIVE binary (builds/bN/llama-server) has no checkout above
+/// it — its source is the managed clone, so freshness checks, triage, and
+/// the Build Advisor resolve there (live misdiagnosis 2026-08-28: pinning
+/// b10675 made the header claim "upstream unreachable (offline?)").
 pub fn repo_of(server_bin: &Path) -> Option<PathBuf> {
     let repo = server_bin.parent()?.parent()?.parent()?;
-    repo.join(".git").exists().then(|| repo.to_path_buf())
+    if repo.join(".git").exists() {
+        return Some(repo.to_path_buf());
+    }
+    let managed = crate::core::managed::data_dir();
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    (canon(server_bin).starts_with(canon(&managed))
+        && crate::core::managed::checkout_present())
+    .then(crate::core::managed::checkout_dir)
 }
 
 fn run(cmd: &str, args: &[&str]) -> Option<String> {
@@ -504,7 +515,9 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
         )),
         (Some(cur), None, _) => out.push((
             format!("Your llama.cpp is b{cur}; upstream unreachable"),
-            "Couldn't contact the git remote (offline?) — freshness unknown.".into(),
+            "Couldn't contact the git remote — offline, or this binary has no \
+             git checkout to fetch from — freshness unknown."
+                .into(),
         )),
         _ => out.push((
             "Couldn't determine your llama.cpp version".into(),
