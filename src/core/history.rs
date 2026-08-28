@@ -27,6 +27,7 @@ pub struct Entry {
     pub tg_tps: Option<f64>,
     pub eval_score: Option<f64>,
     pub tool_reliability: Option<f64>,
+    pub loop_reliability: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -42,6 +43,7 @@ impl Default for Entry {
             tg_tps: None,
             eval_score: None,
             tool_reliability: None,
+            loop_reliability: None,
             error: None,
         }
     }

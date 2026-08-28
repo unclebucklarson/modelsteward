@@ -1941,9 +1941,14 @@ impl App {
                         _ => ", speed not benched yet".into(),
                     };
                     let qual = match (m.eval_score, m.tool_reliability) {
-                        (Some(e), Some(t)) => {
-                            format!(", evals {:.0}% / tools {:.0}%", e * 100.0, t * 100.0)
-                        }
+                        (Some(e), Some(t)) => format!(
+                            ", evals {:.0}% / tools {:.0}%{}",
+                            e * 100.0,
+                            t * 100.0,
+                            m.loop_reliability
+                                .map(|l| format!(" / agent loops {:.0}%", l * 100.0))
+                                .unwrap_or_default()
+                        ),
                         _ => String::new(),
                     };
                     ui.label(format!(
@@ -2038,7 +2043,7 @@ impl App {
                 );
                 ui.checkbox(
                     &mut self.lab_quality,
-                    "Quality probe (eval battery + 5-shot tool calls, ~3-8 min)",
+                    "Quality probe (eval battery + tool calls + 3 multi-hop agent loops, ~5-12 min)",
                 );
                 ui.checkbox(
                     &mut self.lab_load,

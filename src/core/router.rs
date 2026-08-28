@@ -491,6 +491,9 @@ pub struct Measurement {
     /// via the Lab's Quality campaign.
     pub eval_score: Option<f64>,
     pub tool_reliability: Option<f64>,
+    /// Multi-hop agent-loop completion rate (quality probe): a model
+    /// can ace single tool calls yet quit mid-loop — the MoE lesson.
+    pub loop_reliability: Option<f64>,
 }
 
 impl Default for Measurement {
@@ -506,6 +509,7 @@ impl Default for Measurement {
             bench_build: None,
             eval_score: None,
             tool_reliability: None,
+            loop_reliability: None,
         }
     }
 }
@@ -574,6 +578,7 @@ pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) 
         m.bench_build = old.bench_build;
         m.eval_score = old.eval_score;
         m.tool_reliability = old.tool_reliability;
+        m.loop_reliability = old.loop_reliability;
     }
     all.insert(id.to_string(), m);
 }
