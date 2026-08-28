@@ -3118,25 +3118,38 @@ impl App {
         });
     }
 
-    /// Pick the model that answers an advisory: something loaded if
-    /// possible (no swap cost), else any measured model — never the
-    /// excluded (usually failing) model itself.
+    /// Pick the model that answers an advisory: the highest MEASURED
+    /// quality wins (an opinion is only as good as its author — the
+    /// first live fleet brief went to whichever model sorted first
+    /// alphabetically); a loaded model breaks ties to avoid a swap.
+    /// Never the excluded (usually failing) model itself.
     fn pick_answerer(&self, exclude: Option<&str>) -> Option<String> {
-        let loaded: Option<String> = match &self.router_state {
+        let loaded: std::collections::HashSet<&str> = match &self.router_state {
             Some(router::RouterState::Ours { models }) => models
                 .iter()
-                .filter(|m| m.status == "loaded" && Some(m.id.as_str()) != exclude)
-                .map(|m| m.id.clone())
-                .next(),
-            _ => None,
+                .filter(|m| m.status == "loaded")
+                .map(|m| m.id.as_str())
+                .collect(),
+            _ => Default::default(),
         };
-        loaded.or_else(|| {
-            self.measurements
-                .iter()
-                .filter(|(id, m)| Some(id.as_str()) != exclude && m.n_ctx.is_some())
-                .map(|(id, _)| id.clone())
-                .next()
-        })
+        self.measurements
+            .iter()
+            .filter(|(id, m)| Some(id.as_str()) != exclude && m.n_ctx.is_some())
+            .max_by(|(a_id, a), (b_id, b)| {
+                let key = |id: &str, m: &&router::Measurement| {
+                    (
+                        m.eval_score.unwrap_or(0.0),
+                        m.tool_reliability.unwrap_or(0.0),
+                        u8::from(loaded.contains(id)),
+                    )
+                };
+                let (ae, at, al) = key(a_id, a);
+                let (be, bt, bl) = key(b_id, b);
+                ae.total_cmp(&be)
+                    .then(at.total_cmp(&bt))
+                    .then(al.cmp(&bl))
+            })
+            .map(|(id, _)| id.clone())
     }
 
     /// Managed-checkout worker: clone if needed, fetch tags, check out

@@ -131,7 +131,10 @@ pub fn fleet_prompt(findings_json: &str) -> String {
          hardware, measured context windows, speed baselines, quality scores, \
          and config-trial results per model. Answer three questions:\n\
          1. Which measured model is the best daily driver for coding-agent work, \
-         and why (cite its numbers)?\n\
+         and why (cite its numbers)? Weigh OUTPUT QUALITY (eval_score, \
+         tool_reliability, fidelity) above raw speed — for coding agents a \
+         wrong fast answer costs whole extra turns; prefer speed only between \
+         models of equal measured quality.\n\
          2. What single change would most improve this machine's setup?\n\
          3. What is unmeasured or stale and most worth measuring next?\n\n\
          {findings_json}\n"
