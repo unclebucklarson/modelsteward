@@ -534,6 +534,20 @@ and apply buttons disable while anything runs.
   miner's FIRST live report: both qwen3.8 daily drivers reprocess full
   prompts every turn because mmproj disables reuse. FA-engaged check
   deferred: no FA evidence exists at this log verbosity.
+  **REVISED by the night investigation (2026-08-27/28)**: vision was
+  NOT the binding constraint on the daily driver — its SWA/hybrid
+  attention makes the KV cache non-shiftable, so llama.cpp disables
+  cache-reuse AND ctx-shift regardless ("not supported by this
+  context"); mid-edit turns resume from context checkpoints whose
+  defaults sit 8192 tokens apart. Measured: exact resend 2626/2630
+  cached (123ms); mid-edit 42 cached (1954ms full reprocess);
+  --checkpoint-min-step 128 → 2114 cached, 467ms. Consequences all
+  shipped: probe instrument reads timings.cache_n (the server's own
+  accounting — the old prompt_n ratio read 0% where truth was 1.6%);
+  miner distinguishes the two disable reasons; warning text points at
+  the real lever; NEW `ckpt` campaign races checkpoint-min-step
+  1024/256/256-x64 under the agent-turn goal. The [*] cache-reuse=256
+  default stays (a no-op on SWA models, real on shiftable ones).
 
 ## M9 — The Meter (queued 2026-08-27, design talk with user)
 
