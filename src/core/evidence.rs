@@ -24,6 +24,10 @@ pub struct ModelCacheStats {
     pub turns: u32,
     pub prompt_tokens: u64,
     pub reused_tokens: u64,
+    /// Tokens the model GENERATED across those turns (the meter's other
+    /// half — prompt tokens are what you feed it, these are what you
+    /// paid to produce).
+    pub generated_tokens: u64,
     /// llama-server announced cache-reuse disabled (any reason).
     pub reuse_disabled: bool,
     /// The non-multimodal reason: "not supported by this context" — the
@@ -53,6 +57,18 @@ fn field_u64(line: &str, key: &str) -> Option<u64> {
 
 fn task_id(line: &str) -> Option<u64> {
     field_u64(line, "task")
+}
+
+/// N from print_timing's `… = 142.88 ms /   286 tokens (…` shape — the
+/// count sits between the first '/' and " tokens".
+fn tokens_after_slash(line: &str) -> Option<u64> {
+    let (_, rest) = line.split_once('/')?;
+    let num: String = rest
+        .trim_start()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    num.parse().ok()
 }
 
 fn port_prefix(line: &str) -> Option<(u32, &str)> {
@@ -157,7 +173,14 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
         }
         let Some(task) = task_id(body) else { continue };
         let t = tasks.entry((port, task)).or_default();
-        if body.contains("prompt processing, n_tokens =") {
+        // Two dialects (grammar drift found live 2026-08-28, b10630 →
+        // b10672: the n_gen / progress lines all but vanished; current
+        // builds put per-turn truth in print_timing's "/ N tokens"):
+        if body.contains("prompt eval time =") {
+            t.prompt = t.prompt.max(tokens_after_slash(body));
+        } else if body.contains(" eval time =") && !body.contains("prompt") {
+            t.generated = t.generated.max(tokens_after_slash(body));
+        } else if body.contains("prompt processing, n_tokens =") {
             let n = field_u64(body, "n_tokens");
             t.prompt = t.prompt.max(n);
         } else if body.contains("| n_gen =") || body.contains("| task") && body.contains(" n_gen =")
@@ -189,12 +212,14 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
                 turns: 0,
                 prompt_tokens: 0,
                 reused_tokens: 0,
+                generated_tokens: 0,
                 reuse_disabled: false,
                 reuse_unsupported_context: false,
             });
         s.turns += 1;
         s.prompt_tokens += total_prompt;
         s.reused_tokens += reused;
+        s.generated_tokens += generated;
     }
     for port in &disabled_ports {
         if let Some(model) = port_model.get(port)
@@ -214,6 +239,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
                     turns: 0,
                     prompt_tokens: 0,
                     reused_tokens: 0,
+                    generated_tokens: 0,
                     reuse_disabled: true,
                     reuse_unsupported_context: context_ports.contains(port),
                 });
@@ -262,6 +288,22 @@ mod tests {
 [9] x I slot release: id 0 | task 3 | stop processing: n_tokens = 50, truncated = 0\n";
         assert!(cache_effectiveness(log).is_empty());
     }
+    #[test]
+    fn print_timing_dialect_parses_the_b10672_log_shape() {
+        // Verbatim shapes from the live 2026-08-28 log — the older
+        // n_gen/progress lines are nearly gone in current builds.
+        let log = "load: spawning server instance with name=m on port 49045\n\
+[49045] 0.04.570.248 I slot print_timing: id  0 | task 0 | prompt eval time =     142.88 ms /   286 tokens (    0.50 ms per token,  2001.74 tokens per second)\n\
+[49045] 0.04.570.251 I slot print_timing: id  0 | task 0 |        eval time =     430.57 ms /    70 tokens (    6.24 ms per token,   160.25 tokens per second)\n\
+[49045] 0.04.570.287 I slot      release: id  0 | task 0 | stop processing: n_tokens = 355, truncated = 0\n";
+        let stats = cache_effectiveness(log);
+        assert_eq!(stats.len(), 1, "{stats:?}");
+        let s = &stats[0];
+        assert_eq!((s.turns, s.generated_tokens), (1, 70));
+        assert_eq!(s.prompt_tokens, 285, "release 355 - generated 70");
+        assert_eq!(s.reused_tokens, 285 - 286_u64.min(285), "processed 286 >= prompt: no reuse credit");
+    }
+
     #[test]
     fn context_unsupported_is_distinguished_from_multimodal() {
         let log = "load: spawning server instance with name=swa-model on port 41001\n\

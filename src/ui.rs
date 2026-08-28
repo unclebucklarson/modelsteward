@@ -12,8 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, ollama,
-    opencode, router, rows, settings, system, trial,
+    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, meter,
+    ollama, opencode, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -72,6 +72,8 @@ enum Msg {
     History(Vec<history::Entry>),
     /// Prompt-cache effectiveness mined from router.log.
     CacheStats(Vec<evidence::ModelCacheStats>),
+    /// Today's meter summary line (None = nothing metered yet today).
+    Meter(Option<String>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -145,6 +147,7 @@ struct App {
     upstream: Option<advisor::UpstreamStatus>,
     history: Vec<history::Entry>,
     cache_stats: Vec<evidence::ModelCacheStats>,
+    meter_line: Option<String>,
     /// Token for the CURRENT long-running operation; Cancel flips it and
     /// workers stop at their next safe boundary.
     cancel_token: cancel::CancelToken,
@@ -260,6 +263,7 @@ impl App {
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
             cache_stats: Vec::new(),
+            meter_line: None,
             cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
             lab_selected: None,
@@ -484,6 +488,7 @@ impl App {
                 // throttled to twice a minute (the log can be large).
                 let log_len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
                 if log_len != last_log_len && last_mine.elapsed().as_secs() >= 30 {
+                    // fall through below (kept single block)
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
                     if let Ok(text) = std::fs::read_to_string(&log_path) {
@@ -1235,6 +1240,7 @@ impl App {
                 Msg::Trials(t) => self.trials = t,
                 Msg::History(h) => self.history = h,
                 Msg::CacheStats(c) => self.cache_stats = c,
+                Msg::Meter(m) => self.meter_line = m,
                 // NOTE: does not clear `busy` — a Lab campaign may still be
                 // mid-sequence; the worker ends with Finished. No dialog:
                 // verdicts live in the Lab's standing recommendations
@@ -2335,6 +2341,10 @@ impl App {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
             ui.separator();
         }
+        if let Some(line) = &self.meter_line {
+            ui.label(line);
+            ui.add_space(4.0);
+        }
         if !self.cache_stats.is_empty() {
             ui.strong("Prompt cache — measured from your real sessions");
             for s in &self.cache_stats {
@@ -3022,6 +3032,7 @@ impl App {
             ollama_port,
             models_max,
             checkouts: self.cfg.checkouts.clone(),
+            cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
             managed_auto_build: self.managed_auto_edit,
             overrides: self.cfg.overrides.clone(),
         })

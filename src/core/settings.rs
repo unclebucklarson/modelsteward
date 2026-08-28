@@ -68,6 +68,11 @@ pub struct AppConfig {
     /// options, selectable for building; the active binary's checkout
     /// and the managed clone are always offered).
     pub checkouts: Vec<PathBuf>,
+    /// $/Mtok OUTPUT price used by the Meter's cloud-comparison counter
+    /// (M9 p1). A ballpark mid-tier API price as of 2026-08 — edit to
+    /// whatever YOU would actually pay; the report labels it as your
+    /// number, never a quote.
+    pub cloud_price_per_mtok: f64,
     /// Autonomy for the managed checkout (user decision 2026-08-28):
     /// when the daily freshness check finds a new release, BUILD and
     /// ARCHIVE it automatically — but never pin it: what the router
@@ -90,6 +95,7 @@ impl Default for AppConfig {
             models_max: 1,
             overrides: Default::default(),
             checkouts: Vec::new(),
+            cloud_price_per_mtok: 3.0,
             managed_auto_build: false,
         }
     }

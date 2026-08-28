@@ -593,7 +593,18 @@ tokens at $0.15/kWh, cheaper than cloud but decidedly not free.)
   effect (user request): totals, averages, and datetime-range queries
   over everything below.
 
-**Token metrics (phase 1 — no power hardware needed):**
+**Token metrics (phase 1): ✔ DONE 2026-08-28** — core/meter.rs
+(extraction-clean: log text + timestamps in, buckets/reports out).
+Continuous harvest in the poller + on every `--meter` run; cursor
+(meter-cursor.json) fingerprints the log instance so crediting is
+idempotent and truncation-proof; ledger (meter.jsonl) accumulates
+hour buckets forever. Surfaces: Server-tab "Meter today" line,
+`--meter [today|24h|7d]` (totals, per-model, prompt:generated shape,
+busiest hour, per-day series, cloud-comparison against the editable
+config price). Live shakedown found b10630→b10672 LOG GRAMMAR DRIFT
+(n_gen/progress lines nearly gone) — the evidence parser now speaks
+both dialects, which also healed the silently-broken cache monitor.
+Original spec:
 - Totals: prompt vs generated vs cache-reused tokens, per model and
   fleet-wide (reused tokens are the "tokens you didn't pay for" —
   ties the cache monitor into the money story).

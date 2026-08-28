@@ -12,6 +12,7 @@
 //!   modelsteward --calibrate [port] [force]
 //!                                        measure settled contexts (skips
 //!                                        fresh measurements unless `force`)
+//!   modelsteward --meter [today|24h|7d]  # token ledger report (all time without a range)
 //!   modelsteward --sync [port]       write measured models into
 //!                                        opencode.json (backs up first)
 //!   modelsteward --advise            build advisor: check llama.cpp
@@ -115,6 +116,25 @@ fn main() {
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--verify-rebuild") => verify_rebuild(&cfg),
         Some("--quality") => quality_cmd(&cfg, &args[1..]),
+        Some("--meter") => {
+            // Harvest the live log first so the report is current, then
+            // print the requested range (UTC hour buckets).
+            use modelsteward::core::meter;
+            let dir = router::state_dir();
+            let now = advisor::now_epoch();
+            if let Ok(text) = std::fs::read_to_string(dir.join("router.log")) {
+                let _ = meter::harvest(&dir, &text, now);
+            }
+            let (label, since) = match args.get(1).map(String::as_str) {
+                Some("today") => ("today (UTC)", Some(now - now % 86_400)),
+                Some("24h") => ("last 24h", Some(now.saturating_sub(86_400))),
+                Some("7d") => ("last 7 days", Some(now.saturating_sub(7 * 86_400))),
+                _ => ("all time", None),
+            };
+            let r = meter::report(&meter::read_all(&dir), since, None);
+            print!("{}", meter::fmt_report(&r, label, cfg.cloud_price_per_mtok));
+            Ok(())
+        }
         Some("--report") => match modelsteward::core::report::generate(&cfg) {
             Ok(path) => {
                 println!("findings report written: {}", path.display());

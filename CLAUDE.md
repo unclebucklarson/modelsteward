@@ -25,7 +25,8 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
   (incremental; skips fingerprint-fresh measurements), `--bench [id] [force]`
   (llama-bench pp/tg baselines; skips current-build-fresh ones),
   `--trial <id> [spec|ub|kv] [keep <variant>]` (measured config A/B with
-  verdict), `--sync`, `--install-service`. App config lives at
+  verdict), `--meter [today|24h|7d]` (token ledger report), `--sync`,
+  `--install-service`. App config lives at
   `~/.config/modelsteward/config.json` (see core/settings.rs);
   measurements at `~/.local/state/modelsteward/measurements.json`.
 - Track work in [ROADMAP.md](ROADMAP.md); update it when milestones land.
