@@ -132,6 +132,10 @@ struct App {
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
     managed_status: Option<managed::ManagedStatus>,
+    /// Which checkout the Build Advisor analyzes; None = the active
+    /// binary's (rung 1 of the checkout ladder, user decision 2026-08-28).
+    sel_checkout: Option<PathBuf>,
+    archive_label: String,
     show_advisor: bool,
     build_check: Option<advisor::BuildCheck>,
     backend_sel: Option<advisor::BackendSelection>,
@@ -289,6 +293,8 @@ impl App {
             advisories: Vec::new(),
             advisor_open: false,
             managed_status: None,
+            sel_checkout: None,
+            archive_label: String::new(),
             show_advisor: false,
             build_check: None,
             backend_sel: None,
@@ -978,14 +984,27 @@ impl App {
         self.build_check = None;
         let cfg = self.cfg.clone();
         let measurements = self.measurements.clone();
+        let sel = self.sel_checkout.clone();
         self.spawn(
             "checking your llama.cpp build (contacts the git remote)",
             move |tx| {
-                let server = system::pick_server(&cfg).ok();
+                // A selected checkout is analyzed via its own built binary
+                // (repo_of walks back to it); unbuilt checkouts still get
+                // their repo pinned so the guided rebuild can run.
+                let server = match &sel {
+                    Some(dir) => {
+                        let bin = dir.join("build/bin/llama-server");
+                        bin.is_file().then_some(bin)
+                    }
+                    None => system::pick_server(&cfg).ok(),
+                };
                 let build = server.as_deref().and_then(discover::build_of);
                 let log =
                     std::fs::read_to_string(router::state_dir().join("router.log")).ok();
-                let check = advisor::check(server, build, &measurements, log.as_deref());
+                let mut check = advisor::check(server, build, &measurements, log.as_deref());
+                if check.repo.is_none() {
+                    check.repo = sel;
+                }
                 let _ = tx.send(Msg::BuildCheck(Box::new(check)));
                 let _ = tx.send(Msg::Managed(managed::status()));
             },
@@ -2848,6 +2867,7 @@ impl App {
             server_bin,
             ollama_port,
             models_max,
+            checkouts: self.cfg.checkouts.clone(),
             overrides: self.cfg.overrides.clone(),
         })
     }
@@ -3495,11 +3515,69 @@ impl App {
         let mut triage = false;
         let mut managed_build = false;
         let mut pin: Option<Option<PathBuf>> = None;
+        let mut recheck_sel = false;
+        let mut archive_now = false;
         egui::Window::new("Build Advisor")
             .collapsible(false)
             .default_width(560.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                // Which checkout is under analysis (rung 1): the active
+                // binary's by default; the managed clone and any manually
+                // added checkouts are selectable.
+                ui.horizontal(|ui| {
+                    ui.label("Analyzing:");
+                    let name = |p: &Option<PathBuf>| match p {
+                        None => "active binary's checkout".to_string(),
+                        Some(d) => d.display().to_string(),
+                    };
+                    let current = name(&self.sel_checkout);
+                    let mut choices: Vec<Option<PathBuf>> = vec![None];
+                    if managed::checkout_present() {
+                        choices.push(Some(managed::checkout_dir()));
+                    }
+                    for c in &self.cfg.checkouts {
+                        choices.push(Some(c.clone()));
+                    }
+                    egui::ComboBox::from_id_salt("advisor-checkout")
+                        .selected_text(current)
+                        .show_ui(ui, |ui| {
+                            for choice in choices {
+                                let label = name(&choice);
+                                if ui
+                                    .selectable_label(self.sel_checkout == choice, label)
+                                    .clicked()
+                                    && self.sel_checkout != choice
+                                {
+                                    self.sel_checkout = choice;
+                                    recheck_sel = true;
+                                }
+                            }
+                        });
+                    if ui
+                        .small_button("+ add checkout…")
+                        .on_hover_text(
+                            "Register another llama.cpp checkout (e.g. one you build \
+                             with custom options) — analyzable and rebuildable here, \
+                             archivable below.",
+                        )
+                        .clicked()
+                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    {
+                        if dir.join(".git").exists() {
+                            self.cfg.checkouts.push(dir.clone());
+                            let _ = self.cfg.save(&system::config_file());
+                            self.sel_checkout = Some(dir);
+                            recheck_sel = true;
+                        } else {
+                            self.log(format!(
+                                "not a git checkout: {} (no .git)",
+                                dir.display()
+                            ));
+                        }
+                    }
+                });
+                ui.separator();
                 let Some(check) = &self.build_check else {
                     ui.horizontal(|ui| {
                         ui.spinner();
@@ -3631,21 +3709,58 @@ impl App {
                         {
                             managed_build = true;
                         }
+                        // Rung 2: archive the ANALYZED checkout's current
+                        // build under a label — custom builds become
+                        // pinnable next to release archives. Rung 3 caveat
+                        // lives on the hover.
+                        if check.repo.is_some() {
+                            ui.horizontal(|ui| {
+                                ui.label("Archive this build as:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.archive_label)
+                                        .desired_width(160.0)
+                                        .hint_text(
+                                            check
+                                                .current_build
+                                                .map(|b| format!("b{b}-myvariant"))
+                                                .unwrap_or_else(|| "label".into()),
+                                        ),
+                                );
+                                if ui
+                                    .add_enabled(
+                                        self.busy.is_none()
+                                            && !self.archive_label.trim().is_empty(),
+                                        egui::Button::new("Archive"),
+                                    )
+                                    .on_hover_text(
+                                        "Snapshots the analyzed checkout's build/bin into \
+                                         the pinnable archive set. CAVEAT: measurements key \
+                                         builds by NUMBER — two variants of the same build \
+                                         look identical to bench/history/scorecard (schema \
+                                         work parked on the roadmap).",
+                                    )
+                                    .clicked()
+                                {
+                                    archive_now = true;
+                                }
+                            });
+                        }
                         if !ms.archives.is_empty() {
                             ui.add_space(4.0);
                             ui.label("Archived builds (pin = router uses it on next start):");
                             let pinned = self.cfg.server_bin.clone();
-                            for (b, server) in &ms.archives {
+                            for a in &ms.archives {
                                 ui.horizontal(|ui| {
-                                    let is_pinned = pinned.as_deref() == Some(server.as_path());
-                                    ui.monospace(format!("b{b}"));
+                                    let is_pinned =
+                                        pinned.as_deref() == Some(a.server.as_path());
+                                    ui.monospace(&a.label);
                                     if is_pinned {
                                         ui.small("(pinned)");
                                         if ui.button("Unpin (auto-pick)").clicked() {
                                             pin = Some(None);
                                         }
                                     } else if ui.button("Pin").clicked() {
-                                        pin = Some(Some(server.clone()));
+                                        pin = Some(Some(a.server.clone()));
                                     }
                                 });
                             }
@@ -3661,6 +3776,27 @@ impl App {
         }
         if recheck {
             self.action_build_check();
+        }
+        if recheck_sel {
+            self.action_build_check();
+        }
+        if archive_now
+            && let Some(repo) = self.build_check.as_ref().and_then(|c| c.repo.clone())
+        {
+            let label = self.archive_label.trim().to_string();
+            self.spawn(&format!("archiving build as {label}"), move |tx| {
+                let tx2 = tx.clone();
+                let mut progress = move |line: String| {
+                    let _ = tx2.send(Msg::Progress(line));
+                };
+                let result =
+                    managed::archive_from(&repo.join("build/bin"), &label, &mut progress);
+                let _ = tx.send(Msg::Managed(managed::status()));
+                let _ = tx.send(match result {
+                    Ok(p) => Msg::Finished(format!("archived to {}", p.display())),
+                    Err(e) => Msg::Error(format!("archive: {e:#}")),
+                });
+            });
         }
         if triage {
             self.action_rebuild_triage();

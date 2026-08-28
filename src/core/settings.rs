@@ -28,6 +28,11 @@ pub struct AppConfig {
     /// cache id). Living HERE — not in router.ini — is what lets preset
     /// regeneration keep the user's tuning instead of flattening it.
     pub overrides: std::collections::BTreeMap<String, ModelOverrides>,
+    /// Extra llama.cpp checkouts the Build Advisor can analyze and
+    /// rebuild (user decision 2026-08-28: manual checkouts with custom
+    /// options, selectable for building; the active binary's checkout
+    /// and the managed clone are always offered).
+    pub checkouts: Vec<PathBuf>,
 }
 
 impl Default for AppConfig {
@@ -43,6 +48,7 @@ impl Default for AppConfig {
             ollama_port: 11434,
             models_max: 1,
             overrides: Default::default(),
+            checkouts: Vec::new(),
         }
     }
 }

@@ -134,8 +134,24 @@ pub fn build(
 /// build/bin is overwritten by every rebuild; the archive is what makes
 /// rollback a pin instead of a rebuild.
 pub fn archive_build(build: u64, progress: &mut dyn FnMut(String)) -> Result<PathBuf> {
-    let src = checkout_dir().join("build/bin");
-    let dst = archive_dir().join(format!("b{build}"));
+    archive_from(&checkout_dir().join("build/bin"), &format!("b{build}"), progress)
+}
+
+/// Archive ANY checkout's built binaries under a user-chosen label
+/// (rung 2 of the checkout ladder, user decision 2026-08-28): custom
+/// builds become pinnable side by side with release archives. CAVEAT
+/// (rung 3 parked): measurements key builds by NUMBER — two variants
+/// of the same build are indistinguishable to bench/history/scorecard.
+pub fn archive_from(
+    src: &Path,
+    label: &str,
+    progress: &mut dyn FnMut(String),
+) -> Result<PathBuf> {
+    anyhow::ensure!(
+        !label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric() || "-_.".contains(c)),
+        "label must be filesystem-plain (letters, digits, -_.)"
+    );
+    let dst = archive_dir().join(label);
     anyhow::ensure!(
         src.join("llama-server").is_file(),
         "no built llama-server at {}",
@@ -143,7 +159,7 @@ pub fn archive_build(build: u64, progress: &mut dyn FnMut(String)) -> Result<Pat
     );
     std::fs::create_dir_all(&dst)?;
     let mut n = 0u32;
-    for entry in std::fs::read_dir(&src)? {
+    for entry in std::fs::read_dir(src)? {
         let entry = entry?;
         if entry.file_type()?.is_file() {
             std::fs::copy(entry.path(), dst.join(entry.file_name()))?;
@@ -154,26 +170,45 @@ pub fn archive_build(build: u64, progress: &mut dyn FnMut(String)) -> Result<Pat
     Ok(dst)
 }
 
-/// Archived builds, newest first: (build, path-to-llama-server).
-pub fn list_archives() -> Vec<(u64, PathBuf)> {
+/// One pinnable archived build.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Archive {
+    /// Directory name: bNNNN for release archives, free label otherwise.
+    pub label: String,
+    /// Parsed build number when the label carries one.
+    pub build: Option<u64>,
+    pub server: PathBuf,
+}
+
+/// Archived builds: release tags newest first, then labeled variants.
+pub fn list_archives() -> Vec<Archive> {
     list_archives_in(&archive_dir())
 }
 
 /// Pure-ish core of list_archives, testable against a temp dir.
-pub fn list_archives_in(dir: &Path) -> Vec<(u64, PathBuf)> {
-    let mut out: Vec<(u64, PathBuf)> = std::fs::read_dir(dir)
+pub fn list_archives_in(dir: &Path) -> Vec<Archive> {
+    let mut out: Vec<Archive> = std::fs::read_dir(dir)
         .map(|entries| {
             entries
                 .filter_map(|e| {
                     let e = e.ok()?;
-                    let build: u64 = e.file_name().to_str()?.strip_prefix('b')?.parse().ok()?;
+                    let label = e.file_name().to_str()?.to_string();
                     let server = e.path().join("llama-server");
-                    server.is_file().then_some((build, server))
+                    server.is_file().then(|| Archive {
+                        build: label.strip_prefix('b').and_then(|b| b.parse().ok()),
+                        label,
+                        server,
+                    })
                 })
                 .collect()
         })
         .unwrap_or_default();
-    out.sort_by_key(|(b, _)| std::cmp::Reverse(*b));
+    out.sort_by(|a, b| match (a.build, b.build) {
+        (Some(x), Some(y)) => y.cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.label.cmp(&b.label),
+    });
     out
 }
 
@@ -183,7 +218,7 @@ pub struct ManagedStatus {
     pub present: bool,
     /// Build of the binary sitting in the managed build tree, if built.
     pub built: Option<u64>,
-    pub archives: Vec<(u64, PathBuf)>,
+    pub archives: Vec<Archive>,
 }
 
 pub fn status() -> ManagedStatus {
@@ -220,9 +255,11 @@ mod tests {
             }
         }
         let got = list_archives_in(dir.path());
-        let builds: Vec<u64> = got.iter().map(|(b, _)| *b).collect();
-        // junk (no b-prefix) and b7 (no binary) are excluded; newest first.
-        assert_eq!(builds, vec![10_630, 10_454]);
-        assert!(got[0].1.ends_with("b10630/llama-server"));
+        let labels: Vec<&str> = got.iter().map(|a| a.label.as_str()).collect();
+        // b7 (no binary) is excluded; releases newest-first, then labels.
+        assert_eq!(labels, vec!["b10630", "b10454", "junk"]);
+        assert_eq!(got[0].build, Some(10_630));
+        assert!(got[0].server.ends_with("b10630/llama-server"));
+        assert_eq!(got[2].build, None, "labeled variant carries no number");
     }
 }
