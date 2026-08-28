@@ -418,11 +418,23 @@ measurements + journal. Then:
    llama-bench baselines, config-free). Surfaced as the "Rebuild
    scorecard" line on the Server tab (warn-colored when a model lost
    ≥5% context) and atop the findings report's history section. Still
-   open: pinning the best-measured build — DECIDED 2026-08-27 (option
-   B, binary archiving): snapshot verified builds' binaries into the
-   app's state dir before each guided rebuild; pin/rollback = point the
-   server path at an archive. No app-managed checkout (the user keeps
-   owning git); build in the build-corner block with rebuild triage.
+   open: pinning the best-measured build — DECIDED 2026-08-27, revised
+   same day after user pushback: **option A, app-managed checkout, with
+   binary archiving as its internal mechanism.** Rationale: (1) the
+   installs picker already handles multi-checkout clarity — the managed
+   clone is one more detected install, clearly labeled, never forced
+   (user's point, conceded); (2) the published-app audience is the
+   decider — a crates.io user with no ~/src/llama.cpp has nothing for
+   option B to archive; the managed checkout is what bootstraps
+   llama.cpp for non-experts at all (north star verbatim); (3) closed
+   loop: freshness → fetch → build candidate → verify → scorecard →
+   pin/rollback, no git knowledge required. Design rules: the clone
+   lives in the app's data dir; the USER'S checkout is never touched;
+   every VERIFIED build's binaries are archived so rollback never
+   rebuilds; checkout management is 100% deterministic rules — the AI
+   advisor may triage WHEN to build (rebuild triage), never HOW
+   (settled: AI is not load-bearing). Build in the build-corner block
+   with rebuild triage.
 6. **Speculation-dial trials** (2026-08-26 knob review): the adopted
    ngram modes have untouched dials (`--spec-draft-p-min`, draft-length)
    — sweep them as a trial menu on top of the kept winners; the likeliest
