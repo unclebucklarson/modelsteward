@@ -200,6 +200,11 @@ struct PromotedField {
     label: &'static str,
     text: String,
     hint: String,
+    /// What the server uses when nothing is pinned — prefilled so the
+    /// dialog shows the value the model will ACTUALLY get (its stated
+    /// promise); a value left equal to this is stored as "no override".
+    /// Read from llama.cpp's common.h sampling defaults (b10630).
+    default_text: &'static str,
 }
 
 struct OverrideEditor {
@@ -784,40 +789,49 @@ impl App {
                         None => untrialed.into(),
                     }
                 };
-                let sampling_hint =
-                    "default for clients that don't send their own (agents always do)";
+                let sampling_hint = "server default; used only when a client \
+                     sends no sampling of its own (agents always do). Model cards \
+                     sometimes recommend family-specific values — set them here.";
                 let mut promoted = vec![
                     PromotedField {
                         key: "spec-type",
                         label: "Speculation",
                         text: String::new(),
                         hint: measured("spec", "not trialed yet — ⚡ Lab races the ngram modes"),
+                        default_text: "",
                     },
                     PromotedField {
                         key: "ubatch-size",
                         label: "Prefill batch (-ub)",
                         text: String::new(),
                         hint: measured("ub", "default 512 — ⚡ Lab races 1024/2048"),
+                        default_text: "512",
                     },
                     PromotedField {
                         key: "temp",
                         label: "temp",
                         text: String::new(),
                         hint: sampling_hint.into(),
+                        default_text: "0.8",
                     },
                     PromotedField {
                         key: "top-k",
                         label: "top-k",
                         text: String::new(),
                         hint: sampling_hint.into(),
+                        default_text: "40",
                     },
                     PromotedField {
                         key: "top-p",
                         label: "top-p",
                         text: String::new(),
                         hint: sampling_hint.into(),
+                        default_text: "0.95",
                     },
                 ];
+                for f in &mut promoted {
+                    f.text = f.default_text.to_string();
+                }
                 // Show effective values: the override where set, else the
                 // optimized default — the dialog always tells the truth
                 // about what the model will get. Promoted keys leave the
@@ -2800,7 +2814,7 @@ impl App {
                         ed.kv_text = router::DEFAULT_KV_TYPE.to_string();
                         ed.extra_text.clear();
                         for f in &mut ed.promoted {
-                            f.text.clear();
+                            f.text = f.default_text.to_string();
                         }
                         ed.no_mmproj = false;
                     }
@@ -2848,7 +2862,7 @@ impl App {
             }
             for f in &ed.promoted {
                 let t = f.text.trim();
-                if !t.is_empty() {
+                if !t.is_empty() && t != f.default_text {
                     extra.push((f.key.to_string(), t.to_string()));
                 }
             }
