@@ -12,6 +12,7 @@ pub mod gguf;
 pub mod history;
 pub mod jsonc;
 pub mod library;
+pub mod managed;
 pub mod ollama;
 pub mod quality;
 pub mod report;

@@ -100,6 +100,24 @@ pub fn failure_prompt(
     p
 }
 
+/// Rebuild triage (advisor feature #3, user-ranked): given the commit
+/// subjects between the running build and upstream, and the user's
+/// actual model set, ask whether updating matters HERE. Informs WHEN to
+/// build; the deterministic layers own how. Pure and testable.
+pub fn triage_prompt(commits: &str, models: &[String], current: u64, upstream: u64) -> String {
+    format!(
+        "A user runs llama.cpp build b{current}; upstream is at b{upstream}. \
+         Below are the commit subjects in between, and the models this user \
+         actually serves. Say which commits (if any) plausibly matter for \
+         THESE models — their architectures, MoE offload, vision/mmproj, \
+         speculative decoding, KV cache, CUDA — and end with one line: \
+         'Update: likely worth it' or 'Update: nothing relevant to your \
+         models'. Judge only from the subjects; do not speculate beyond them.\n\n\
+         User's models:\n{}\n\nCommits:\n{commits}\n",
+        models.join("\n"),
+    )
+}
+
 /// The last `n` router-log lines belonging to `model`'s child server —
 /// the evidence a failure explanation reasons from. Empty when the model
 /// never spawned (the stored error is then the only evidence).
@@ -144,6 +162,20 @@ mod tests {
         // allowed answer.
         assert!(SYSTEM.contains("Never invent"));
         assert!(SYSTEM.contains("doesn't show the cause"));
+    }
+
+    #[test]
+    fn triage_prompt_grounds_on_commits_and_the_users_models() {
+        let p = triage_prompt(
+            "abc123 cuda: fix moe expert offload\ndef456 metal: shader cleanup",
+            &["qwen3.8-27b (dense, vision)".into(), "qwen3-next-80b (MoE)".into()],
+            10_630,
+            10_701,
+        );
+        for needle in ["b10630", "b10701", "moe expert offload", "qwen3-next-80b"] {
+            assert!(p.contains(needle), "missing {needle}");
+        }
+        assert!(p.contains("nothing relevant"), "honesty exit is offered");
     }
 
     #[test]

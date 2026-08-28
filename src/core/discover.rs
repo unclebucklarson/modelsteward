@@ -121,6 +121,12 @@ pub fn find_installs(manual: &[PathBuf]) -> Vec<LlamaInstall> {
             candidates.push(home.join(rel));
         }
     }
+    // The app-managed checkout's build and its pinnable archives are
+    // installs like any other — offered, never forced.
+    candidates.push(crate::core::managed::managed_server_bin());
+    for (_, server) in crate::core::managed::list_archives() {
+        candidates.push(server);
+    }
 
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();

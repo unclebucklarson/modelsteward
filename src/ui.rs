@@ -12,8 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, ollama, opencode,
-    router, rows, settings, system, trial,
+    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, ollama,
+    opencode, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -51,6 +51,8 @@ enum Msg {
     /// trials.json changed on disk.
     Trials(trial::Trials),
     /// A measured trial finished; opens the verdict dialog.
+    /// Managed-checkout status refreshed by a worker.
+    Managed(managed::ManagedStatus),
     /// An AI advisory finished: (subject, answering model, text).
     Advisory {
         subject: String,
@@ -127,6 +129,9 @@ struct App {
     /// Session-only — opinions aren't measurements and aren't persisted.
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
+    /// Cached managed-checkout status (fs + git probes are too heavy to
+    /// run per frame); refreshed on build-check and after managed workers.
+    managed_status: Option<managed::ManagedStatus>,
     show_advisor: bool,
     build_check: Option<advisor::BuildCheck>,
     backend_sel: Option<advisor::BackendSelection>,
@@ -280,6 +285,7 @@ impl App {
             override_editor: None,
             advisories: Vec::new(),
             advisor_open: false,
+            managed_status: None,
             show_advisor: false,
             build_check: None,
             backend_sel: None,
@@ -975,6 +981,7 @@ impl App {
                     std::fs::read_to_string(router::state_dir().join("router.log")).ok();
                 let check = advisor::check(server, build, &measurements, log.as_deref());
                 let _ = tx.send(Msg::BuildCheck(Box::new(check)));
+                let _ = tx.send(Msg::Managed(managed::status()));
             },
         );
     }
@@ -1109,6 +1116,7 @@ impl App {
                 // verdicts live in the Lab's standing recommendations
                 // (user decision 2026-08-26 — a popup mid-campaign offered
                 // Apply while the worker still owned the GPU).
+                Msg::Managed(m) => self.managed_status = Some(m),
                 Msg::Advisory { subject, model, text } => {
                     self.log(format!("advisory ready for {subject} (by {model})"));
                     self.advisories.insert(0, (subject, model, text));
@@ -2977,24 +2985,7 @@ impl App {
         d: &diagnose::Diagnosis,
     ) {
         let subject = router_id.clone().unwrap_or_else(|| display.to_string());
-        // Pick the answering model: something loaded if possible (no swap
-        // cost), else any measured model — never the failing model itself.
-        let loaded: Option<String> = match &self.router_state {
-            Some(router::RouterState::Ours { models }) => models
-                .iter()
-                .filter(|m| m.status == "loaded" && m.id != subject)
-                .map(|m| m.id.clone())
-                .next(),
-            _ => None,
-        };
-        let answerer = loaded.or_else(|| {
-            self.measurements
-                .iter()
-                .filter(|(id, m)| **id != subject && m.n_ctx.is_some())
-                .map(|(id, _)| id.clone())
-                .next()
-        });
-        let Some(answerer) = answerer else {
+        let Some(answerer) = self.pick_answerer(Some(&subject)) else {
             self.log(
                 "advisory needs another servable model to ask — measure one first"
                     .to_string(),
@@ -3042,6 +3033,167 @@ impl App {
                 Err(e) => Msg::Error(format!("advisory: {e:#}")),
             });
             let _ = tx.send(Msg::Finished("advisory finished".into()));
+        });
+    }
+
+    /// Pick the model that answers an advisory: something loaded if
+    /// possible (no swap cost), else any measured model — never the
+    /// excluded (usually failing) model itself.
+    fn pick_answerer(&self, exclude: Option<&str>) -> Option<String> {
+        let loaded: Option<String> = match &self.router_state {
+            Some(router::RouterState::Ours { models }) => models
+                .iter()
+                .filter(|m| m.status == "loaded" && Some(m.id.as_str()) != exclude)
+                .map(|m| m.id.clone())
+                .next(),
+            _ => None,
+        };
+        loaded.or_else(|| {
+            self.measurements
+                .iter()
+                .filter(|(id, m)| Some(id.as_str()) != exclude && m.n_ctx.is_some())
+                .map(|(id, _)| id.clone())
+                .next()
+        })
+    }
+
+    /// Managed-checkout worker: clone if needed, fetch tags, check out
+    /// the newest release tag, build with the advisor's backend logic,
+    /// archive the binaries. Deterministic end to end.
+    fn action_managed_build(&mut self) {
+        let Some(check) = self.build_check.clone() else {
+            self.log("run the build check first (Server → Check My llama.cpp)".to_string());
+            return;
+        };
+        let sel = self
+            .backend_sel
+            .unwrap_or_else(|| advisor::default_backends(&check));
+        self.spawn("managed llama.cpp: fetch + build newest release", move |tx| {
+            let tx2 = tx.clone();
+            let mut progress = move |line: String| {
+                let _ = tx2.send(Msg::Progress(line));
+            };
+            let result = (|| -> anyhow::Result<u64> {
+                managed::ensure_clone(&mut progress)?;
+                managed::fetch_tags(&mut progress)?;
+                let build = managed::newest_known_build()
+                    .ok_or_else(|| anyhow::anyhow!("no bNNNN release tags found"))?;
+                progress(format!("newest release: b{build} — checking out + building"));
+                managed::checkout_build(build, &mut progress)?;
+                managed::build(&check, sel, &mut progress)?;
+                managed::archive_build(build, &mut progress)?;
+                Ok(build)
+            })();
+            let _ = tx.send(Msg::Managed(managed::status()));
+            let _ = tx.send(match result {
+                Ok(b) => Msg::Finished(format!(
+                    "managed llama.cpp built + archived b{b} — pin it in the Build \
+                     Advisor to use it (takes effect on next router start)"
+                )),
+                Err(e) => Msg::Error(format!("managed build: {e:#}")),
+            });
+        });
+    }
+
+    /// Pin (or unpin) the server binary the router uses. Takes effect on
+    /// the next router start — never restarts a running server itself.
+    fn action_pin(&mut self, path: Option<PathBuf>) {
+        self.cfg.server_bin = path.clone();
+        self.edit_server_bin = path
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        match self.cfg.save(&system::config_file()) {
+            Ok(()) => self.log(match path {
+                Some(p) => format!(
+                    "pinned llama-server to {} — takes effect on next router start",
+                    p.display()
+                ),
+                None => "unpinned — auto-pick (newest detected build) on next start".into(),
+            }),
+            Err(e) => self.log(format!("ERROR saving pin: {e:#}")),
+        }
+    }
+
+    /// Rebuild triage (advisory): what's in the pending update for YOUR
+    /// models? Commits come from git; the judgment is a labeled opinion.
+    fn action_rebuild_triage(&mut self) {
+        let Some(check) = &self.build_check else { return };
+        let (Some(cur), Some(up)) = (check.current_build, check.upstream_build) else {
+            return;
+        };
+        let repo = check
+            .repo
+            .clone()
+            .or_else(|| managed::checkout_present().then(managed::checkout_dir));
+        let Some(repo) = repo else {
+            self.log("no git checkout to read commits from".to_string());
+            return;
+        };
+        let Some(answerer) = self.pick_answerer(None) else {
+            self.log("advisory needs a measured model to ask — measure one first".to_string());
+            return;
+        };
+        let models: Vec<String> = self
+            .rows
+            .iter()
+            .filter(|r| r.router_id.is_some())
+            .map(|r| {
+                format!(
+                    "{}{}{}",
+                    r.display,
+                    if r.vision { " (vision)" } else { "" },
+                    if rows::looks_moe(None, &r.display) { " (MoE)" } else { "" },
+                )
+            })
+            .collect();
+        let port = self.cfg.port;
+        self.spawn(&format!("triaging b{cur}→b{up} against your models"), move |tx| {
+            let repo_s = repo.display().to_string();
+            // Tags can lag the daily fetch (found live: b10630 running,
+            // tag absent locally) — refresh them, then fall back to HEAD
+            // if the current build's tag still isn't known.
+            let _ = std::process::Command::new("git")
+                .args(["-C", &repo_s, "fetch", "--quiet", "--tags", "origin"])
+                .status();
+            let log_range = |range: &str| -> Option<String> {
+                let o = std::process::Command::new("git")
+                    .args(["-C", &repo_s, "log", "--oneline", "--no-decorate", range])
+                    .output()
+                    .ok()?;
+                o.status.success().then(|| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .take(200)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+            };
+            let commits = log_range(&format!("b{cur}..origin/master"))
+                .filter(|c| !c.is_empty())
+                .or_else(|| log_range("HEAD..origin/master"))
+                .unwrap_or_default();
+            if commits.is_empty() {
+                let _ = tx.send(Msg::Error(
+                    "no commits found between builds (fetch may be stale)".into(),
+                ));
+                return;
+            }
+            let prompt = aiadvisor::triage_prompt(&commits, &models, cur, up);
+            let backend = aiadvisor::RouterAdvisor {
+                port,
+                model: answerer,
+            };
+            use aiadvisor::Advisor as _;
+            let _ = tx.send(match backend.ask(aiadvisor::SYSTEM, &prompt) {
+                Ok(text) => Msg::Advisory {
+                    subject: format!("update b{cur} → b{up}"),
+                    model: backend.describe(),
+                    text,
+                },
+                Err(e) => Msg::Error(format!("triage: {e:#}")),
+            });
+            let _ = tx.send(Msg::Finished("triage finished".into()));
         });
     }
 
@@ -3209,6 +3361,9 @@ impl App {
         let mut open = true;
         let mut rebuild = false;
         let mut recheck = false;
+        let mut triage = false;
+        let mut managed_build = false;
+        let mut pin: Option<Option<PathBuf>> = None;
         egui::Window::new("Build Advisor")
             .collapsible(false)
             .default_width(560.0)
@@ -3290,6 +3445,82 @@ impl App {
                 if check.dirty == Some(true) {
                     ui.small("Rebuild disabled: the checkout has local changes — commit/stash them first.");
                 }
+                if let (Some(cur), Some(up)) = (check.current_build, check.upstream_build)
+                    && up > cur
+                    && ui
+                        .add_enabled(
+                            self.busy.is_none(),
+                            egui::Button::new("What's in this update for me? (advisory)"),
+                        )
+                        .on_hover_text(
+                            "Asks one of YOUR local models to read the commits between \
+                             your build and upstream and say whether anything matters \
+                             for the models you serve. Labeled opinion; nothing leaves \
+                             this machine.",
+                        )
+                        .clicked()
+                {
+                    triage = true;
+                }
+                ui.separator();
+                ui.strong("Managed llama.cpp");
+                ui.small(
+                    "An app-owned checkout in its own data dir — your checkout is \
+                     never touched; builds are archived per release so rolling back \
+                     is a pin, never a rebuild. Offered, never forced.",
+                );
+                match &self.managed_status {
+                    None => {
+                        ui.weak("status loads with the build check…");
+                    }
+                    Some(ms) => {
+                        if !ms.present {
+                            ui.label("No managed checkout yet.");
+                        } else if let Some(b) = ms.built {
+                            ui.label(format!("Checkout present; built b{b}."));
+                        } else {
+                            ui.label("Checkout present; not built yet.");
+                        }
+                        if ui
+                            .add_enabled(
+                                self.busy.is_none() && check.cmake,
+                                egui::Button::new(if ms.present {
+                                    "⬇ Fetch + build newest release"
+                                } else {
+                                    "⬇ Set up (clone + build newest release)"
+                                }),
+                            )
+                            .on_hover_text(
+                                "Clones llama.cpp if needed, checks out the newest \
+                                 bNNNN release tag, builds with the backends selected \
+                                 above, and archives the binaries. Takes many minutes; \
+                                 narrated in the activity log.",
+                            )
+                            .clicked()
+                        {
+                            managed_build = true;
+                        }
+                        if !ms.archives.is_empty() {
+                            ui.add_space(4.0);
+                            ui.label("Archived builds (pin = router uses it on next start):");
+                            let pinned = self.cfg.server_bin.clone();
+                            for (b, server) in &ms.archives {
+                                ui.horizontal(|ui| {
+                                    let is_pinned = pinned.as_deref() == Some(server.as_path());
+                                    ui.monospace(format!("b{b}"));
+                                    if is_pinned {
+                                        ui.small("(pinned)");
+                                        if ui.button("Unpin (auto-pick)").clicked() {
+                                            pin = Some(None);
+                                        }
+                                    } else if ui.button("Pin").clicked() {
+                                        pin = Some(Some(server.clone()));
+                                    }
+                                });
+                            }
+                        }
+                    }
+                }
             });
         if !open {
             self.show_advisor = false;
@@ -3299,6 +3530,15 @@ impl App {
         }
         if recheck {
             self.action_build_check();
+        }
+        if triage {
+            self.action_rebuild_triage();
+        }
+        if managed_build {
+            self.action_managed_build();
+        }
+        if let Some(p) = pin {
+            self.action_pin(p);
         }
     }
 

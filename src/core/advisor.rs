@@ -108,7 +108,10 @@ pub fn upstream_probe(server_bin: &Path, current_build: Option<u64>) -> Upstream
     };
     let repo_s = repo.display().to_string();
     s.reachable = Command::new("git")
-        .args(["-C", &repo_s, "fetch", "--quiet", "origin", "master"])
+        // --tags: release tags (bNNNN) are how builds are addressed by
+        // the rebuild triage and the managed checkout — without them the
+        // local refs know the commits but not their names.
+        .args(["-C", &repo_s, "fetch", "--quiet", "--tags", "origin", "master"])
         .status()
         .map(|st| st.success())
         .unwrap_or(false);
@@ -442,7 +445,10 @@ pub fn check(
     c.dirty = run("git", &["-C", &repo_s, "status", "--porcelain"]).map(|s| !s.is_empty());
     // Fetch is the only network step; failure leaves upstream unknown.
     let fetched = Command::new("git")
-        .args(["-C", &repo_s, "fetch", "--quiet", "origin", "master"])
+        // --tags: release tags (bNNNN) are how builds are addressed by
+        // the rebuild triage and the managed checkout — without them the
+        // local refs know the commits but not their names.
+        .args(["-C", &repo_s, "fetch", "--quiet", "--tags", "origin", "master"])
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
@@ -616,6 +622,20 @@ pub fn rebuild_commands(c: &BuildCheck, sel: BackendSelection) -> Vec<(String, V
             "--ff-only".to_string(),
         ],
     )];
+    cmds.extend(build_commands(&repo, c, sel));
+    cmds
+}
+
+/// The cmake configure+build steps alone (no git) — shared with the
+/// managed checkout, whose git state is tag-pinned (a `pull --ff-only`
+/// on a detached HEAD would fail).
+pub fn build_commands(
+    repo: &str,
+    c: &BuildCheck,
+    sel: BackendSelection,
+) -> Vec<(String, Vec<String>)> {
+    let repo = repo.to_string();
+    let mut cmds = Vec::new();
     let mut configure: Vec<String> = Vec::new();
     configure.push("-S".into());
     configure.push(repo.clone());
@@ -655,10 +675,19 @@ pub fn run_rebuild(
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
     anyhow::ensure!(c.repo.is_some(), "no git checkout to rebuild");
-    for (cmd, args) in rebuild_commands(c, sel) {
+    run_steps(&rebuild_commands(c, sel), progress)
+}
+
+/// Run a command sequence with streamed, heartbeat-throttled output —
+/// the engine under run_rebuild and the managed checkout's operations.
+pub fn run_steps(
+    steps: &[(String, Vec<String>)],
+    progress: &mut dyn FnMut(String),
+) -> Result<()> {
+    for (cmd, args) in steps {
         progress(format!("$ {cmd} {}", args.join(" ")));
-        let mut child = Command::new(&cmd)
-            .args(&args)
+        let mut child = Command::new(cmd)
+            .args(args)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()

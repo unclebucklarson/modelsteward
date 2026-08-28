@@ -433,8 +433,18 @@ measurements + journal. Then:
    every VERIFIED build's binaries are archived so rollback never
    rebuilds; checkout management is 100% deterministic rules — the AI
    advisor may triage WHEN to build (rebuild triage), never HOW
-   (settled: AI is not load-bearing). Build in the build-corner block
-   with rebuild triage.
+   (settled: AI is not load-bearing). ✔ BUILT 2026-08-27:
+   core/managed.rs (clone/fetch-tags/checkout-bNNNN/build via the
+   advisor's engine — run_steps/build_commands factored out —
+   archive_build to builds/bN/); managed bin + archives join installs
+   discovery; Build Advisor gained the Managed llama.cpp section
+   (set-up/update button, archive list with Pin/Unpin — pin writes
+   server_bin, takes effect on next router start, never restarts a
+   running server) and the rebuild-triage button ("What's in this
+   update for me?" — commits between builds + the user's model set →
+   labeled advisory; found live: the daily probe's fetch lacked --tags
+   so release names lagged — fixed, with a HEAD..origin/master
+   fallback). First live clone+build pending user GPU idle time.
 6. **Speculation-dial trials** (2026-08-26 knob review): the adopted
    ngram modes have untouched dials (`--spec-draft-p-min`, draft-length)
    — sweep them as a trial menu on top of the kept winners; the likeliest
