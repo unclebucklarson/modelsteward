@@ -332,7 +332,21 @@ limit immediately. Standing rule adopted: every hand-fix prompts
    with note + backup, announced in the sync summary (✂). First live
    catch: the unsloth Q5 cache entry whose blob/preset had evaporated.
 3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor
-   layer. ✔ Daily upstream freshness (DONE 2026-08-25, user request —
+   layer. ✔ AI advisor MVP (DONE 2026-08-27, design talk held): core/
+   aiadvisor.rs — `Advisor` trait, RouterAdvisor backend (the models the
+   app already serves; offline, private). Settled scope: AI is NEVER
+   load-bearing — one-shot grounded generations only, no chat, output
+   labeled "opinions, not measurements" naming the answering model,
+   nothing auto-applied, nothing leaves the machine. First feature:
+   "Ask a served model" on Why? dialogs whose failure the rules
+   couldn't classify (Cause::Unknown) — prompt carries the stored
+   error, machine facts, and the child server's log tail (mined via
+   evidence::child_port); answers collect in the Advisor window
+   (Tools menu). NEXT advisor features (user-ranked): fleet brief
+   (synthesize the findings JSON), rebuild triage (read upstream
+   commits against YOUR model set); later backends: Ollama, OpenAI-
+   compatible URL (cloud = explicit opt-in).
+   ✔ Daily upstream freshness (DONE 2026-08-25, user request —
    manual checks left the checkout 167 commits stale): the status poller
    runs one quiet `git fetch` per day (remote-tracking refs only, never
    the working tree), persists the stamp to upstream.json, shows

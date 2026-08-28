@@ -12,8 +12,8 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, bench, cancel, diagnose, discover, evidence, history, ollama, opencode, router,
-    rows, settings, system, trial,
+    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, ollama, opencode,
+    router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -51,6 +51,12 @@ enum Msg {
     /// trials.json changed on disk.
     Trials(trial::Trials),
     /// A measured trial finished; opens the verdict dialog.
+    /// An AI advisory finished: (subject, answering model, text).
+    Advisory {
+        subject: String,
+        model: String,
+        text: String,
+    },
     TrialDone {
         model: String,
         menu: String,
@@ -117,6 +123,10 @@ struct App {
     show_about: bool,
     last_sync: Option<String>,
     override_editor: Option<OverrideEditor>,
+    /// AI advisory outputs, newest first: (subject, answering model, text).
+    /// Session-only — opinions aren't measurements and aren't persisted.
+    advisories: Vec<(String, String, String)>,
+    advisor_open: bool,
     show_advisor: bool,
     build_check: Option<advisor::BuildCheck>,
     backend_sel: Option<advisor::BackendSelection>,
@@ -268,6 +278,8 @@ impl App {
             show_about: false,
             last_sync: None,
             override_editor: None,
+            advisories: Vec::new(),
+            advisor_open: false,
             show_advisor: false,
             build_check: None,
             backend_sel: None,
@@ -1097,6 +1109,11 @@ impl App {
                 // verdicts live in the Lab's standing recommendations
                 // (user decision 2026-08-26 — a popup mid-campaign offered
                 // Apply while the worker still owned the GPU).
+                Msg::Advisory { subject, model, text } => {
+                    self.log(format!("advisory ready for {subject} (by {model})"));
+                    self.advisories.insert(0, (subject, model, text));
+                    self.advisor_open = true;
+                }
                 Msg::TrialDone { model, menu, report } => {
                     let _ = menu;
                     self.log(format!("trial {model}: {}", report.verdict.reason));
@@ -1295,6 +1312,10 @@ impl App {
             }
             if ui.button("Open opencode.json").clicked() {
                 open_path = Some(opencode::default_config_path());
+                ui.close();
+            }
+            if ui.button("Advisor (AI opinions)").clicked() {
+                self.advisor_open = true;
                 ui.close();
             }
             if ui.button("Open Router Log").clicked() {
@@ -2908,6 +2929,121 @@ impl App {
         }
     }
 
+    /// Ask one of the router's models to explain a failure the rules
+    /// couldn't. Backend + guardrails in core/aiadvisor.rs; the answer
+    /// arrives as Msg::Advisory and renders in the labeled advisor window.
+    fn spawn_failure_advisory(
+        &mut self,
+        display: &str,
+        router_id: &Option<String>,
+        path: &Option<PathBuf>,
+        d: &diagnose::Diagnosis,
+    ) {
+        let subject = router_id.clone().unwrap_or_else(|| display.to_string());
+        // Pick the answering model: something loaded if possible (no swap
+        // cost), else any measured model — never the failing model itself.
+        let loaded: Option<String> = match &self.router_state {
+            Some(router::RouterState::Ours { models }) => models
+                .iter()
+                .filter(|m| m.status == "loaded" && m.id != subject)
+                .map(|m| m.id.clone())
+                .next(),
+            _ => None,
+        };
+        let answerer = loaded.or_else(|| {
+            self.measurements
+                .iter()
+                .filter(|(id, m)| **id != subject && m.n_ctx.is_some())
+                .map(|(id, _)| id.clone())
+                .next()
+        });
+        let Some(answerer) = answerer else {
+            self.log(
+                "advisory needs another servable model to ask — measure one first"
+                    .to_string(),
+            );
+            return;
+        };
+        let error = d
+            .evidence
+            .clone()
+            .unwrap_or_else(|| d.explanation.clone());
+        let build = self
+            .scan
+            .as_ref()
+            .and_then(|s| s.installs.first().and_then(|i| i.build));
+        let vram = self.hardware().vram_mib;
+        let file_gib = path
+            .as_ref()
+            .and_then(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0));
+        let port = self.cfg.port;
+        self.spawn(&format!("asking {answerer} about {display}"), move |tx| {
+            let log = std::fs::read_to_string(router::state_dir().join("router.log"))
+                .unwrap_or_default();
+            let tail = aiadvisor::log_tail_for(&log, &subject, 60);
+            let prompt = aiadvisor::failure_prompt(
+                &subject,
+                &error,
+                build,
+                vram,
+                rows::read_ram_mib(),
+                file_gib,
+                &tail,
+            );
+            let backend = aiadvisor::RouterAdvisor {
+                port,
+                model: answerer.clone(),
+            };
+            use aiadvisor::Advisor as _;
+            let _ = tx.send(match backend.ask(aiadvisor::SYSTEM, &prompt) {
+                Ok(text) => Msg::Advisory {
+                    subject,
+                    model: backend.describe(),
+                    text,
+                },
+                Err(e) => Msg::Error(format!("advisory: {e:#}")),
+            });
+            let _ = tx.send(Msg::Finished("advisory finished".into()));
+        });
+    }
+
+    /// The advisor pane: every AI opinion from this session, newest first,
+    /// each naming the model that wrote it. Opinions, not measurements —
+    /// the label does the quarantining.
+    fn ai_advisor_window(&mut self, ctx: &egui::Context) {
+        if !self.advisor_open {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Advisor — AI opinions, not measurements")
+            .collapsible(false)
+            .default_width(520.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                if self.advisories.is_empty() {
+                    ui.weak(
+                        "Nothing yet. When a failure stumps the rule-based Why?, \
+                         its dialog offers \"Ask a served model\" — answers collect \
+                         here, clearly labeled.",
+                    );
+                }
+                egui::ScrollArea::vertical().max_height(420.0).show(ui, |ui| {
+                    for (subject, model, text) in &self.advisories {
+                        ui.strong(subject);
+                        ui.small(format!(
+                            "answered by {model} — advisory only; verify before acting"
+                        ));
+                        ui.label(text);
+                        ui.add_space(8.0);
+                    }
+                });
+            });
+        if !open {
+            self.advisor_open = false;
+        }
+    }
+
     fn diagnosis_window(&mut self, ctx: &egui::Context) {
         let Some(v) = &self.diagnosis else { return };
         let (display, d, router_id, path) =
@@ -2917,6 +3053,7 @@ impl App {
         let mut open_advisor = false;
         let mut show_log = false;
         let mut unload_others = false;
+        let mut ask_ai = false;
         egui::Window::new(format!("Why? — {display}"))
             .collapsible(false)
             .default_width(460.0)
@@ -2964,6 +3101,26 @@ impl App {
                         }
                     }
                 });
+                // The AI layer activates where the rules gave up (design
+                // decision 2026-08-27): one grounded, labeled, one-shot
+                // explanation from a model the router already serves.
+                if matches!(d.cause, diagnose::Cause::Unknown) {
+                    ui.separator();
+                    if ui
+                        .add_enabled(
+                            self.busy.is_none(),
+                            egui::Button::new("Ask a served model (advisory)"),
+                        )
+                        .on_hover_text(
+                            "Sends this failure's log evidence to one of YOUR local \
+                             models and shows its opinion, clearly labeled. Nothing \
+                             leaves this machine; nothing is applied automatically.",
+                        )
+                        .clicked()
+                    {
+                        ask_ai = true;
+                    }
+                }
             });
         let acted =
             action.is_some() || open_advisor || show_log || unload_others;
@@ -2977,6 +3134,9 @@ impl App {
             let path = router::state_dir().join("router.log");
             let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
             self.log(format!("opened {}", path.display()));
+        }
+        if ask_ai {
+            self.spawn_failure_advisory(&display, &router_id, &path, &d);
         }
         if unload_others {
             let loaded: Vec<String> = match &self.router_state {
@@ -3658,6 +3818,7 @@ impl eframe::App for App {
 
         self.override_dialog(ui.ctx());
         self.diagnosis_window(ui.ctx());
+        self.ai_advisor_window(ui.ctx());
         self.advisor_window(ui.ctx());
 
         if self.show_about {
