@@ -539,8 +539,9 @@ impl App {
                             let _ = tx2.send(Msg::Managed(managed::status()));
                             let _ = tx2.send(Msg::Progress(match result {
                                 Ok(b) => format!(
-                                    "[auto-build] b{b} built + archived — pin it in \
-                                     the Build Advisor when you want to serve it"
+                                    "[auto-build] b{b} built + archived — select it in \
+                                     Settings → llama-server binary when you want to \
+                                     serve it"
                                 ),
                                 Err(e) => format!("[auto-build] failed: {e:#}"),
                             }));
@@ -2852,32 +2853,62 @@ impl App {
             && !scan.installs.is_empty()
         {
             ui.add_space(4.0);
-            ui.checkbox(
-                &mut self.managed_auto_edit,
-                "Keep managed llama.cpp current (build + archive new releases \
-                 automatically; never changes what's served)",
-            )
-            .on_hover_text(
-                "When the daily upstream check finds a new bNNNN release and the \
-                 managed checkout exists, the app builds it in the background \
-                 (CPU-only work) and archives the binaries. Pinning — actually \
-                 serving a build — always stays your explicit click. Save to apply.",
-            );
             ui.add_space(4.0);
-            ui.strong("Detected llama-server installs");
+            ui.strong("llama-server binary — what serves your models");
+            ui.small(
+                "The ONE place that selects the serving binary. Building new \
+                 binaries happens in the Build Advisor (Server menu); everything \
+                 it produces appears here. Changes take effect on next router start.",
+            );
             let installs = scan.installs.clone();
             let picked = self.picked_server();
+            // The default: no explicit choice, newest of the user's OWN
+            // installs (managed builds serve only when chosen here).
+            ui.horizontal(|ui| {
+                if ui.button("Use").clicked() {
+                    self.action_pin(None);
+                }
+                let auto_now = self
+                    .cfg
+                    .server_bin
+                    .is_none()
+                    .then(|| picked.clone())
+                    .flatten()
+                    .and_then(|p| {
+                        installs
+                            .iter()
+                            .find(|i| i.server_path == p)
+                            .map(discover::install_alias)
+                    })
+                    .map(|a| format!(" (currently → {a})"))
+                    .unwrap_or_default();
+                let text = format!("Auto — newest of your own installs{auto_now}");
+                if self.cfg.server_bin.is_none() {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(0, 170, 0),
+                        format!("{text}   (current)"),
+                    );
+                } else {
+                    ui.label(text);
+                }
+            });
             for inst in &installs {
                 ui.horizontal(|ui| {
                     if ui.button("Use").clicked() {
-                        self.edit_server_bin = inst.server_path.display().to_string();
+                        self.action_pin(Some(inst.server_path.clone()));
                     }
                     // Feature-alias naming (user idea 2026-08-28): the
                     // build number plus the backends it was compiled with
                     // IS the build's identity — b10672-cuda-vulkan.
                     let alias = discover::install_alias(inst);
-                    let text = format!("{alias} — {}", inst.server_path.display());
-                    let is_current = picked.as_deref() == Some(inst.server_path.as_path());
+                    let tag = if inst.server_path.starts_with(managed::data_dir()) {
+                        " (app-managed)"
+                    } else {
+                        ""
+                    };
+                    let text = format!("{alias}{tag} — {}", inst.server_path.display());
+                    let is_current = self.cfg.server_bin.is_some()
+                        && picked.as_deref() == Some(inst.server_path.as_path());
                     if is_current {
                         ui.colored_label(
                             egui::Color32::from_rgb(0, 170, 0),
@@ -2889,6 +2920,18 @@ impl App {
                 });
             }
         }
+        ui.add_space(4.0);
+            ui.checkbox(
+                &mut self.managed_auto_edit,
+                "Keep managed llama.cpp current (build + archive new releases \
+                 automatically; never changes what's served)",
+            )
+            .on_hover_text(
+                "When the daily upstream check finds a new bNNNN release and the \
+                 managed checkout exists, the app builds it in the background \
+                 (CPU-only work) and archives the binaries into the list above. \
+                 SERVING a build always stays your explicit click. Save to apply.",
+            );
         if let Some(picked) = self.picked_server() {
             let build = self
                 .scan
@@ -3323,8 +3366,8 @@ impl App {
             let _ = tx.send(Msg::Managed(managed::status()));
             let _ = tx.send(match result {
                 Ok(b) => Msg::Finished(format!(
-                    "managed llama.cpp built + archived b{b} — pin it in the Build \
-                     Advisor to use it (takes effect on next router start)"
+                    "managed llama.cpp built + archived b{b} — select it in Settings \
+                     → llama-server binary to serve it"
                 )),
                 Err(e) => Msg::Error(format!("managed build: {e:#}")),
             });
@@ -3342,10 +3385,13 @@ impl App {
         match self.cfg.save(&system::config_file()) {
             Ok(()) => self.log(match path {
                 Some(p) => format!(
-                    "pinned llama-server to {} — takes effect on next router start",
+                    "serving binary set to {} — takes effect on next router start",
                     p.display()
                 ),
-                None => "unpinned — auto-pick (newest detected build) on next start".into(),
+                None => {
+                    "serving binary set to Auto (newest of your own installs) on next start"
+                        .into()
+                }
             }),
             Err(e) => self.log(format!("ERROR saving pin: {e:#}")),
         }
@@ -3900,23 +3946,18 @@ impl App {
                         }
                         if !ms.archives.is_empty() {
                             ui.add_space(4.0);
-                            ui.label("Archived builds (pin = router uses it on next start):");
-                            let pinned = self.cfg.server_bin.clone();
-                            for a in &ms.archives {
-                                ui.horizontal(|ui| {
-                                    let is_pinned =
-                                        pinned.as_deref() == Some(a.server.as_path());
-                                    ui.monospace(&a.label);
-                                    if is_pinned {
-                                        ui.small("(pinned)");
-                                        if ui.button("Unpin (auto-pick)").clicked() {
-                                            pin = Some(None);
-                                        }
-                                    } else if ui.button("Pin").clicked() {
-                                        pin = Some(Some(a.server.clone()));
-                                    }
-                                });
-                            }
+                            ui.label(format!(
+                                "Archived builds: {}",
+                                ms.archives
+                                    .iter()
+                                    .map(|a| a.label.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ));
+                            ui.small(
+                                "This window MAKES builds; choosing what serves \
+                                 happens in Settings → llama-server binary.",
+                            );
                         }
                     }
                 }
