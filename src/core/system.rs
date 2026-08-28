@@ -85,8 +85,20 @@ pub fn preset_path() -> PathBuf {
     config_dir().join("router.ini")
 }
 
+/// A binary living in the app's own data dir (managed build or archive).
+/// These are OFFERED, never forced: serving one requires an explicit pin
+/// (live lesson 2026-08-28 — the managed b10673 out-built the user's
+/// checkout and auto-pick silently started preferring it, which also
+/// pointed the guided rebuild at the tag-pinned managed tree).
+pub fn is_managed_install(path: &std::path::Path) -> bool {
+    path.starts_with(crate::core::managed::data_dir())
+}
+
 /// The llama-server to run: the configured override if set, else the newest
-/// install that can actually see devices, else the newest install at all.
+/// NON-MANAGED install that can see devices (managed builds and archives
+/// serve only when pinned), else the newest non-managed at all — managed
+/// as the last resort for machines with no other install (the crates.io
+/// bootstrap case).
 pub fn pick_server(cfg: &settings::AppConfig) -> Result<PathBuf> {
     if let Some(explicit) = &cfg.server_bin {
         anyhow::ensure!(
@@ -99,10 +111,13 @@ pub fn pick_server(cfg: &settings::AppConfig) -> Result<PathBuf> {
     let installs = discover::find_installs(&[]);
     let mut by_build: Vec<_> = installs.iter().collect();
     by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
-    by_build
-        .iter()
+    let (own, managed): (Vec<_>, Vec<_>) = by_build
+        .into_iter()
+        .partition(|i| !is_managed_install(&i.server_path));
+    own.iter()
         .find(|i| !discover::list_devices(&i.server_path).is_empty())
-        .or(by_build.first())
+        .or(own.first())
+        .or(managed.first())
         .map(|i| i.server_path.clone())
         .ok_or_else(|| anyhow::anyhow!("no llama-server found; set one in Settings"))
 }

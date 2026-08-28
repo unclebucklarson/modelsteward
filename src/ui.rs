@@ -346,11 +346,19 @@ impl App {
             return Some(explicit.clone());
         }
         let scan = self.scan.as_ref()?;
-        scan.devices_from.clone().or_else(|| {
-            let mut by_build: Vec<_> = scan.installs.iter().collect();
-            by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
-            by_build.first().map(|i| i.server_path.clone())
-        })
+        scan.devices_from
+            .clone()
+            .filter(|p| !system::is_managed_install(p))
+            .or_else(|| {
+                let mut by_build: Vec<_> = scan
+                    .installs
+                    .iter()
+                    .filter(|i| !system::is_managed_install(&i.server_path))
+                    .collect();
+                by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
+                by_build.first().map(|i| i.server_path.clone())
+            })
+            .or_else(|| scan.installs.first().map(|i| i.server_path.clone()))
     }
 
     fn hardware(&self) -> rows::Hardware {
@@ -3727,9 +3735,20 @@ impl App {
                         ui.small("Fast-forward pull only — your local changes are never overwritten. Backends not selected are set OFF explicitly so stale cmake caches can't resurrect them.");
                     });
                 ui.separator();
+                let analyzing_managed =
+                    check.repo.as_deref() == Some(managed::checkout_dir().as_path());
+                if analyzing_managed {
+                    ui.small(
+                        "This is the managed checkout — tag-pinned, so branch-style \
+                         Update & Rebuild doesn't apply. Use \"Fetch + build newest \
+                         release\" below.",
+                    );
+                }
                 ui.horizontal(|ui| {
-                    let can_rebuild =
-                        check.repo.is_some() && check.cmake && check.dirty != Some(true);
+                    let can_rebuild = !analyzing_managed
+                        && check.repo.is_some()
+                        && check.cmake
+                        && check.dirty != Some(true);
                     if ui
                         .add_enabled(can_rebuild, egui::Button::new("⬆ Update & Rebuild Now"))
                         .on_hover_text(
