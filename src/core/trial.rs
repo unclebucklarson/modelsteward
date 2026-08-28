@@ -223,6 +223,33 @@ pub fn cache_reuse_variants() -> Vec<Variant> {
         .collect()
 }
 
+/// The context-checkpoints menu (born 2026-08-27, live-measured): SWA/
+/// hybrid-attention models can't shift their KV cache, so cache-reuse
+/// and ctx-shift are silently OFF for them — a mid-prompt edit resumes
+/// from the nearest CHECKPOINT instead, and the defaults (32 max, min
+/// 8192 tokens apart) put almost no resume points where coding agents
+/// live (2-30k prompts). Measured on the daily driver: min-step 128
+/// turned a 1954ms second-turn reprocess into 467ms when a checkpoint
+/// landed before the edit. Judged by the agent-turn probe.
+pub fn checkpoint_variants() -> Vec<Variant> {
+    let mk = |label: &str, extra: Vec<(&str, &str)>| Variant {
+        label: label.into(),
+        extra: extra
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect(),
+        no_mmproj: None,
+    };
+    vec![
+        mk("ckpt-min-1024", vec![("checkpoint-min-step", "1024")]),
+        mk("ckpt-min-256", vec![("checkpoint-min-step", "256")]),
+        mk(
+            "ckpt-min-256-x64",
+            vec![("checkpoint-min-step", "256"), ("ctx-checkpoints", "64")],
+        ),
+    ]
+}
+
 /// A named menu: which variants to race and how to judge them.
 pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {
@@ -234,6 +261,7 @@ pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
         "moe" => Some((moe_variants(), Goal::Context)),
         "vision" => Some((vision_variants(), Goal::AgentTurn)),
         "cache" => Some((cache_reuse_variants(), Goal::AgentTurn)),
+        "ckpt" => Some((checkpoint_variants(), Goal::AgentTurn)),
         _ => None,
     }
 }
@@ -836,6 +864,7 @@ struct GenStats {
     prompt_tps: Option<f64>,
     prompt_n: Option<u64>,
     prompt_ms: Option<f64>,
+    cache_n: Option<u64>,
     draft_n: Option<u64>,
     draft_accepted: Option<u64>,
     content: String,
@@ -846,16 +875,12 @@ struct GenStats {
 /// measure what the second turn actually reprocesses. Returns
 /// (turn2 prefill ms, fraction of turn2's prompt served from cache).
 fn agent_turn_probe(port: u16, model: &str) -> Result<(f64, Option<f64>)> {
-    let t1 = agent_turn_ask(port, model, false)?;
+    let _t1 = agent_turn_ask(port, model, false)?;
     let t2 = agent_turn_ask(port, model, true)?;
     let ms = t2
         .prompt_ms
         .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
-    let reuse = match (t1.prompt_n, t2.prompt_n) {
-        (Some(n1), Some(n2)) if n1 > 0 => Some(1.0 - (n2 as f64 / n1 as f64).min(1.0)),
-        _ => None,
-    };
-    Ok((ms, reuse))
+    Ok((ms, reuse_of(&t2)))
 }
 
 /// The probe's synthetic module: ~40 Python functions (a few thousand
@@ -903,10 +928,23 @@ fn agent_turn_ask(port: u16, model: &str, edited: bool) -> Result<GenStats> {
         prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
         prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
         prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
+        cache_n: t.get("cache_n").and_then(|v| v.as_u64()),
         draft_n: None,
         draft_accepted: None,
         content: String::new(),
     })
+}
+
+/// Turn-2 reuse straight from the server's own accounting: cache_n is
+/// tokens served from cache, prompt_n is tokens reprocessed. The old
+/// turn1-vs-turn2 prompt_n ratio was an inferential proxy that read 0%
+/// where the truth was "1.6% (the chat-template header)" — found live
+/// 2026-08-27; cache_n was in the response all along.
+fn reuse_of(g: &GenStats) -> Option<f64> {
+    match (g.cache_n, g.prompt_n) {
+        (Some(c), Some(p)) if c + p > 0 => Some(c as f64 / (c + p) as f64),
+        _ => None,
+    }
 }
 
 fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Result<GenStats> {
@@ -933,6 +971,7 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
         prompt_tps: t.get("prompt_per_second").and_then(|v| v.as_f64()),
         prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
         prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
+        cache_n: t.get("cache_n").and_then(|v| v.as_u64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
         content: body
@@ -1093,7 +1132,7 @@ pub fn run_slot_trial(
         // Pass 2 — restore: turn 1 fills the cache, save snapshots it,
         // the reload wipes the process, restore brings it back.
         let _ = reload_fresh(progress)?;
-        let t1 = agent_turn_ask(cfg.port, model, false)?;
+        let _t1 = agent_turn_ask(cfg.port, model, false)?;
         let saved = slot_action(child(model)?, "save", filename)?;
         let mib = saved
             .get("n_written")
@@ -1111,10 +1150,7 @@ pub fn run_slot_trial(
         let warm_ms = warm
             .prompt_ms
             .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
-        let reuse = match (t1.prompt_n, warm.prompt_n) {
-            (Some(n1), Some(n2)) if n1 > 0 => Some(1.0 - (n2 as f64 / n1 as f64).min(1.0)),
-            _ => None,
-        };
+        let reuse = reuse_of(&warm);
         record(
             &mut all,
             SLOT_RESTORE,

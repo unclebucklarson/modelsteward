@@ -24,8 +24,14 @@ pub struct ModelCacheStats {
     pub turns: u32,
     pub prompt_tokens: u64,
     pub reused_tokens: u64,
-    /// llama-server announced cache-reuse disabled (multimodal).
+    /// llama-server announced cache-reuse disabled (any reason).
     pub reuse_disabled: bool,
+    /// The non-multimodal reason: "not supported by this context" — the
+    /// model's attention (SWA/hybrid) has a non-shiftable KV cache, so
+    /// cache-reuse AND context-shift are off REGARDLESS of vision
+    /// (found live 2026-08-27 on the text-only daily driver: removing
+    /// the projector changed nothing; checkpoints are the actual lever).
+    pub reuse_unsupported_context: bool,
 }
 
 impl ModelCacheStats {
@@ -123,6 +129,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
     }
     let mut port_model: BTreeMap<u32, String> = BTreeMap::new();
     let mut disabled_ports: std::collections::BTreeSet<u32> = Default::default();
+    let mut context_ports: std::collections::BTreeSet<u32> = Default::default();
     // (port, task) → figures; flushed into per-model tallies at the end
     // using the FINAL port mapping seen — close enough for a monitor, and
     // per-restart precision isn't worth a full state machine here.
@@ -143,6 +150,9 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
         };
         if body.contains("cache_reuse is not supported") {
             disabled_ports.insert(port);
+            if body.contains("not supported by this context") {
+                context_ports.insert(port);
+            }
             continue;
         }
         let Some(task) = task_id(body) else { continue };
@@ -180,6 +190,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
                 prompt_tokens: 0,
                 reused_tokens: 0,
                 reuse_disabled: false,
+                reuse_unsupported_context: false,
             });
         s.turns += 1;
         s.prompt_tokens += total_prompt;
@@ -190,6 +201,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
             && let Some(s) = per_model.get_mut(model)
         {
             s.reuse_disabled = true;
+            s.reuse_unsupported_context |= context_ports.contains(port);
         }
     }
     // Also surface disabled models that had no complete turns yet.
@@ -203,6 +215,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
                     prompt_tokens: 0,
                     reused_tokens: 0,
                     reuse_disabled: true,
+                    reuse_unsupported_context: context_ports.contains(port),
                 });
         }
     }
@@ -249,6 +262,18 @@ mod tests {
 [9] x I slot release: id 0 | task 3 | stop processing: n_tokens = 50, truncated = 0\n";
         assert!(cache_effectiveness(log).is_empty());
     }
+    #[test]
+    fn context_unsupported_is_distinguished_from_multimodal() {
+        let log = "load: spawning server instance with name=swa-model on port 41001\n\
+                   load: spawning server instance with name=vis-model on port 41002\n\
+                   [41001] 0.02 W srv load_model: cache_reuse is not supported by this context, it will be disabled\n\
+                   [41002] 0.03 W srv load_model: cache_reuse is not supported by multimodal, it will be disabled\n";
+        let stats = cache_effectiveness(log);
+        let get = |m: &str| stats.iter().find(|s| s.model == m).unwrap();
+        assert!(get("swa-model").reuse_disabled && get("swa-model").reuse_unsupported_context);
+        assert!(get("vis-model").reuse_disabled && !get("vis-model").reuse_unsupported_context);
+    }
+
     #[test]
     fn topology_advice_needs_real_alternation_and_room() {
         let gib = 1024u64 * 1024 * 1024;

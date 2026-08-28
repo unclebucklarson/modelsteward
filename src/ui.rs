@@ -156,6 +156,7 @@ struct App {
     lab_moe: bool,
     lab_vision: bool,
     lab_cache: bool,
+    lab_ckpt: bool,
     lab_slots: bool,
     /// Which menu's Why? explanation is expanded in the Lab, if any.
     lab_why: Option<String>,
@@ -181,6 +182,7 @@ enum AfterStart {
         moe: bool,
         vision: bool,
         cache: bool,
+        ckpt: bool,
         slots: bool,
     },
 }
@@ -267,6 +269,7 @@ impl App {
             lab_moe: false,
             lab_vision: false,
             lab_cache: false,
+            lab_ckpt: false,
             lab_slots: false,
             lab_why: None,
             configured: Vec::new(),
@@ -607,7 +610,7 @@ impl App {
                 AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
                 AfterStart::Lab {
                     id, measure, bench, spec, ub, kv, quality, load, dials, moe,
-                    vision, cache, slots,
+                    vision, cache, ckpt, slots,
                 } => {
                     // Campaigns run in sequence on one worker: measure first
                     // (it's what puts a model into OpenCode at all), bench
@@ -658,6 +661,9 @@ impl App {
                     }
                     if cache {
                         trial_worker(&cfg, &id, "cache", &cancel_token, tx);
+                    }
+                    if ckpt {
+                        trial_worker(&cfg, &id, "ckpt", &cancel_token, tx);
                     }
                     if slots {
                         let tx2 = tx.clone();
@@ -1839,6 +1845,7 @@ impl App {
                         self.lab_moe = is_moe_over_vram;
                         self.lab_vision = has_mmproj;
                         self.lab_cache = true;
+                        self.lab_ckpt = true;
                         self.lab_slots = false;
                     }
                     if ui.small_button("select all").clicked() {
@@ -1853,6 +1860,7 @@ impl App {
                         self.lab_moe = true;
                         self.lab_vision = true;
                         self.lab_cache = true;
+                        self.lab_ckpt = true;
                         self.lab_slots = true;
                     }
                     if ui.small_button("select none").clicked() {
@@ -1867,6 +1875,7 @@ impl App {
                         self.lab_moe = false;
                         self.lab_vision = false;
                         self.lab_cache = false;
+                        self.lab_ckpt = false;
                         self.lab_slots = false;
                     }
                 });
@@ -1935,6 +1944,18 @@ impl App {
                      Measured with a two-turn probe, not guessed.",
                 );
                 ui.checkbox(
+                    &mut self.lab_ckpt,
+                    "Checkpoint trial (--checkpoint-min-step — mid-edit resume \
+                     points for models whose cache can't shift, ~10 min)",
+                )
+                .on_hover_text(
+                    "SWA/hybrid-attention models silently DISABLE cache-reuse and \
+                     ctx-shift; a mid-prompt edit resumes from the nearest context \
+                     checkpoint instead, and the defaults space them 8192 tokens \
+                     apart — almost nowhere for coding-agent prompts. Measured live: \
+                     a 1954ms second turn dropped to 467ms with min-step 128.",
+                );
+                ui.checkbox(
                     &mut self.lab_slots,
                     "Slot-persistence ceiling (save/restore a session's KV cache \
                      across a swap — groundwork measurement, ~6 min)",
@@ -1958,6 +1979,7 @@ impl App {
                     || self.lab_moe
                     || self.lab_vision
                     || self.lab_cache
+                    || self.lab_ckpt
                     || self.lab_slots;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
@@ -1980,7 +2002,7 @@ impl App {
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
-                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe", "vision", "cache"] {
+                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe", "vision", "cache", "ckpt"] {
                             let Some(report) = trial::stored_report(menu_name, table) else {
                                 continue;
                             };
@@ -2005,7 +2027,8 @@ impl App {
                                     "dials" => "Speculation dials",
                                     "moe" => "MoE offload",
                                     "vision" => "Vision cost",
-                                    _ => "Cache reuse",
+                                    "cache" => "Cache reuse",
+                                    _ => "Checkpoints",
                                 },
                                 report.verdict.reason
                             ));
@@ -2166,6 +2189,7 @@ impl App {
                 moe: self.lab_moe,
                 vision: self.lab_vision,
                 cache: self.lab_cache,
+                ckpt: self.lab_ckpt,
                 slots: self.lab_slots,
             };
             self.run_or_offer_start(action);
@@ -2181,8 +2205,15 @@ impl App {
             ui.strong("Prompt cache — measured from your real sessions");
             for s in &self.cache_stats {
                 if s.reuse_disabled {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
+                    let msg = if s.reuse_unsupported_context {
+                        format!(
+                            "{}: cache-reuse UNSUPPORTED — this model's attention \
+                             (SWA/hybrid) can't shift its KV cache, vision or not; \
+                             mid-edit turns resume from context checkpoints instead. \
+                             Run the Lab's Checkpoint trial — it's the real lever here.",
+                            s.model
+                        )
+                    } else {
                         format!(
                             "{}: cache-reuse DISABLED — llama.cpp turns it off for \
                              vision-served models, so every turn reprocesses the full \
@@ -2190,8 +2221,9 @@ impl App {
                              its mmproj (⚙ / shelf dir) restores the biggest agent \
                              prefill win.",
                             s.model
-                        ),
-                    );
+                        )
+                    };
+                    ui.colored_label(ui.visuals().warn_fg_color, msg);
                 } else {
                     ui.label(format!(
                         "{}: {} turns, {:.0}% of prompt tokens reused ({} of {})",

@@ -123,7 +123,7 @@ modelsteward --preset      # write ~/.config/modelsteward/router.ini
 modelsteward --start       # router on :8080
 modelsteward --calibrate   # measure new/stale models (add `force` for all)
 modelsteward --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
-modelsteward --trial <id>  # measured config trial ([spec|ub|kv|load|dials|moe|vision|cache|slots]; `keep <variant>` applies)
+modelsteward --trial <id>  # measured config trial ([spec|ub|kv|load|dials|moe|vision|cache|ckpt|slots]; `keep <variant>` applies)
 modelsteward --sync        # write measured limits into opencode.json
 modelsteward --verify-rebuild  # after a rebuild: restart, re-measure, report
 modelsteward --advise      # build advisor report
