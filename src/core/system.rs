@@ -22,11 +22,8 @@ pub struct ScanReport {
 pub fn config_dir() -> PathBuf {
     std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".config")
-        })
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
+        .unwrap_or_else(|| settings::real_home().join(".config"))
         .join("modelsteward")
 }
 

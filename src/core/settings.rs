@@ -7,6 +7,24 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// The user's REAL home. Snap-packaged parents (VS Code's snap, most
+/// commonly) redirect HOME into a per-REVISION dir like
+/// /home/u/snap/code/258 — anything stored there is orphaned on the
+/// next snap update (live casualty 2026-08-28: the managed llama.cpp
+/// checkout vanished with an OS update). Strip the redirect.
+pub fn real_home() -> PathBuf {
+    let home = std::env::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut parts = home.components();
+    let mut real = PathBuf::new();
+    for c in parts.by_ref() {
+        if c.as_os_str() == "snap" {
+            return real;
+        }
+        real.push(c);
+    }
+    home
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppConfig {

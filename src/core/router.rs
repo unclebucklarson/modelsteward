@@ -165,11 +165,8 @@ pub struct Marker {
 pub fn state_dir() -> PathBuf {
     std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local/state")
-        })
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
+        .unwrap_or_else(|| crate::core::settings::real_home().join(".local/state"))
         .join("modelsteward")
 }
 

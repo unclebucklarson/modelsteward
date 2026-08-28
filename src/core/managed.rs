@@ -29,11 +29,11 @@ pub const REPO_URL: &str = "https://github.com/ggml-org/llama.cpp";
 pub fn data_dir() -> PathBuf {
     std::env::var_os("XDG_DATA_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            std::env::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".local/share")
-        })
+        // A snap-redirected XDG var points into a per-revision dir that
+        // the next snap update deletes — never persist a git checkout
+        // or build archive there (see settings::real_home).
+        .filter(|p| !p.components().any(|c| c.as_os_str() == "snap"))
+        .unwrap_or_else(|| crate::core::settings::real_home().join(".local/share"))
         .join("modelsteward")
 }
 

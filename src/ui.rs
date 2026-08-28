@@ -336,6 +336,23 @@ impl App {
         }
     }
 
+    /// The server the app would launch, derived from the CACHED scan —
+    /// zero subprocesses. system::pick_server probes every install with
+    /// --version and --list-devices (CUDA init!); calling it per frame
+    /// made the whole desktop sluggish once archives multiplied the
+    /// candidate list (live casualty 2026-08-28, user relaunched 3x).
+    fn picked_server(&self) -> Option<PathBuf> {
+        if let Some(explicit) = &self.cfg.server_bin {
+            return Some(explicit.clone());
+        }
+        let scan = self.scan.as_ref()?;
+        scan.devices_from.clone().or_else(|| {
+            let mut by_build: Vec<_> = scan.installs.iter().collect();
+            by_build.sort_by_key(|i| std::cmp::Reverse(i.build.unwrap_or(0)));
+            by_build.first().map(|i| i.server_path.clone())
+        })
+    }
+
     fn hardware(&self) -> rows::Hardware {
         // Physical, deduped, dedicated-only: the old first-CUDA pick was
         // right on this machine but a Vulkan-only box would have taken the
@@ -400,9 +417,26 @@ impl App {
             let log_path = router::state_dir().join("router.log");
             let mut last_log_len: u64 = 0;
             let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
+            let cfg_path = system::config_file();
+            let mut last_cfg_mtime = None;
+            let mut rcfg: Option<router::RouterConfig> = None;
             loop {
                 let cfg = system::load_config();
-                let state = router::status(&router::state_dir(), &system::router_config(&cfg));
+                // router_config → pick_server probes every install with
+                // --version/--list-devices; doing that every 2s scaled
+                // with the archive count and dragged the whole machine.
+                // The pick only shifts when config or installs change —
+                // recompute on config mtime change (and daily, below).
+                let cfg_mtime =
+                    std::fs::metadata(&cfg_path).and_then(|m| m.modified()).ok();
+                if rcfg.is_none() || cfg_mtime != last_cfg_mtime {
+                    last_cfg_mtime = cfg_mtime;
+                    rcfg = Some(system::router_config(&cfg));
+                }
+                let state = router::status(
+                    &router::state_dir(),
+                    rcfg.as_ref().expect("set above"),
+                );
                 if tx.send(Msg::RouterState(state)).is_err() {
                     return;
                 }
@@ -447,6 +481,9 @@ impl App {
                             >= advisor::UPSTREAM_CHECK_INTERVAL_SECS
                     })
                     .unwrap_or(true);
+                if due {
+                    rcfg = Some(system::router_config(&cfg)); // daily re-pick
+                }
                 if due && let Ok(server) = system::pick_server(&cfg) {
                     let build = discover::build_of(&server);
                     let s = advisor::upstream_probe(&server, build);
@@ -2811,7 +2848,7 @@ impl App {
             ui.add_space(4.0);
             ui.strong("Detected llama-server installs");
             let installs = scan.installs.clone();
-            let picked = system::pick_server(&self.cfg).ok();
+            let picked = self.picked_server();
             for inst in &installs {
                 ui.horizontal(|ui| {
                     if ui.button("Use").clicked() {
@@ -2834,8 +2871,12 @@ impl App {
                 });
             }
         }
-        if let Ok(picked) = system::pick_server(&self.cfg) {
-            let build = discover::build_of(&picked)
+        if let Some(picked) = self.picked_server() {
+            let build = self
+                .scan
+                .as_ref()
+                .and_then(|s| s.installs.iter().find(|i| i.server_path == picked))
+                .and_then(|i| i.build)
                 .map(|b| format!(" (b{b})"))
                 .unwrap_or_default();
             ui.small(format!("currently using: {}{build}", picked.display()));
@@ -3773,16 +3814,21 @@ impl App {
                                     egui::TextEdit::singleline(&mut self.archive_label)
                                         .desired_width(160.0)
                                         .hint_text(
+                                            // From the cached scan — never
+                                            // probe binaries in a render loop.
                                             check
                                                 .server_bin
                                                 .as_deref()
-                                                .map(|p| {
-                                                    let insts =
-                                                        discover::find_installs(&[p.to_path_buf()]);
-                                                    insts
-                                                        .first()
+                                                .and_then(|p| {
+                                                    self.scan.as_ref()?.installs
+                                                        .iter()
+                                                        .find(|i| i.server_path == p)
                                                         .map(discover::install_alias)
-                                                        .unwrap_or_else(|| "label".into())
+                                                })
+                                                .or_else(|| {
+                                                    check
+                                                        .current_build
+                                                        .map(|b| format!("b{b}-variant"))
                                                 })
                                                 .unwrap_or_else(|| "label".into()),
                                         ),
