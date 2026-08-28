@@ -442,6 +442,9 @@ impl App {
             let cfg_path = system::config_file();
             let mut last_cfg_mtime = None;
             let mut rcfg: Option<router::RouterConfig> = None;
+            // A release the auto-build wants but couldn't start because the
+            // machine was busy — retried each tick until quiet.
+            let mut pending_autobuild: Option<u64> = None;
             loop {
                 let cfg = system::load_config();
                 // router_config → pick_server probes every install with
@@ -488,11 +491,19 @@ impl App {
                 // throttled to twice a minute (the log can be large).
                 let log_len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
                 if log_len != last_log_len && last_mine.elapsed().as_secs() >= 30 {
-                    // fall through below (kept single block)
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
                     if let Ok(text) = std::fs::read_to_string(&log_path) {
                         let _ = tx.send(Msg::CacheStats(evidence::cache_effectiveness(&text)));
+                        // M9: credit new usage into the token ledger; the
+                        // continuous harvest is what survives the router
+                        // truncating its log on restart.
+                        let now = advisor::now_epoch();
+                        let _ = meter::harvest(&router::state_dir(), &text, now);
+                        let _ = tx.send(Msg::Meter(meter::summary_line(
+                            &router::state_dir(),
+                            now,
+                        )));
                     }
                 }
                 // Daily upstream freshness (user request 2026-08-25): one
@@ -524,6 +535,29 @@ impl App {
                         && let Some(up) = s.upstream_build
                         && !managed::list_archives().iter().any(|a| a.build == Some(up))
                     {
+                        pending_autobuild = Some(up);
+                    }
+                    let _ = tx.send(Msg::Upstream(s));
+                }
+                // Auto-build waits for a QUIET machine: a full-core cmake
+                // beside a measurement or trial skews the numbers being
+                // recorded (seen live 2026-08-28 — the build ran through a
+                // measure sweep). Loaded models = someone is working.
+                if let Some(up) = pending_autobuild {
+                    let idle = matches!(
+                        router::status(&router::state_dir(), rcfg.as_ref().expect("set above")),
+                        router::RouterState::Ours { ref models }
+                            if !models.iter().any(|m| m.status == "loaded")
+                    ) || matches!(
+                        router::status(&router::state_dir(), rcfg.as_ref().expect("set above")),
+                        router::RouterState::Down
+                    );
+                    if idle
+                        && !managed::list_archives().iter().any(|a| a.build == Some(up))
+                        && let Ok(server) = system::pick_server(&cfg)
+                    {
+                        pending_autobuild = None;
+                        let build = discover::build_of(&server);
                         // Own thread: a multi-minute cmake build must not
                         // freeze the status poller. The daily stamp was
                         // already written above, so this can't re-trigger.
@@ -552,7 +586,6 @@ impl App {
                             }));
                         });
                     }
-                    let _ = tx.send(Msg::Upstream(s));
                 }
                 ctx.request_repaint();
                 std::thread::sleep(std::time::Duration::from_secs(2));
@@ -3697,7 +3730,6 @@ impl App {
         let mut recheck = false;
         let mut triage = false;
         let mut managed_build = false;
-        let mut pin: Option<Option<PathBuf>> = None;
         let mut archive_now = false;
         egui::Window::new("Build Advisor")
             .collapsible(false)
@@ -4010,9 +4042,6 @@ impl App {
         }
         if managed_build {
             self.action_managed_build();
-        }
-        if let Some(p) = pin {
-            self.action_pin(p);
         }
     }
 
