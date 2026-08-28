@@ -1052,8 +1052,13 @@ fn slot_action(child_port: u16, action: &str, filename: &str) -> Result<serde_js
 /// hardware before any workflow gets designed around it.
 ///
 /// Two passes, same conversation, both across a full unload/reload:
-///   slot-cold:    reload → edited turn (nothing to reuse) — today's cost.
-///   slot-restore: turn 1 → save → reload → restore → edited turn.
+///   slot-cold:    reload → the conversation's turn (nothing to reuse).
+///   slot-restore: turn 1 → save → reload → restore → the SAME turn.
+/// The turn is UNEDITED — swap-back means "come back and continue",
+/// so the restored cache is an exact prefix. (First run used the edited
+/// turn and honestly measured 1.0x: an edit hits the SWA checkpoint
+/// wall with or without a restore — that's the vision/ckpt story, not
+/// the slot story.)
 /// Recorded in trials.json under labels the menus don't own; the Lab
 /// shows the ratio via slot_summary(). No Apply — nothing to configure.
 pub fn run_slot_trial(
@@ -1109,7 +1114,7 @@ pub fn run_slot_trial(
                  fix context before measuring slot persistence"
             );
         }
-        let cold = agent_turn_ask(cfg.port, model, true)?;
+        let cold = agent_turn_ask(cfg.port, model, false)?;
         let cold_ms = cold
             .prompt_ms
             .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;
@@ -1146,7 +1151,7 @@ pub fn run_slot_trial(
         let t0 = std::time::Instant::now();
         slot_action(child(model)?, "restore", filename)?;
         let restore_secs = t0.elapsed().as_secs_f64();
-        let warm = agent_turn_ask(cfg.port, model, true)?;
+        let warm = agent_turn_ask(cfg.port, model, false)?;
         let warm_ms = warm
             .prompt_ms
             .ok_or_else(|| anyhow::anyhow!("timings has no prompt_ms"))?;

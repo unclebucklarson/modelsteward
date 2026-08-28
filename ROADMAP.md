@@ -397,8 +397,18 @@ measurements + journal. Then:
    and the `slots` Lab campaign / `--trial <id> slots` measures the
    ceiling — save → swap → restore → edited turn vs a cold swap-back,
    reported as a standing Lab line (no Apply; it's a workflow, not a
-   knob). BACKLOG — snapshot/resume workflow, revisit when the measured
-   ceiling justifies it: the user today picks ONE middle-of-the-road
+   knob). NIGHT-MEASURED CEILING (2026-08-27/28, b10630): ~1.0x — a
+   solid negative. Snapshots round-trip perfectly (2637 tokens, 237MiB,
+   47ms restore) but post-restore requests get cache_n = 0 on the OAI
+   endpoint: tested on the SWA daily driver (checkpoint wall) AND on
+   north-mini (id_slot-pinned too) — this build's restore rehydrates
+   bytes the prefix matcher never consults. The probe now measures the
+   CONTINUATION scenario (unedited turn; an edited turn tests the
+   checkpoint story, not the slot story). Watch upstream: when restore
+   feeds prefix matching (or preserves SWA checkpoints), the campaign
+   will light up on its own — the instrument is in place. BACKLOG —
+   snapshot/resume workflow, revisit when the measured ceiling
+   justifies it: the user today picks ONE middle-of-the-road
    model precisely because swap-back costs a full reprocess; cheap
    restore would unlock specialist-model-per-task. Design constraints
    recorded: the app is NOT in the router's eviction path (llama-server
