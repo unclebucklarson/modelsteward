@@ -2009,7 +2009,7 @@ impl App {
                                 },
                                 report.verdict.reason
                             ));
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 // Applying mid-campaign would race the
                                 // worker for the preset and GPU — buttons
                                 // sit out until the run finishes.
@@ -2060,6 +2060,41 @@ impl App {
                                     {
                                         apply =
                                             Some((menu_name.to_string(), nm.label.clone()));
+                                    }
+                                }
+                                // Every measured option stays selectable
+                                // (user request 2026-08-27): the rules
+                                // recommend, they don't gatekeep — any row
+                                // you can see, you can choose.
+                                let offered: std::collections::HashSet<&str> = report
+                                    .verdict
+                                    .winner
+                                    .iter()
+                                    .map(String::as_str)
+                                    .chain(report.near_misses.iter().map(|n| n.label.as_str()))
+                                    .collect();
+                                for v in trial::menu(menu_name)
+                                    .map(|(v, _)| v)
+                                    .unwrap_or_default()
+                                {
+                                    if offered.contains(v.label.as_str())
+                                        || !report.raced.contains_key(&v.label)
+                                    {
+                                        continue;
+                                    }
+                                    if ui
+                                        .add_enabled(
+                                            idle,
+                                            egui::Button::new(format!("Use {}", v.label)),
+                                        )
+                                        .on_hover_text(
+                                            "Not the rules' pick — but it's measured, and \
+                                             the table shows its numbers. Your call; \
+                                             reverses the same way.",
+                                        )
+                                        .clicked()
+                                    {
+                                        apply = Some((menu_name.to_string(), v.label.clone()));
                                     }
                                 }
                                 if ui.button("Why?").clicked() {
@@ -3816,7 +3851,7 @@ fn trial_worker(
     let mut progress = move |line: String| {
         let _ = tx2.send(Msg::Progress(line));
     };
-    let _ = match trial::run_trial(cfg, id, &variants, goal, cancel_token, &mut progress) {
+    let _ = match trial::run_trial(cfg, id, menu, &variants, goal, cancel_token, &mut progress) {
         Ok(report) => tx.send(Msg::TrialDone {
             model: id.to_string(),
             menu: menu.to_string(),

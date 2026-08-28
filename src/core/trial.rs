@@ -521,12 +521,26 @@ pub fn verdict(
 /// run's dialog closed (user request 2026-08-25: results must be
 /// applicable, not just viewable). Filters the model's stored table down
 /// to baseline + this menu's variants; None until both exist.
+/// Each menu's baseline is stored under its own label: menus strip only
+/// their OWN knob keys, so their baselines are DIFFERENT configs — a
+/// shared row let the last campaign overwrite the others' reference
+/// point (found live 2026-08-27: after a full campaign sweep, the spec
+/// verdict compared ngram-simple against a baseline that itself had
+/// ngram-simple applied, and the standing recommendation went grim).
+pub fn baseline_label(menu_name: &str) -> String {
+    format!("baseline ({menu_name})")
+}
+
 pub fn stored_report(
     menu_name: &str,
     table: &std::collections::BTreeMap<String, TrialResult>,
 ) -> Option<TrialReport> {
     let (variants, goal) = menu(menu_name)?;
-    let baseline = table.get(BASELINE)?.clone();
+    // Scoped baseline first; the legacy shared row serves old data.
+    let baseline = table
+        .get(&baseline_label(menu_name))
+        .or_else(|| table.get(BASELINE))?
+        .clone();
     let mut raced: std::collections::BTreeMap<String, TrialResult> = variants
         .iter()
         .filter_map(|v| table.get(&v.label).map(|r| (v.label.clone(), r.clone())))
@@ -1186,6 +1200,7 @@ pub fn baseline_override(
 pub fn run_trial(
     cfg: &settings::AppConfig,
     model: &str,
+    menu_name: &str,
     variants: &[Variant],
     goal: Goal,
     cancel: &crate::core::cancel::CancelToken,
@@ -1281,7 +1296,10 @@ pub fn run_trial(
         let baseline = round(1, BASELINE, &[], None, progress)?;
         all.entry(model.to_string())
             .or_default()
-            .insert(BASELINE.to_string(), baseline.clone());
+            .insert(baseline_label(menu_name), baseline.clone());
+        // Retire this model's legacy shared row so stale cross-menu
+        // reference points can't shadow the scoped ones.
+        all.entry(model.to_string()).or_default().remove(BASELINE);
         write_trials(&dir, &all)?;
 
         // Verdicts only compare what THIS run raced — stored results from
@@ -1772,6 +1790,28 @@ mod tests {
             vec![("no-mmproj".to_string(), "true".to_string())]
         );
         assert!(applied_keys(&cfg, "m", "spec").is_empty());
+    }
+
+    #[test]
+    fn scoped_baselines_end_the_cross_menu_overwrite() {
+        // The live 2026-08-27 confusion: the cache campaign's baseline
+        // (ngram-simple still applied → fast rewrite) overwrote the spec
+        // campaign's stripped baseline, so ngram-simple raced itself.
+        let mut table = std::collections::BTreeMap::new();
+        table.insert(BASELINE.to_string(), r(41.0, 88.0, 114_944)); // legacy: confounded
+        table.insert(baseline_label("spec"), r(41.0, 40.0, 114_944)); // true spec baseline
+        table.insert("ngram-simple".to_string(), r(41.0, 87.9, 114_944));
+        let rep = stored_report("spec", &table).unwrap();
+        assert_eq!(
+            rep.verdict.winner.as_deref(),
+            Some("ngram-simple"),
+            "scoped baseline restores the honest +120% rewrite verdict: {}",
+            rep.verdict.reason
+        );
+        // Menus without a scoped row still fall back to the legacy one.
+        table.remove(&baseline_label("spec"));
+        let rep = stored_report("spec", &table).unwrap();
+        assert!(rep.verdict.winner.is_none(), "legacy fallback still works");
     }
 
     #[test]

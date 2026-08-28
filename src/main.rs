@@ -196,6 +196,7 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let report = trial::run_trial(
         cfg,
         model,
+        menu_name,
         &variants,
         goal,
         &cancel::CancelToken::default(),
