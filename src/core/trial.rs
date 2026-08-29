@@ -723,6 +723,31 @@ pub fn applied_keys(
         .unwrap_or_default()
 }
 
+/// Is a menu's winner already what the model's override applies? The
+/// Lab's headline uses this to show only ACTIONABLE recommendations.
+pub fn winner_applied(
+    cfg: &settings::AppConfig,
+    model: &str,
+    menu_name: &str,
+    winner: &str,
+) -> bool {
+    let Some((variants, _)) = menu(menu_name) else {
+        return false;
+    };
+    let Some(v) = variants.iter().find(|v| v.label == winner) else {
+        return false;
+    };
+    let ov = cfg.overrides.get(model);
+    let extras_ok = v.extra.iter().all(|(k, val)| {
+        ov.is_some_and(|o| o.extra.iter().any(|(ek, ev)| ek == k && ev == val))
+    });
+    let mmproj_ok = match v.no_mmproj {
+        Some(want) => ov.is_some_and(|o| o.no_mmproj == want),
+        None => true,
+    };
+    extras_ok && mmproj_ok
+}
+
 /// The verdict explained in plain language, derived entirely from the
 /// measured table — the rules that pick the winner narrate their own
 /// reasoning (user request 2026-08-25: the table isn't self-evident to

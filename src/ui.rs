@@ -2368,14 +2368,55 @@ impl App {
                 let mut toggle_why: Option<String> = None;
                 match self.trials.get(&id) {
                     Some(table) if !table.is_empty() => {
-                        trial_table_grid(ui, "lab-trials", table);
+                        const MENUS: [&str; 9] = [
+                            "spec", "ub", "kv", "load", "dials", "moe", "vision",
+                            "cache", "ckpt",
+                        ];
+                        let reports: Vec<(&str, trial::TrialReport)> = MENUS
+                            .iter()
+                            .filter_map(|m| {
+                                trial::stored_report(m, table).map(|r| (*m, r))
+                            })
+                            .collect();
+                        let winners: std::collections::HashSet<String> = reports
+                            .iter()
+                            .filter_map(|(_, r)| r.verdict.winner.clone())
+                            .collect();
+                        // The headline (user request 2026-08-28: nine
+                        // verdict sentences made the reader do the
+                        // summarizing): only ACTIONABLE winners — already-
+                        // applied ones collapse into the ✓ state.
+                        let todo: Vec<String> = reports
+                            .iter()
+                            .filter_map(|(m, r)| {
+                                let w = r.verdict.winner.as_deref()?;
+                                (!trial::winner_applied(&self.cfg, &id, m, w))
+                                    .then(|| format!("{w} ({m})"))
+                            })
+                            .collect();
+                        if todo.is_empty() && !winners.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0, 170, 0),
+                                "✓ current config matches every measured recommendation",
+                            );
+                        } else if !todo.is_empty() {
+                            ui.colored_label(
+                                egui::Color32::from_rgb(0, 170, 0),
+                                format!("Recommended (not yet applied): {}", todo.join(" · ")),
+                            );
+                            ui.small(
+                                "★ rows below are the winners; Apply buttons sit with \
+                                 each menu's verdict.",
+                            );
+                        }
+                        ui.add_space(4.0);
+                        trial_table_grid(ui, "lab-trials", table, &winners);
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
-                        for menu_name in ["spec", "ub", "kv", "load", "dials", "moe", "vision", "cache", "ckpt"] {
-                            let Some(report) = trial::stored_report(menu_name, table) else {
-                                continue;
-                            };
+                        for (menu_name, report) in &reports {
+                            let menu_name = *menu_name;
+                            let report = report.clone();
                             ui.add_space(6.0);
                             let applied = trial::applied_keys(&self.cfg, &id, menu_name);
                             let applied_text = if applied.is_empty() {
@@ -4504,6 +4545,7 @@ fn trial_table_grid(
     ui: &mut egui::Ui,
     salt: &str,
     table: &std::collections::BTreeMap<String, trial::TrialResult>,
+    winners: &std::collections::HashSet<String>,
 ) {
     egui::Grid::new(salt).striped(true).show(ui, |ui| {
         for h in [
@@ -4515,7 +4557,11 @@ fn trial_table_grid(
         ui.end_row();
         let fmt = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
         for (label, r) in table {
-            ui.label(label);
+            if winners.contains(label.as_str()) {
+                ui.colored_label(egui::Color32::from_rgb(0, 170, 0), format!("★ {label}"));
+            } else {
+                ui.label(label);
+            }
             if let Some(e) = &r.error {
                 ui.label(format!("failed: {e}"));
                 ui.end_row();
