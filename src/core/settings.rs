@@ -68,6 +68,9 @@ pub struct AppConfig {
     /// options, selectable for building; the active binary's checkout
     /// and the managed clone are always offered).
     pub checkouts: Vec<PathBuf>,
+    /// $/kWh for the Meter's measured-cost line — YOUR electricity
+    /// price (default is a rough US average; edit to your bill's rate).
+    pub kwh_price_usd: f64,
     /// $/Mtok OUTPUT price used by the Meter's cloud-comparison counter
     /// (M9 p1). A ballpark mid-tier API price as of 2026-08 — edit to
     /// whatever YOU would actually pay; the report labels it as your
@@ -101,6 +104,7 @@ impl Default for AppConfig {
             models_max: 1,
             overrides: Default::default(),
             checkouts: Vec::new(),
+            kwh_price_usd: 0.15,
             cloud_price_per_mtok: 3.0,
             disabled: Vec::new(),
             managed_auto_build: false,

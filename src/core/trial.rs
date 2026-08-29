@@ -748,6 +748,42 @@ pub fn winner_applied(
     extras_ok && mmproj_ok
 }
 
+/// The J/token of the config a model actually SERVES (the meter's
+/// dollar line prices reality, not hypotheticals): the applied menu
+/// winner's trial row when one matches, the mean of the stock
+/// (scoped-baseline) rows when nothing is applied, None when the
+/// served config was never energy-measured.
+pub fn served_j_per_token(
+    cfg: &settings::AppConfig,
+    model: &str,
+    table: &std::collections::BTreeMap<String, TrialResult>,
+) -> Option<f64> {
+    let has_override = cfg
+        .overrides
+        .get(model)
+        .is_some_and(|o| !o.extra.is_empty() || o.no_mmproj);
+    if has_override {
+        for menu_name in ["moe", "spec", "dials", "ub", "kv", "load", "cache", "ckpt", "vision"] {
+            let Some((variants, _)) = menu(menu_name) else { continue };
+            for v in &variants {
+                if winner_applied(cfg, model, menu_name, &v.label)
+                    && let Some(j) = table.get(&v.label).and_then(|r| r.j_per_token)
+                {
+                    return Some(j);
+                }
+            }
+        }
+        return None;
+    }
+    // Stock config: every scoped baseline row measured the same thing.
+    let js: Vec<f64> = table
+        .iter()
+        .filter(|(l, _)| l.starts_with("baseline"))
+        .filter_map(|(_, r)| r.j_per_token)
+        .collect();
+    (!js.is_empty()).then(|| js.iter().sum::<f64>() / js.len() as f64)
+}
+
 /// The verdict explained in plain language, derived entirely from the
 /// measured table — the rules that pick the winner narrate their own
 /// reasoning (user request 2026-08-25: the table isn't self-evident to
@@ -2167,6 +2203,44 @@ mod tests {
         // No restore row → no line (cold alone proves nothing).
         table.remove(SLOT_RESTORE);
         assert!(slot_summary(&table).is_none());
+    }
+
+    #[test]
+    fn served_j_per_token_follows_the_applied_config() {
+        // Contract: the dollar line must price the config that actually
+        // SERVES — the applied winner's row when one is applied, the
+        // stock (scoped-baseline) rows when nothing is, None when the
+        // served config was never energy-measured.
+        let mut cfg = settings::AppConfig::default();
+        let mut table = std::collections::BTreeMap::new();
+        let with_j = |j: f64| {
+            let mut t = r(40.0, 40.0, 100_000);
+            t.j_per_token = Some(j);
+            t
+        };
+        table.insert(baseline_label("spec"), with_j(2.0));
+        table.insert(baseline_label("ub"), with_j(2.2));
+        table.insert("ngram-simple".to_string(), with_j(1.5));
+        // Nothing applied → stock config → mean of scoped baselines.
+        assert_eq!(served_j_per_token(&cfg, "m", &table), Some(2.1));
+        // Winner applied → that row's measurement.
+        cfg.overrides.insert(
+            "m".into(),
+            router::ModelOverrides {
+                extra: vec![("spec-type".into(), "ngram-simple".into())],
+                ..Default::default()
+            },
+        );
+        assert_eq!(served_j_per_token(&cfg, "m", &table), Some(1.5));
+        // Applied config with no matching energy-measured row → None.
+        cfg.overrides.insert(
+            "m".into(),
+            router::ModelOverrides {
+                extra: vec![("spec-type".into(), "ngram-mod".into())],
+                ..Default::default()
+            },
+        );
+        assert_eq!(served_j_per_token(&cfg, "m", &table), None);
     }
 
     #[test]

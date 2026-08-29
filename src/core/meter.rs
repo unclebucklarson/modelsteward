@@ -260,13 +260,60 @@ pub fn report(buckets: &[Bucket], since: Option<u64>, until: Option<u64>) -> Rep
     r
 }
 
+/// What the metered usage actually cost, in measured joules only
+/// (M9 phase 3, test-first 2026-08-29). Generated tokens are billed at
+/// each model's measured J/token; tokens from models without an energy
+/// measurement land in `uncovered_generated` and are never priced —
+/// measured or absent, no estimates.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct CostReport {
+    pub fleet_kwh: f64,
+    pub fleet_usd: f64,
+    /// model → (kWh, usd)
+    pub per_model: BTreeMap<String, (f64, f64)>,
+    pub covered_generated: u64,
+    pub uncovered_generated: u64,
+}
+
+pub fn cost_report(
+    r: &Report,
+    j_per_token: &BTreeMap<String, f64>,
+    kwh_price: f64,
+) -> CostReport {
+    let mut c = CostReport::default();
+    for (model, t) in &r.per_model {
+        match j_per_token.get(model) {
+            Some(j) if t.generated > 0 => {
+                let kwh = t.generated as f64 * j / 3.6e6;
+                let usd = kwh * kwh_price;
+                c.fleet_kwh += kwh;
+                c.fleet_usd += usd;
+                c.covered_generated += t.generated;
+                c.per_model.insert(model.clone(), (kwh, usd));
+            }
+            _ => c.uncovered_generated += t.generated,
+        }
+    }
+    c
+}
+
 /// One line for the Server tab: today's usage at a glance.
-pub fn summary_line(dir: &Path, now: u64) -> Option<String> {
+/// `cost` carries (j_per_token map, $/kWh) when the caller has them.
+pub fn summary_line(
+    dir: &Path,
+    now: u64,
+    cost: Option<(&BTreeMap<String, f64>, f64)>,
+) -> Option<String> {
     let day = now - now % 86_400;
     let r = report(&read_all(dir), Some(day), None);
+    let dollars = cost
+        .map(|(j, price)| cost_report(&r, j, price))
+        .filter(|c| c.covered_generated > 0)
+        .map(|c| format!(" · ~${:.3} measured", c.fleet_usd))
+        .unwrap_or_default();
     (r.fleet.turns > 0).then(|| {
         format!(
-            "Meter today: {} turns, {} prompt + {} generated tokens{}",
+            "Meter today: {} turns, {} prompt + {} generated tokens{}{dollars}",
             r.fleet.turns,
             group(r.fleet.prompt),
             group(r.fleet.generated),
@@ -277,7 +324,7 @@ pub fn summary_line(dir: &Path, now: u64) -> Option<String> {
                 )
             } else {
                 String::new()
-            }
+            },
         )
     })
 }
@@ -296,7 +343,12 @@ fn group(n: u64) -> String {
 
 /// The CLI report. `cloud_price` is $/Mtok for the comparison counter —
 /// user-editable config, deliberately dated in its doc.
-pub fn fmt_report(r: &Report, label: &str, cloud_price: f64) -> String {
+pub fn fmt_report(
+    r: &Report,
+    label: &str,
+    cloud_price: f64,
+    cost: Option<(&CostReport, f64)>,
+) -> String {
     let mut out = format!("Meter — {label} (UTC buckets, hour grain)\n");
     if r.fleet.turns == 0 {
         out.push_str("no usage recorded in this range\n");
@@ -335,6 +387,30 @@ pub fn fmt_report(r: &Report, label: &str, cloud_price: f64) -> String {
         group(f.generated),
         f.generated as f64 / 1e6 * cloud_price,
     ));
+    if let Some((c, kwh_price)) = cost {
+        if c.covered_generated > 0 {
+            out.push_str(&format!(
+                "measured local cost: ${:.4} ({:.3} kWh at ${kwh_price}/kWh — marginal \
+                 generation energy, measured per model{})\n",
+                c.fleet_usd,
+                c.fleet_kwh,
+                if c.uncovered_generated > 0 {
+                    format!(
+                        "; {} tokens from models without an energy measurement \
+                         excluded",
+                        group(c.uncovered_generated)
+                    )
+                } else {
+                    String::new()
+                }
+            ));
+        } else if f.generated > 0 {
+            out.push_str(
+                "measured local cost: no served config has an energy measurement yet — \
+                 run a Lab trial (any menu) to get J/token\n",
+            );
+        }
+    }
     out.push_str("\nper model:\n");
     for (m, t) in &r.per_model {
         out.push_str(&format!(
@@ -468,6 +544,38 @@ mod tests {
     }
 
     #[test]
+    fn cost_report_bills_measured_tokens_and_excludes_the_rest() {
+        // Contract: generated tokens × the model's measured J/token →
+        // kWh → dollars at the user's price. Models WITHOUT an energy
+        // measurement contribute to `uncovered`, never to a dollar
+        // figure — measured or absent, no estimates.
+        let b = |model: &str, generated| Bucket {
+            when: 0,
+            model: model.into(),
+            turns: 1,
+            prompt: 0,
+            generated,
+            reused: 0,
+        };
+        let buckets = vec![b("fast", 1_000_000), b("mystery", 500_000)];
+        let r = report(&buckets, None, None);
+        let mut j = BTreeMap::new();
+        j.insert("fast".to_string(), 1.8); // J per generated token
+        let c = cost_report(&r, &j, 0.20);
+        // 1M tokens × 1.8 J = 1.8 MJ = 0.5 kWh → $0.10 at $0.20/kWh.
+        assert!((c.fleet_kwh - 0.5).abs() < 1e-9, "{c:?}");
+        assert!((c.fleet_usd - 0.10).abs() < 1e-9, "{c:?}");
+        assert_eq!(c.covered_generated, 1_000_000);
+        assert_eq!(c.uncovered_generated, 500_000);
+        assert!((c.per_model["fast"].1 - 0.10).abs() < 1e-9);
+        assert!(!c.per_model.contains_key("mystery"));
+        // No energy data at all → a zeroed report, not a guess.
+        let c = cost_report(&r, &BTreeMap::new(), 0.20);
+        assert_eq!(c.fleet_usd, 0.0);
+        assert_eq!(c.uncovered_generated, 1_500_000);
+    }
+
+    #[test]
     fn report_ranges_shape_and_busiest_hour() {
         let b = |when, model: &str, prompt, generated| Bucket {
             when,
@@ -486,7 +594,7 @@ mod tests {
         assert_eq!(r.busiest_hour, Some((0, 1000)));
         assert_eq!(r.per_day.len(), 2, "two UTC days");
         assert_eq!(r.per_model["a"].prompt, 1000);
-        let text = fmt_report(&r, "all time", 3.0);
+        let text = fmt_report(&r, "all time", 3.0, None);
         assert!(text.contains("6.5 prompt tokens per generated"), "{text}");
         assert!(text.contains("≈ $0.00"), "{text}");
         // Range excludes day two.

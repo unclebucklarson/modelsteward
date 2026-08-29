@@ -267,6 +267,7 @@ impl App {
             meter_line: meter::summary_line(
                 &router::state_dir(),
                 advisor::now_epoch(),
+                None,
             ),
             cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
@@ -514,9 +515,18 @@ impl App {
                         .unwrap_or(0);
                         let _ = tx.send(Msg::CacheStats(stats));
                         if credited > 0 {
+                            let trials = trial::read_trials(&router::state_dir());
+                            let j: std::collections::BTreeMap<String, f64> = trials
+                                .iter()
+                                .filter_map(|(m, t)| {
+                                    trial::served_j_per_token(&cfg, m, t)
+                                        .map(|j| (m.clone(), j))
+                                })
+                                .collect();
                             let _ = tx.send(Msg::Meter(meter::summary_line(
                                 &router::state_dir(),
                                 now,
+                                Some((&j, cfg.kwh_price_usd)),
                             )));
                         }
                     }
@@ -3327,6 +3337,7 @@ impl App {
             ollama_port,
             models_max,
             checkouts: self.cfg.checkouts.clone(),
+            kwh_price_usd: self.cfg.kwh_price_usd,
             cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
             disabled: self.cfg.disabled.clone(),
             managed_auto_build: self.managed_auto_edit,

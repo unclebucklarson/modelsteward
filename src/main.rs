@@ -132,7 +132,27 @@ fn main() {
                 _ => ("all time", None),
             };
             let r = meter::report(&meter::read_all(&dir), since, None);
-            print!("{}", meter::fmt_report(&r, label, cfg.cloud_price_per_mtok));
+            let trials = trial::read_trials(&dir);
+            let j: std::collections::BTreeMap<String, f64> = r
+                .per_model
+                .keys()
+                .filter_map(|m| {
+                    trials
+                        .get(m)
+                        .and_then(|t| trial::served_j_per_token(&cfg, m, t))
+                        .map(|j| (m.clone(), j))
+                })
+                .collect();
+            let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
+            print!(
+                "{}",
+                meter::fmt_report(
+                    &r,
+                    label,
+                    cfg.cloud_price_per_mtok,
+                    Some((&cost, cfg.kwh_price_usd)),
+                )
+            );
             Ok(())
         }
         Some("--report") => match modelsteward::core::report::generate(&cfg) {

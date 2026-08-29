@@ -606,9 +606,17 @@ $-line using measured J/token × kwh price (phase 3). Original spec:
 - **J/token as a trial column**: verdicts gain an efficiency axis
   ("t24 was 45% slower AND burned more energy per token").
 
-**Surfaces (phase 3):** Server-tab meter line (today: N tokens, ~X Wh,
-~$Y); findings report + JSON section; datetime-range report via CLI
-(`--meter [range]`) and Lab/Tools UI.
+**Surfaces (phase 3): ✔ the dollar line landed 2026-08-29 (test-first,
+contracts before code) — M9 CLOSED.** cost_report bills generated
+tokens at each model's measured J/token for the config it actually
+SERVES (trial::served_j_per_token: applied winner's row, else stock
+baselines, else honestly None); uncovered tokens are excluded and
+said so, never estimated. `--meter` prints measured local cost vs the
+cloud counter (first live reading: 116,620 tokens = $0.0057 measured
+vs $0.35 cloud — the milestone's thesis, answered); the Server-tab
+line appends ~$ measured. kwh_price_usd joins config. Moved to
+backlog: J/token as a verdict guard (needs accumulated numbers to
+set honest thresholds); prefill-side energy attribution.
 
 **Later / parked:** background-service mode beyond the GUI poller
 (systemd timer harvesting the log); smart-plug calibration; Ollama-peer
