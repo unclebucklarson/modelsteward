@@ -31,6 +31,25 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
   measurements at `~/.local/state/modelsteward/measurements.json`.
 - Track work in [ROADMAP.md](ROADMAP.md); update it when milestones land.
 
+## Development practice (user direction, 2026-08-29): test-first
+
+- **Write the failing test before the code** for anything with a
+  knowable contract — verdict rules, parsers, accounting math, path
+  logic. The test states the intended behavior; the implementation
+  earns its green. This codifies what already worked here: every
+  verdict-logic change in this repo shipped pinned by a test carrying
+  the live numbers that motivated it.
+- **Integration tests** for flows that cross modules (scan → preset →
+  measurements, harvest → ledger → report) using tempdirs and synthetic
+  fixtures — never the user's real state dirs.
+- **Live incidents become regression tests**, with the real numbers in
+  the test body and a comment naming the date and what broke.
+- **Honest limits**: egui rendering and subprocess/network edges get
+  thin, logic-free wiring plus live validation — testability pressure
+  belongs on core, which is headless precisely so it CAN be tested.
+  If a UI closure grows logic, extract it into core and test it there.
+- `cargo test` green (and zero warnings) before every commit.
+
 ## Architecture (big picture)
 
 Single binary, strictly layered: `src/core/` is a headless, testable engine;
