@@ -255,6 +255,27 @@ speculative-decoding trial ran (classic draft measured and REJECTED on
 this hardware, ngram adopted instead — spike 5); results-next-to-
 recommendations became the Lab's standing recommendation blocks.
 
+## Work queue — next up (ordered; 2026-08-29)
+
+1. **BENCHED BUG (top priority when work resumes): advisories fail on
+   gpt-oss** — "produced no answer (reasoning channel)". Diagnosed:
+   RouterAdvisor sends only `enable_thinking:false` (Qwen-family
+   kwarg); gpt-oss's Harmony template listens to `reasoning_effort`
+   instead (both exist in llama.cpp's chat layer — verified in
+   common/chat.cpp), so the earned advisor reasons at default effort
+   and exhausts its 2,500-token budget before answering. Fix: send
+   BOTH kwargs (`reasoning_effort:"low"` + `enable_thinking:false`),
+   consider a reasoning-content fallback + a larger budget for the
+   49k-token brief. The new error banner surfaced this exactly as
+   designed.
+2. Library structure decision (usability G5/G3) — design talk, then
+   build (search ships regardless).
+3. Usability P3 batch: CLI diagnose + exit codes, vocabulary
+   unification, trial-header hovers, Settings offers actions not
+   instructions, G11 progress/cancel placement.
+4. Then: QA / user-guide / remaining-work discussion (user-requested).
+5. README screenshot (D17) once one is saved to disk.
+
 ## Where things stand (2026-08-29, 165 tests green — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 
 v0.4.0 shipped after an 8-angle pre-tag review (13 findings fixed).
