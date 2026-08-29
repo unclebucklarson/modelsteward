@@ -44,6 +44,26 @@ pub struct ModelOverrides {
     pub no_mmproj: bool,
 }
 
+/// One extra-flags line → (key, value). Accepts what model cards teach
+/// (usability review G7): leading dashes stripped, space OR `=`
+/// separates, a bare flag means true.
+pub fn parse_extra_line(line: &str) -> anyhow::Result<(String, String)> {
+    let line = line.trim().trim_start_matches('-');
+    anyhow::ensure!(!line.is_empty(), "empty line");
+    let (k, v) = match line.split_once('=') {
+        Some((k, v)) => (k.trim(), v.trim()),
+        None => match line.split_once(char::is_whitespace) {
+            Some((k, v)) => (k.trim(), v.trim()),
+            None => (line, "true"),
+        },
+    };
+    anyhow::ensure!(
+        !k.is_empty() && !k.contains(char::is_whitespace) && !v.contains(char::is_whitespace),
+        "not a flag line (want `key = value`, `--key value`, or a bare `--flag`): {line:?}"
+    );
+    Ok((k.to_string(), v.to_string()))
+}
+
 /// The KV cache type the generated preset's `[*]` section applies to every
 /// model — the measured-on-this-hardware good default (≈2x usable context
 /// vs f16). The override dialog treats this as the "optimized" baseline.
@@ -961,6 +981,26 @@ pub fn reload(port: u16) -> Result<Vec<RouterModel>> {
         .context("router reload failed")?
         .into_json()?;
     Ok(parse_models_response(&body))
+}
+
+#[cfg(test)]
+mod tests_flags {
+    use super::*;
+
+    #[test]
+    fn extra_flag_lines_accept_what_model_cards_teach() {
+        // Usability review G7: every llama.cpp README writes
+        // `--n-cpu-moe 32` / `-ub 2048`; the dialog demanded
+        // `key = value`. Contract: leading dashes stripped, space OR
+        // `=` separates, bare flags mean true, garbage still errors.
+        assert_eq!(parse_extra_line("fit-target = 2048").unwrap(), ("fit-target".into(), "2048".into()));
+        assert_eq!(parse_extra_line("--n-cpu-moe 32").unwrap(), ("n-cpu-moe".into(), "32".into()));
+        assert_eq!(parse_extra_line("-ub 2048").unwrap(), ("ub".into(), "2048".into()));
+        assert_eq!(parse_extra_line("--cpu-moe").unwrap(), ("cpu-moe".into(), "true".into()));
+        assert_eq!(parse_extra_line("cache-reuse=512").unwrap(), ("cache-reuse".into(), "512".into()));
+        assert!(parse_extra_line("what even is this line here").is_err());
+        assert!(parse_extra_line("").is_err());
+    }
 }
 
 #[cfg(test)]

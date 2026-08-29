@@ -45,6 +45,40 @@
 use modelsteward::core::{advisor, bench, cancel, discover, opencode, router, settings, system, trial};
 use std::path::PathBuf;
 
+const USAGE: &str = "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] \
+| --start|--status|--reload|--stop [port] | --calibrate [port] [force] | --bench [id] [force] \
+| --trial <id> [spec|ub|kv|load|dials|moe|vision|cache|ckpt|slots] [keep <variant>|keep baseline] \
+| --quality <id> [shots] | --meter [today|24h|7d] | --sync [port] | --verify-rebuild | --report \
+| --advise | --install-service | --help | --version";
+
+const HELP: &str = "modelsteward — measured, not guessed: a llama.cpp router manager that tunes \
+local models and keeps OpenAI-compatible apps configured from real measurements.
+
+  (no args)             launch the GUI
+  --setup               one-shot: start router + measure + sync
+  --scan [dir ...]      what's on this machine (JSON)
+  --preset [dir ...]    write ~/.config/modelsteward/router.ini
+  --start / --stop / --status / --reload [port]
+  --calibrate [port] [force]   measure new/stale models (force = all)
+  --bench [id] [force]  llama-bench pp/tg speed baselines
+  --trial <id> [menu] [keep <variant>|keep baseline]
+        menus: spec  speculation (ngram modes)      ub    prefill batch size
+               kv    KV-cache precision             load  load/hot-swap mode
+               dials speculation fine-tuning        moe   MoE expert placement
+               vision serve with/without projector  cache --cache-reuse sweep
+               ckpt  context checkpoints            slots slot save/restore ceiling
+  --quality <id> [shots]  eval battery + tool calls + multi-hop agent loops
+  --meter [today|24h|7d]  the token ledger: usage, cache %, measured cost
+  --sync [port]         write measured limits into opencode.json
+  --verify-rebuild      after a rebuild: restart, re-measure, report
+  --report              shareable findings report (sanitized md + JSON)
+  --advise              build advisor report
+  --install-service     write a systemd user unit for the router
+
+files: config ~/.config/modelsteward/config.json · preset router.ini (same dir)
+       measurements/trials/meter ~/.local/state/modelsteward/
+docs:  https://github.com/unclebucklarson/modelsteward";
+
 fn main() {
     // Runs before anything reads config/state: the 2026-08-26 rename
     // moved both directories, and the data must follow the name.
@@ -55,6 +89,9 @@ fn main() {
         eprintln!("{note}");
     }
     let cfg = system::load_config();
+    if let Some(note) = trial::heal_interrupted_trial(&cfg) {
+        eprintln!("{note}");
+    }
     let args: Vec<String> = std::env::args().skip(1).collect();
     let result = match args.first().map(String::as_str) {
         None => {
@@ -172,10 +209,18 @@ fn main() {
                 "activate: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router"
             );
         }),
+        Some("--help" | "-h" | "help") => {
+            // Usability review C1: --help used to look like a crash
+            // (usage → stderr, exit 2). Full help, stdout, exit 0.
+            println!("{HELP}");
+            Ok(())
+        }
+        Some("--version" | "-V") => {
+            println!("modelsteward {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         _ => {
-            eprintln!(
-                "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] | --start|--status|--reload|--sync [port] | --calibrate [port] [force] | --bench [id] [force] | --trial <id> [keep <variant>] | --verify-rebuild | --quality <id> [shots] | --report | --advise | --install-service | --stop"
-            );
+            eprintln!("{USAGE}\nrun `modelsteward --help` for details");
             std::process::exit(2);
         }
     };
@@ -219,11 +264,11 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         )?;
         return Ok(());
     }
-    let menu_name = rest
-        .get(1)
-        .filter(|a| trial::menu(a).is_some())
-        .map(String::as_str)
-        .unwrap_or("spec");
+    // A typo'd menu is an error, never a silent different experiment
+    // (usability review C3).
+    let menu_name = trial::resolve_menu_arg(
+        rest.get(1).map(String::as_str).filter(|a| *a != "keep"),
+    )?;
     let (variants, goal) = trial::menu(menu_name).expect("validated above");
     if let Some(pos) = rest.iter().position(|a| a == "keep") {
         let label = rest
@@ -397,6 +442,14 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         {
             println!("  ✂ {id}: commented out (router omits it, nothing measured — a ghost)");
         }
+    }
+    if report.skipped_missing {
+        println!(
+            "opencode.json not found ({}) — OpenCode isn't installed; skipped. \
+             Other apps connect via the base URL (see --help / Connections tab).",
+            path.display()
+        );
+        return Ok(());
     }
     println!(
         "synced {}: {} added, {} updated",

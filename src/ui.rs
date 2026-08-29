@@ -153,6 +153,8 @@ struct App {
     cache_stats: Vec<evidence::ModelCacheStats>,
     meter_line: Option<String>,
     live_activity: Option<String>,
+    last_error: Option<String>,
+    settings_error: Option<String>,
     /// Token for the CURRENT long-running operation; Cancel flips it and
     /// workers stop at their next safe boundary.
     cancel_token: cancel::CancelToken,
@@ -239,6 +241,9 @@ struct PromotedField {
 
 struct OverrideEditor {
     id: String,
+    /// Validation failure shown IN the dialog (usability review G6: it
+    /// used to land only in the activity log behind the window).
+    error: Option<String>,
     ctx_text: String,
     kv_text: String,
     extra_text: String,
@@ -259,7 +264,14 @@ impl App {
             tx,
             rx,
             pane: Pane::Library,
-            cfg: system::load_config(),
+            cfg: {
+                let cfg = system::load_config();
+                // Interrupted-trial self-heal (usability review C4).
+                if let Some(note) = trial::heal_interrupted_trial(&cfg) {
+                    eprintln!("{note}");
+                }
+                cfg
+            },
             scan: None,
             router_state: None,
             ollama: Default::default(),
@@ -274,6 +286,8 @@ impl App {
                 None,
             ),
             live_activity: None,
+            last_error: None,
+            settings_error: None,
             cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
             lab_selected: None,
@@ -346,7 +360,11 @@ impl App {
     }
 
     fn log(&mut self, line: impl Into<String>) {
-        self.activity.push(line.into());
+        // HH:MM prefix (usability review G15): after a long session,
+        // undated lines can't be told stale from fresh.
+        let t = advisor::now_epoch();
+        self.activity
+            .push(format!("{:02}:{:02} {}", (t / 3600) % 24, (t / 60) % 60, line.into()));
         if self.activity.len() > 200 {
             self.activity.drain(..100);
         }
@@ -1099,6 +1117,7 @@ impl App {
                 }
                 self.override_editor = Some(OverrideEditor {
                     id,
+                    error: None,
                     ctx_text: ov
                         .ctx
                         .or(optimized_ctx)
@@ -1402,6 +1421,13 @@ impl App {
                     self.busy = None;
                 }
                 Msg::SyncDone(r) => {
+                    if r.skipped_missing {
+                        self.log(
+                            "sync: opencode.json not found — OpenCode isn't installed; \
+                             skipped (other apps connect via the Connections tab)"
+                                .to_string(),
+                        );
+                    }
                     for id in &r.ghosts_commented {
                         self.log(format!(
                             "sync: ✂ {id} commented out (router omits it, nothing measured — \
@@ -1425,6 +1451,7 @@ impl App {
                 }
                 Msg::Error(e) => {
                     self.log(format!("ERROR: {e}"));
+                    self.last_error = Some(e);
                     self.busy = None;
                 }
             }
@@ -1581,6 +1608,7 @@ impl App {
                     self.busy.is_none(),
                     egui::Button::new("Fleet Brief (AI opinion)"),
                 )
+                .on_disabled_hover_text("busy — wait for the running operation to finish")
                 .on_hover_text(
                     "Feeds this machine's findings report (the sanitized JSON the \
                      app already generates) to one of YOUR served models and asks: \
@@ -1867,7 +1895,12 @@ impl App {
                         } else {
                             router_up && r.router_id.is_some() && r.server_status.is_some()
                         };
-                        let cb = ui.add_enabled(can_act, egui::Checkbox::without_text(&mut checked));
+                        let cb = ui
+                            .add_enabled(can_act, egui::Checkbox::without_text(&mut checked))
+                            .on_disabled_hover_text(
+                                "needs the router up and this model servable — start \
+                                 the router / check the Server column",
+                            );
                         let cb = cb.on_hover_text(
                             "Checked = in opencode.json. Checking an unmeasured model loads it \
                              briefly to measure the real context first.",
@@ -1892,6 +1925,7 @@ impl App {
                             (Some(id), Some("unloaded")) => {
                                 if ui
                                     .add_enabled(router_up, egui::Button::new("Load"))
+                                    .on_disabled_hover_text("router is down — Start Router first (top of the tab)")
                                     .on_hover_text(
                                         "Loads now, measures the real context, and adds it to \
                                          OpenCode automatically.",
@@ -2187,7 +2221,7 @@ impl App {
                     if ui
                         .small_button("select relevant")
                         .on_hover_text(
-                            "Checks the campaigns that apply to this model: MoE offload                              only for MoE models bigger than VRAM; speculation dials only                              once a speculation mode is kept; vision cost only for models                              with a projector; the core set for everything.",
+                            "Checks the campaigns that apply to this model: MoE offload only for MoE models bigger than VRAM; speculation dials only once a speculation mode is kept; vision cost only for models with a projector; the core set for everything.",
                         )
                         .clicked()
                     {
@@ -2268,7 +2302,7 @@ impl App {
                 .on_hover_text(if has_spec_kept {
                     "Tunes the dials of the speculation mode this model has kept."
                 } else {
-                    "Applies AFTER a speculation mode is kept — run the Speculation                      trial first and Keep a winner, then tune its dials."
+                    "Applies AFTER a speculation mode is kept — run the Speculation trial first and Keep a winner, then tune its dials."
                 });
                 ui.checkbox(
                     &mut self.lab_moe,
@@ -2276,9 +2310,9 @@ impl App {
                      counts — for MoE models bigger than VRAM, ~25 min)",
                 )
                 .on_hover_text(if is_moe_over_vram {
-                    "THIS model's headline trial: bigger than your VRAM and MoE —                      experts in RAM can beat default placement dramatically (an 80B                      A3B ran at full 262k context on a 24GB card)."
+                    "THIS model's headline trial: bigger than your VRAM and MoE — experts in RAM can beat default placement dramatically (an 80B A3B ran at full 262k context on a 24GB card)."
                 } else {
-                    "Only applies to MoE models bigger than your VRAM — this model                      fits (or is dense), so --cpu-moe would only slow it down."
+                    "Only applies to MoE models bigger than your VRAM — this model fits (or is dense), so --cpu-moe would only slow it down."
                 });
                 ui.checkbox(
                     &mut self.lab_vision,
@@ -2286,9 +2320,9 @@ impl App {
                      the agent-turn cache tax, ~8 min)",
                 )
                 .on_hover_text(if has_mmproj {
-                    "This model serves a vision projector. Vision's measured costs: VRAM                      (a smaller fitted context) and, on models whose cache can shift,                      the loss of mid-edit cache-reuse — append-style turns stay cached                      either way. Whether text-only helps YOUR model depends on its                      attention; this trial answers with numbers instead of a guess."
+                    "This model serves a vision projector. Vision's measured costs: VRAM (a smaller fitted context) and, on models whose cache can shift, the loss of mid-edit cache-reuse — append-style turns stay cached either way. Whether text-only helps YOUR model depends on its attention; this trial answers with numbers instead of a guess."
                 } else {
-                    "Only applies to models serving a vision projector — this one                      has none, so there is nothing to turn off."
+                    "Only applies to models serving a vision projector — this one has none, so there is nothing to turn off."
                 });
                 ui.checkbox(
                     &mut self.lab_cache,
@@ -2404,6 +2438,7 @@ impl App {
                     || self.lab_slots;
                 if ui
                     .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
+                    .on_disabled_hover_text("select at least one campaign — and nothing can start while another operation runs")
                     .on_hover_text(
                         "Runs in sequence, narrated in the activity log. Unloads models to \
                          get honest numbers; offers to start the router if it's down.",
@@ -2521,6 +2556,7 @@ impl App {
                                             idle,
                                             egui::Button::new(format!("Apply {w}")),
                                         )
+                                        .on_disabled_hover_text("a campaign is running — Apply when it finishes")
                                         .on_hover_text(
                                             "Writes the override, regenerates the preset, \
                                              reloads the router, updates the OpenCode limit.",
@@ -2536,6 +2572,7 @@ impl App {
                                             idle,
                                             egui::Button::new("Revert to baseline"),
                                         )
+                                        .on_disabled_hover_text("a campaign is running — revert when it finishes")
                                         .on_hover_text(
                                             "Strips this knob from the override — same \
                                              cascade, back to stock.",
@@ -2553,6 +2590,7 @@ impl App {
                                                 nm.label
                                             )),
                                         )
+                                        .on_disabled_hover_text("a campaign is running — apply when it finishes")
                                         .on_hover_text(format!(
                                             "Rules said no — {} for {}. Your call; reverses \
                                              the same way.",
@@ -2589,6 +2627,7 @@ impl App {
                                             idle,
                                             egui::Button::new(format!("Use {}", v.label)),
                                         )
+                                        .on_disabled_hover_text("a campaign is running — apply when it finishes")
                                         .on_hover_text(
                                             "Not the rules' pick — but it's measured, and \
                                              the table shows its numbers. Your call; \
@@ -2945,7 +2984,7 @@ impl App {
             }
         });
         ui.small(
-            "Point any OpenAI-compatible client here (API key: anything, it's ignored).              Use a model id below; the router loads it on first request.",
+            "Point any OpenAI-compatible client here (API key: anything, it's ignored). Use a model id below; the router loads it on first request.",
         );
         let measured: Vec<(String, u64, Option<bool>)> = self
             .measurements
@@ -2984,7 +3023,7 @@ impl App {
             if ui
                 .button("Copy models JSON")
                 .on_hover_text(
-                    "Machine-readable list of measured models with safe context limits —                      feed this to your own app's config",
+                    "Machine-readable list of measured models with safe context limits — feed this to your own app's config",
                 )
                 .clicked()
             {
@@ -3348,7 +3387,11 @@ impl App {
         ui.add_space(8.0);
 
         ui.horizontal(|ui| {
+            if let Some(err) = &self.settings_error {
+                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), format!("⚠ {err}"));
+            }
             if ui.button("Save & Rescan").clicked() {
+                self.settings_error = None;
                 match self.parse_edit_buffers() {
                     Ok(new_cfg) => {
                         let port_changed = new_cfg.port != self.cfg.port;
@@ -3374,7 +3417,7 @@ impl App {
                             Err(e) => self.log(format!("ERROR saving settings: {e:#}")),
                         }
                     }
-                    Err(e) => self.log(format!("ERROR: {e}")),
+                    Err(e) => self.settings_error = Some(e),
                 }
             }
             if ui.button("Revert").clicked() {
@@ -3520,10 +3563,16 @@ impl App {
                 ui.add(
                     egui::TextEdit::multiline(&mut ed.extra_text)
                         .desired_rows(3)
-                        .hint_text("fit-target = 2048\nmodel-draft = /path/draft.gguf")
+                        .hint_text("fit-target = 2048   (or paste: --n-cpu-moe 32)")
                         .desired_width(f32::INFINITY),
                 );
                 ui.small("Applied on the model's next load. Re-measure afterwards — changed flags make old numbers stale.");
+                if let Some(err) = &ed.error {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 60, 60),
+                        format!("⚠ {err}"),
+                    );
+                }
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Save").clicked() {
@@ -3581,14 +3630,13 @@ impl App {
                 if line.is_empty() {
                     continue;
                 }
-                let (k, v) = line
-                    .split_once('=')
-                    .ok_or_else(|| format!("not `key = value`: {line:?}"))?;
-                let k = k.trim();
+                // Accepts `--n-cpu-moe 32` / `-ub 2048` as every model
+                // card writes them (usability review G7).
+                let (k, v) = router::parse_extra_line(line).map_err(|e| e.to_string())?;
                 if ed.promoted.iter().any(|f| f.key == k) {
                     return Err(format!("{k} has its own field above — set it there"));
                 }
-                extra.push((k.to_string(), v.trim().to_string()));
+                extra.push((k, v));
             }
             for f in &ed.promoted {
                 let t = f.text.trim();
@@ -3632,7 +3680,8 @@ impl App {
                 });
             }
             Err(e) => {
-                self.log(format!("ERROR: {e}"));
+                let mut ed = ed;
+                ed.error = Some(e);
                 self.override_editor = Some(ed); // reopen with user's text intact
             }
         }
@@ -4000,6 +4049,7 @@ impl App {
                             self.busy.is_none() && !self.tuning_question.trim().is_empty(),
                             egui::Button::new("Ask"),
                         )
+                        .on_disabled_hover_text("type a question — and asking waits while an operation runs")
                         .clicked()
                     {
                         ask = Some(self.tuning_question.trim().to_string());
@@ -4138,6 +4188,7 @@ impl App {
                             self.busy.is_none(),
                             egui::Button::new("Ask a served model (advisory)"),
                         )
+                        .on_disabled_hover_text("busy — ask when the running operation finishes")
                         .on_hover_text(
                             "Sends this failure's log evidence to one of YOUR local \
                              models and shows its opinion, clearly labeled. Nothing \
@@ -4285,6 +4336,7 @@ impl App {
                         check.nvcc.is_some(),
                         egui::Checkbox::new(&mut sel.cuda, "CUDA (NVIDIA)"),
                     )
+                    .on_disabled_hover_text("needs the CUDA toolkit (nvcc) installed")
                     .on_hover_text(match &check.nvcc {
                         Some(v) => format!("nvcc: {v}"),
                         None => "needs the CUDA toolkit (nvcc)".into(),
@@ -4293,6 +4345,7 @@ impl App {
                         check.glslc,
                         egui::Checkbox::new(&mut sel.vulkan, "Vulkan (any GPU)"),
                     )
+                    .on_disabled_hover_text("needs the Vulkan SDK / shaderc (glslc) installed")
                     .on_hover_text(if check.glslc {
                         "glslc present — works on NVIDIA, AMD, and Intel".to_string()
                     } else {
@@ -4302,6 +4355,7 @@ impl App {
                         check.hipcc.is_some(),
                         egui::Checkbox::new(&mut sel.hip, "ROCm (AMD)"),
                     )
+                    .on_disabled_hover_text("needs ROCm (hipcc) installed")
                     .on_hover_text(match (&check.hipcc, &check.rocm_gfx) {
                         (Some(v), Some(gfx)) => format!("{v} — target {gfx}"),
                         (Some(v), None) => format!("{v} — no gfx target detected"),
@@ -4336,6 +4390,7 @@ impl App {
                         && check.dirty != Some(true);
                     if ui
                         .add_enabled(can_rebuild, egui::Button::new("⬆ Update & Rebuild Now"))
+                        .on_disabled_hover_text("needs a git checkout + cmake, a clean tree, and a branch (tag-pinned checkouts use the managed flow below)")
                         .on_hover_text(
                             "git pull --ff-only, then a full cmake build. Takes many minutes; \
                              progress streams to the activity log. Your current binaries keep \
@@ -4394,6 +4449,7 @@ impl App {
                                     && !self.archive_label.trim().is_empty(),
                                 egui::Button::new("Archive"),
                             )
+                            .on_disabled_hover_text("type a label first — and archiving waits while an operation runs")
                             .on_hover_text(
                                 "Snapshots the analyzed checkout's build/bin into \
                                  the pinnable archive set. CAVEAT: measurements key \
@@ -4415,6 +4471,7 @@ impl App {
                             self.busy.is_none(),
                             egui::Button::new("What's in this update for me? (advisory)"),
                         )
+                        .on_disabled_hover_text("busy — triage when the running operation finishes")
                         .on_hover_text(
                             "Asks one of YOUR local models to read the commits between \
                              your build and upstream and say whether anything matters \
@@ -4453,6 +4510,7 @@ impl App {
                                     "⬇ Set up (clone + build newest release)"
                                 }),
                             )
+                            .on_disabled_hover_text("needs cmake installed — and waits while another operation runs")
                             .on_hover_text(
                                 "Clones llama.cpp if needed, checks out the newest \
                                  bNNNN release tag, builds with the backends selected \
@@ -5063,6 +5121,23 @@ impl eframe::App for App {
             egui::MenuBar::new().ui(ui, |ui| self.menu_bar(ui));
         });
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
+        // The error banner (usability review G1): failures used to land
+        // ONLY in the 80px log — a failed sync looked like a stopped
+        // spinner. Persists until dismissed.
+        if self.last_error.is_some() {
+            egui::Panel::bottom("error-banner").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    let msg = self.last_error.clone().unwrap_or_default();
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 60, 60),
+                        format!("⚠ {msg}"),
+                    );
+                    if ui.small_button("✕").clicked() {
+                        self.last_error = None;
+                    }
+                });
+            });
+        }
         egui::Panel::bottom("activity")
             .resizable(true)
             .default_size(80.0)
@@ -5071,7 +5146,16 @@ impl eframe::App for App {
                     .stick_to_bottom(true)
                     .show(ui, |ui| {
                         for line in &self.activity {
-                            ui.monospace(line);
+                            // Errors must not render like progress
+                            // chatter (usability review G1).
+                            if line.contains("ERROR") {
+                                ui.colored_label(
+                                    egui::Color32::from_rgb(220, 60, 60),
+                                    egui::RichText::new(line).monospace(),
+                                );
+                            } else {
+                                ui.monospace(line);
+                            }
                         }
                     });
             });

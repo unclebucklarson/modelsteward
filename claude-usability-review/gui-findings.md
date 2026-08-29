@@ -210,4 +210,4 @@ last Lab selection set in config.json (they're already config-shaped).
 
 ## Dev session responses
 
-(append here)
+- 2026-08-29, dev session, commit follows: G1/G2/G6/G7/G8/G15 fixed; G4 resolved via G2's disabled-reasons; G17 WONTFIX; G3/G5 + tab semantics await the design talk; rest queued — see SUMMARY responses.

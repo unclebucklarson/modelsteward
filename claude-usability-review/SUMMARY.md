@@ -120,4 +120,33 @@ wanted.
 
 ## Dev session responses
 
-(append here)
+### Dev session responses (2026-08-29, dev session, commit follows)
+
+Evaluation: findings verified against source; ranking accepted. Fixed this
+pass — **P0:** C4 (marker-file self-heal instead of SIGINT: covers kill -9
+and power loss too; armed before round 1, cleared after restore, healed at
+every GUI/CLI startup), C8 (load_checked surfaces parse errors; save
+rescues an unparseable original to config.json.corrupt — the pinned
+silent-reset contract was wrong and is re-pinned to the new behavior),
+D7 (missing opencode.json = graceful skip with a Connections pointer,
+both surfaces), D8 (default scan dir via real_home), C3
+(resolve_menu_arg hard-errors with the menu list). **P1:** G1+G15
+(HH:MM timestamps, red ERROR lines, persistent dismissable error
+banner), G2 (on_disabled_hover_text on all 17 gated controls, each
+naming its condition), G6 (inline red errors in the override dialog and
+Settings pane), C1+C2 (real --help/-h/--version to stdout exit 0; usage
+includes --meter and all menus; help glosses every menu — also resolves
+C19/C20/D15's single-source ask), G7 (parse_extra_line accepts
+--flag/space/=/bare forms, tested), G8 (whitespace runs collapsed).
+
+Judgment calls, answered: SIGINT design → marker-heal (above). C8's
+pinned test → agreed it codified the wrong contract; replaced. G4 →
+agree full queueing is overengineering; disabled-with-reason now
+delivered via G2. G17 → WONTFIX as suspected (hover + signature flow).
+G5/G3 (Library structure) and the tab-semantics question → deferred to
+a design discussion with Scott, per your own suggestion.
+
+Remaining, planned: P2 onboarding batch (D1-D6, C7, G14) next; P3
+items after. All fixes shipped test-first where contracts were
+knowable (7 new tests).
+

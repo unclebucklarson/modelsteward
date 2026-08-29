@@ -278,6 +278,55 @@ pub fn campaign_eta_minutes(
     Some(rounds * round_secs / 60.0)
 }
 
+/// CLI menu-argument resolution (usability review C3: a typo used to
+/// silently race the SPEC menu for 20 minutes). Absent → the
+/// documented default; anything else must be a real menu.
+pub fn resolve_menu_arg(arg: Option<&str>) -> Result<&str> {
+    match arg {
+        None => Ok("spec"),
+        Some(a) if menu(a).is_some() => Ok(arg.unwrap()),
+        Some(a) => anyhow::bail!(
+            "{a:?} is not a trial menu — valid menus: spec, ub, kv, load, dials, \
+             moe, vision, cache, ckpt (plus the standalone `slots`)"
+        ),
+    }
+}
+
+/// Interrupted-trial self-heal (usability review C4): Ctrl-C — or kill
+/// -9, or a power cut — mid-trial used to leave the TEMPORARY trial
+/// preset serving indefinitely. A marker is armed before the first
+/// round and cleared after the preset restore; a survivor at the next
+/// startup means a restore is owed.
+pub fn arm_trial_marker(dir: &Path, model: &str) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    std::fs::write(dir.join("trial-in-progress"), model).map_err(Into::into)
+}
+
+pub fn clear_trial_marker(dir: &Path) {
+    let _ = std::fs::remove_file(dir.join("trial-in-progress"));
+}
+
+pub fn trial_marker_present(dir: &Path) -> bool {
+    dir.join("trial-in-progress").exists()
+}
+
+/// Called at every startup (GUI and CLI): if a trial died mid-run, put
+/// the real preset back. Returns a human note when healing happened.
+pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
+    let dir = router::state_dir();
+    if !trial_marker_present(&dir) {
+        return None;
+    }
+    let model = std::fs::read_to_string(dir.join("trial-in-progress")).unwrap_or_default();
+    let _ = system::write_preset(cfg, &[]);
+    let _ = router::reload(cfg.port);
+    clear_trial_marker(&dir);
+    Some(format!(
+        "restored the real preset after an interrupted trial ({model}) — the router \
+         was still serving the trial's temporary config"
+    ))
+}
+
 /// A named menu: which variants to race and how to judge them.
 pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {
@@ -1545,6 +1594,7 @@ pub fn run_trial(
 
     // On any bail (contention included), restore the real preset before
     // returning — a temp trial config must never outlive its run.
+    let _ = arm_trial_marker(&dir, model);
     let body = (|| -> Result<TrialReport> {
         cancel.check()?;
         let baseline = round(1, BASELINE, &[], None, progress)?;
@@ -1592,6 +1642,7 @@ pub fn run_trial(
     // Whatever happened, put the real config's preset back.
     system::write_preset(cfg, &[])?;
     let _ = router::reload(cfg.port);
+    clear_trial_marker(&dir);
     body
 }
 
@@ -2241,6 +2292,33 @@ mod tests {
             },
         );
         assert_eq!(served_j_per_token(&cfg, "m", &table), None);
+    }
+
+    #[test]
+    fn menu_arg_typos_error_instead_of_running_the_wrong_experiment() {
+        // Usability review C3: `--trial m ubatch` silently raced the
+        // SPEC menu for 20 minutes. Contract: a second positional that
+        // is neither `keep` nor a valid menu is a hard error naming the
+        // menus; absent → the documented default (spec).
+        assert_eq!(resolve_menu_arg(None).unwrap(), "spec");
+        assert_eq!(resolve_menu_arg(Some("ub")).unwrap(), "ub");
+        let e = resolve_menu_arg(Some("ubatch")).unwrap_err().to_string();
+        assert!(e.contains("ubatch") && e.contains("ub") && e.contains("moe"), "{e}");
+    }
+
+    #[test]
+    fn interrupted_trials_leave_a_marker_and_heal_on_next_start() {
+        // Usability review C4: Ctrl-C mid-trial left the TRIAL preset
+        // serving indefinitely. Marker-file self-heal (covers kill -9
+        // and power loss too, which a signal handler wouldn't): armed
+        // before the first round, cleared after restore; a survivor at
+        // startup means restore is owed.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!trial_marker_present(dir.path()));
+        arm_trial_marker(dir.path(), "some-model").unwrap();
+        assert!(trial_marker_present(dir.path()));
+        clear_trial_marker(dir.path());
+        assert!(!trial_marker_present(dir.path()));
     }
 
     #[test]

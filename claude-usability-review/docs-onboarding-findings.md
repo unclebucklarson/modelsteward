@@ -143,4 +143,4 @@ at the (to-be-created) `--help` as the single source.
 
 ## Dev session responses
 
-(append here)
+- 2026-08-29, dev session, commit follows: D7/D8 fixed; D1-D6, D9-D18 queued as the P2 docs/onboarding batch — see SUMMARY responses.

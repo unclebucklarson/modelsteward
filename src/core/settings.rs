@@ -96,10 +96,9 @@ pub struct AppConfig {
 
 impl Default for AppConfig {
     fn default() -> Self {
-        let mut scan_dirs = Vec::new();
-        if let Some(home) = std::env::home_dir() {
-            scan_dirs.push(home.join("models"));
-        }
+        // real_home, not raw HOME: a snap-launched app used to default
+        // to a vanishing ~/snap/…/models (usability review D8).
+        let scan_dirs = vec![real_home().join("models")];
         Self {
             scan_dirs,
             port: 8080,
@@ -119,18 +118,98 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn load(path: &Path) -> Self {
-        std::fs::read_to_string(path)
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let (cfg, err) = Self::load_checked(path);
+        if let Some(e) = err {
+            eprintln!(
+                "WARNING: {} is unreadable ({e}) — running with defaults; the file \
+                 will be preserved as config.json.corrupt on the next save",
+                path.display()
+            );
+        }
+        cfg
+    }
+
+    /// Missing file = quiet defaults. UNPARSEABLE file = defaults plus
+    /// the parse error, surfaced — a hand-edit's trailing comma used to
+    /// silently reset everything including kept trial winners
+    /// (usability review C8, 2026-08-29).
+    pub fn load_checked(path: &Path) -> (Self, Option<String>) {
+        match std::fs::read_to_string(path) {
+            Err(_) => (Self::default(), None),
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(cfg) => (cfg, None),
+                Err(e) => (Self::default(), Some(e.to_string())),
+            },
+        }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
+        // Never clobber an unparseable original — it may hold settings
+        // the defaults just replaced; rescue it beside the new file.
+        if let Ok(existing) = std::fs::read_to_string(path)
+            && serde_json::from_str::<Self>(&existing).is_err()
+        {
+            let rescue = path.with_extension("json.corrupt");
+            let _ = std::fs::write(&rescue, existing);
+            eprintln!(
+                "preserved unreadable config as {} before saving",
+                rescue.display()
+            );
+        }
         std::fs::write(path, serde_json::to_string_pretty(self)?)
             .with_context(|| format!("writing {}", path.display()))
+    }
+}
+
+#[cfg(test)]
+mod tests_load {
+    use super::*;
+
+    #[test]
+    fn corrupt_configs_are_loud_and_never_silently_clobbered() {
+        // Usability review C8 (2026-08-29): a hand-edit's trailing comma
+        // silently reset EVERYTHING including kept trial winners, and
+        // the next save overwrote the evidence. New contract: missing =
+        // quiet defaults; unparseable = defaults + the parse error
+        // surfaced; save() preserves an unparseable original as
+        // config.json.corrupt before writing.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // Missing: quiet defaults.
+        let (cfg, err) = AppConfig::load_checked(&path);
+        assert_eq!(cfg, AppConfig::default());
+        assert!(err.is_none());
+        // Corrupt: defaults + loud error.
+        std::fs::write(&path, "{ \"port\": 8080, }").unwrap();
+        let (cfg, err) = AppConfig::load_checked(&path);
+        assert_eq!(cfg, AppConfig::default());
+        assert!(err.is_some(), "parse failure must be surfaced");
+        // Save rescues the corrupt original before overwriting.
+        cfg.save(&path).unwrap();
+        let rescued = dir.path().join("config.json.corrupt");
+        assert!(rescued.exists(), "corrupt original preserved");
+        assert!(std::fs::read_to_string(&rescued).unwrap().contains("8080,"));
+        let (roundtrip, err) = AppConfig::load_checked(&path);
+        assert_eq!(roundtrip, AppConfig::default());
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn default_scan_dir_survives_snap_home() {
+        // Usability review D8: the default used raw home_dir() while
+        // real_home() existed for exactly this — a snap-launched app got
+        // a vanishing ~/snap/…/models scan dir and a blank Library.
+        let d = AppConfig::default();
+        assert!(
+            !d.scan_dirs.iter().any(|p| p
+                .components()
+                .any(|c| c.as_os_str() == "snap")),
+            "{:?}",
+            d.scan_dirs
+        );
     }
 }
 

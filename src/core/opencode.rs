@@ -102,6 +102,9 @@ pub struct SyncReport {
     /// Ghosts the sync commented out itself (reachable router omitted the
     /// id AND nothing measured backed it — user-approved 2026-08-26).
     pub ghosts_commented: Vec<String>,
+    /// opencode.json doesn't exist — OpenCode isn't installed; nothing
+    /// was written and that's fine (Connections serves other clients).
+    pub skipped_missing: bool,
 }
 
 /// Compute the new source text. Pure with respect to the filesystem —
@@ -187,7 +190,17 @@ fn existing_model_ids(source: &str) -> Result<Vec<String>> {
 }
 
 /// Read → sync → backup → write (numbered backups, see write_backed_up).
+/// A MISSING file is a graceful skip, not an error — OpenCode is
+/// optional (usability review D7: Set Up Everything hard-failed for
+/// anyone without OpenCode installed, despite the app serving any
+/// OpenAI-compatible client).
 pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Result<SyncReport> {
+    if !path.exists() {
+        return Ok(SyncReport {
+            skipped_missing: true,
+            ..Default::default()
+        });
+    }
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let (updated, report) = sync_source(&original, base_url, desired)?;

@@ -158,4 +158,4 @@ undocumented `ignored` serde alias. **Fix:** `--config` prints resolved path
 
 ## Dev session responses
 
-(append here)
+- 2026-08-29, dev session, commit follows: C1-C5 fixed, C6/C7 queued (P2/P3), C8 fixed (pinned contract replaced), C9-C21 queued — see SUMMARY responses for detail.
