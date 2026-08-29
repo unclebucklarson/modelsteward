@@ -2378,10 +2378,19 @@ impl App {
                                 trial::stored_report(m, table).map(|r| (*m, r))
                             })
                             .collect();
-                        let winners: std::collections::HashSet<String> = reports
-                            .iter()
-                            .filter_map(|(_, r)| r.verdict.winner.clone())
-                            .collect();
+                        let mut pending_winners: std::collections::HashSet<String> =
+                            Default::default();
+                        let mut applied_winners: std::collections::HashSet<String> =
+                            Default::default();
+                        for (m, r) in &reports {
+                            if let Some(w) = r.verdict.winner.as_deref() {
+                                if trial::winner_applied(&self.cfg, &id, m, w) {
+                                    applied_winners.insert(w.to_string());
+                                } else {
+                                    pending_winners.insert(w.to_string());
+                                }
+                            }
+                        }
                         // The headline (user request 2026-08-28: nine
                         // verdict sentences made the reader do the
                         // summarizing): only ACTIONABLE winners — already-
@@ -2390,11 +2399,12 @@ impl App {
                             .iter()
                             .filter_map(|(m, r)| {
                                 let w = r.verdict.winner.as_deref()?;
-                                (!trial::winner_applied(&self.cfg, &id, m, w))
+                                pending_winners
+                                    .contains(w)
                                     .then(|| format!("{w} ({m})"))
                             })
                             .collect();
-                        if todo.is_empty() && !winners.is_empty() {
+                        if todo.is_empty() && !applied_winners.is_empty() {
                             ui.colored_label(
                                 egui::Color32::from_rgb(0, 170, 0),
                                 "✓ current config matches every measured recommendation",
@@ -2405,12 +2415,19 @@ impl App {
                                 format!("Recommended (not yet applied): {}", todo.join(" · ")),
                             );
                             ui.small(
-                                "★ rows below are the winners; Apply buttons sit with \
-                                 each menu's verdict.",
+                                "★ green = winner awaiting your Apply · ✓ blue = winner \
+                                 already applied. Different menus' winners stack — you \
+                                 can want all of them at once.",
                             );
                         }
                         ui.add_space(4.0);
-                        trial_table_grid(ui, "lab-trials", table, &winners);
+                        trial_table_grid(
+                            ui,
+                            "lab-trials",
+                            table,
+                            &pending_winners,
+                            &applied_winners,
+                        );
                         // Standing recommendations, recomputed from the
                         // stored numbers — applicable any time, not only
                         // in the moment the run's dialog was open.
@@ -4545,7 +4562,8 @@ fn trial_table_grid(
     ui: &mut egui::Ui,
     salt: &str,
     table: &std::collections::BTreeMap<String, trial::TrialResult>,
-    winners: &std::collections::HashSet<String>,
+    pending_winners: &std::collections::HashSet<String>,
+    applied_winners: &std::collections::HashSet<String>,
 ) {
     egui::Grid::new(salt).striped(true).show(ui, |ui| {
         for h in [
@@ -4557,8 +4575,17 @@ fn trial_table_grid(
         ui.end_row();
         let fmt = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
         for (label, r) in table {
-            if winners.contains(label.as_str()) {
+            // Color = ACTION STATE, not ranking (user feedback
+            // 2026-08-28: two same-green winners of different menus read
+            // as competing choices): green ★ needs your Apply; blue ✓ is
+            // a winner already serving.
+            if pending_winners.contains(label.as_str()) {
                 ui.colored_label(egui::Color32::from_rgb(0, 170, 0), format!("★ {label}"));
+            } else if applied_winners.contains(label.as_str()) {
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 155, 255),
+                    format!("✓ {label}"),
+                );
             } else {
                 ui.label(label);
             }
