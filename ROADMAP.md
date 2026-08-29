@@ -485,8 +485,17 @@ and apply buttons disable while anything runs.
   1024/256/256-x64 under the agent-turn goal. The [*] cache-reuse=256
   default stays (a no-op on SWA models, real on shiftable ones).
 
-## Code-review debt (2026-08-28 pre-v0.4.0 review; 13 findings fixed —
-see the release commit — these consolidations deliberately deferred):
+## Code-review debt (two 8-angle reviews, 2026-08-28; all correctness
+findings fixed in their respective passes — deliberately deferred
+consolidations only):
+- Auto-build gate policy lives in the GUI poller; extract to core
+  (managed::auto_build_tick) if a headless trigger path ever exists.
+- BuildCheck models "no repo backs this binary" only in message text;
+  a repo-absence reason field would let every surface say the true
+  cause (offline vs checkout-less).
+- Pending auto-build queue is in-memory: app exit drops it until the
+  next daily check (harmless, documented).
+Older items:
 - One shared advisory-ask helper (3 copies in ui.rs workers).
 - One pure install-pick policy fn shared by system::pick_server and
   App::picked_server (aligned today, still two copies).

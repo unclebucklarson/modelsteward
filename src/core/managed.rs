@@ -260,22 +260,48 @@ pub fn build_release(
     fetch_tags(progress)?;
     let build = newest_known_build()
         .ok_or_else(|| anyhow::anyhow!("no bNNNN release tags found"))?;
-    // Already built + archived → nothing to do. Without this, an
-    // incremental cmake run ended MINUTES later on the archive-collision
-    // guard (user verification question 2026-08-28). Rebuilding the same
-    // tag with different backends: archive the analyzed checkout under a
-    // variant label instead.
-    if list_archives().iter().any(|a| a.build == Some(build)) {
+    // Already built + archived WITH THE SAME BACKENDS → nothing to do.
+    // (An earlier plain existence check silently discarded the caller's
+    // backend selection — a CUDA rebuild of a CPU-only archive reported
+    // success without ever building; review catch 2026-08-28.)
+    let wanted = |backends: &[String]| {
+        let has = |n: &str| backends.iter().any(|b| b == n);
+        has("cuda") == sel.cuda && has("vulkan") == sel.vulkan && has("hip") == sel.hip
+    };
+    if let Some(a) = list_archives()
+        .iter()
+        .find(|a| a.build == Some(build))
+    {
+        if wanted(&crate::core::discover::sibling_backends(&a.server)) {
+            progress(format!(
+                "b{build} is the newest release and it's already built + archived \
+                 with these backends — nothing new upstream"
+            ));
+            return Ok(build);
+        }
         progress(format!(
-            "b{build} is the newest release and it's already built + archived — \
-             nothing new upstream"
+            "b{build} exists as {} but with different backends — building the \
+             requested variant",
+            a.label
         ));
-        return Ok(build);
     }
     progress(format!("newest release: b{build} — checking out + building"));
     checkout_release(build, progress)?;
     build_tree(c, sel, progress)?;
-    archive_build(build, progress)?;
+    // Same-number variants archive under a backend-suffixed label so
+    // both stay pinnable side by side.
+    let base_label = format!("b{build}");
+    let label = if archive_dir().join(&base_label).join("llama-server").exists() {
+        let mut names = Vec::new();
+        if sel.cuda { names.push("cuda"); }
+        if sel.vulkan { names.push("vulkan"); }
+        if sel.hip { names.push("hip"); }
+        if names.is_empty() { names.push("cpu"); }
+        format!("{base_label}-{}", names.join("-"))
+    } else {
+        base_label
+    };
+    archive_from(&checkout_dir().join("build/bin"), &label, progress)?;
     Ok(build)
 }
 

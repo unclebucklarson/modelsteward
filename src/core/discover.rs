@@ -240,7 +240,7 @@ pub fn install_alias(inst: &LlamaInstall) -> String {
 
 /// Backend names from `libggml-<backend>.so*` files next to the binary.
 /// "base" is plumbing, not a backend, and is excluded.
-fn sibling_backends(server: &Path) -> Vec<String> {
+pub fn sibling_backends(server: &Path) -> Vec<String> {
     let Some(dir) = server.parent() else {
         return Vec::new();
     };

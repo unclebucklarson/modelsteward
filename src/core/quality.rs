@@ -127,19 +127,30 @@ pub struct QualityScore {
     pub loop_notes: Vec<String>,
 }
 
+/// The one chat-completions envelope both the eval battery and the
+/// agent-loop shots use (they had drifted copies; review catch
+/// 2026-08-28): temperature 0, cache_prompt false — probes must never
+/// seed the cache the app measures.
+fn chat(port: u16, mut payload: serde_json::Value) -> Result<serde_json::Value> {
+    payload["temperature"] = 0.into();
+    payload["cache_prompt"] = false.into();
+    ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
+        .timeout(std::time::Duration::from_secs(600))
+        .send_json(payload)
+        .context("probe request")?
+        .into_json()
+        .map_err(Into::into)
+}
+
 fn ask(port: u16, model: &str, prompt: &str) -> Result<String> {
-    let body: serde_json::Value =
-        ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
-            .timeout(std::time::Duration::from_secs(600))
-            .send_json(serde_json::json!({
-                "model": model,
-                "messages": [{"role": "user", "content": prompt}],
-                "max_tokens": 2048,
-                "temperature": 0,
-                "cache_prompt": false,
-            }))
-            .context("eval request")?
-            .into_json()?;
+    let body = chat(
+        port,
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 2048,
+        }),
+    )?;
     Ok(body
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
@@ -171,20 +182,16 @@ Synthetic fixture."),
                    EXACTLY (text only, no #). Keep calling tools until you know."
     })];
     for hop in 1..=6u32 {
-        let body: serde_json::Value =
-            ureq::post(&format!("http://127.0.0.1:{port}/v1/chat/completions"))
-                .timeout(std::time::Duration::from_secs(600))
-                .send_json(serde_json::json!({
-                    "model": model,
-                    "messages": messages,
-                    "tools": tools,
-                    "max_tokens": 1024,
-                    "temperature": 0,
-                    "cache_prompt": false,
-                }))
-                .map_err(|e| format!("request failed at hop {hop}: {e}"))?
-                .into_json()
-                .map_err(|e| format!("bad response at hop {hop}: {e}"))?;
+        let body = chat(
+            port,
+            serde_json::json!({
+                "model": model,
+                "messages": messages,
+                "tools": tools,
+                "max_tokens": 1024,
+            }),
+        )
+        .map_err(|e| format!("request failed at hop {hop}: {e:#}"))?;
         let msg = body
             .pointer("/choices/0/message")
             .cloned()

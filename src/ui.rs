@@ -263,7 +263,10 @@ impl App {
             upstream: advisor::read_upstream_status(&router::state_dir()),
             history: history::read_all(&router::state_dir()),
             cache_stats: Vec::new(),
-            meter_line: None,
+            meter_line: meter::summary_line(
+                &router::state_dir(),
+                advisor::now_epoch(),
+            ),
             cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
             lab_selected: None,
@@ -462,7 +465,7 @@ impl App {
                     &router::state_dir(),
                     rcfg.as_ref().expect("set above"),
                 );
-                if tx.send(Msg::RouterState(state)).is_err() {
+                if tx.send(Msg::RouterState(state.clone())).is_err() {
                     return;
                 }
                 let _ = tx.send(Msg::Ollama(ollama::probe(cfg.ollama_port)));
@@ -494,16 +497,26 @@ impl App {
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
                     if let Ok(text) = std::fs::read_to_string(&log_path) {
-                        let _ = tx.send(Msg::CacheStats(evidence::cache_effectiveness(&text)));
-                        // M9: credit new usage into the token ledger; the
-                        // continuous harvest is what survives the router
-                        // truncating its log on restart.
+                        // One parse serves both the monitor and the meter
+                        // (the log was parsed twice per tick — review
+                        // catch), and the ledger + summary only rewrite
+                        // when something was actually credited.
+                        let stats = evidence::cache_effectiveness(&text);
                         let now = advisor::now_epoch();
-                        let _ = meter::harvest(&router::state_dir(), &text, now);
-                        let _ = tx.send(Msg::Meter(meter::summary_line(
+                        let credited = meter::harvest_stats(
                             &router::state_dir(),
+                            &stats,
+                            &text,
                             now,
-                        )));
+                        )
+                        .unwrap_or(0);
+                        let _ = tx.send(Msg::CacheStats(stats));
+                        if credited > 0 {
+                            let _ = tx.send(Msg::Meter(meter::summary_line(
+                                &router::state_dir(),
+                                now,
+                            )));
+                        }
                     }
                 }
                 // Daily upstream freshness (user request 2026-08-25): one
@@ -536,55 +549,76 @@ impl App {
                         && !managed::list_archives().iter().any(|a| a.build == Some(up))
                     {
                         pending_autobuild = Some(up);
+                        let _ = tx.send(Msg::Progress(format!(
+                            "[auto-build] b{up} queued — will build when the \
+                             machine is quiet"
+                        )));
                     }
                     let _ = tx.send(Msg::Upstream(s));
                 }
                 // Auto-build waits for a QUIET machine: a full-core cmake
-                // beside a measurement or trial skews the numbers being
-                // recorded (seen live 2026-08-28 — the build ran through a
-                // measure sweep). Loaded models = someone is working.
+                // beside a measurement skews the numbers being recorded.
+                // Review-hardened (2026-08-28): rechecks the opt-in every
+                // tick (unchecking cancels the queue), clears the queue
+                // whenever the release stops being wanted (built manually,
+                // setting off) so no per-tick churn survives, treats
+                // loading/downloading as busy, reuses THIS tick's status
+                // (zero extra probes), and takes the binary from the
+                // cached rcfg — never pick_server in a poll tick.
                 if let Some(up) = pending_autobuild {
-                    let idle = matches!(
-                        router::status(&router::state_dir(), rcfg.as_ref().expect("set above")),
-                        router::RouterState::Ours { ref models }
-                            if !models.iter().any(|m| m.status == "loaded")
-                    ) || matches!(
-                        router::status(&router::state_dir(), rcfg.as_ref().expect("set above")),
-                        router::RouterState::Down
-                    );
-                    if idle
-                        && !managed::list_archives().iter().any(|a| a.build == Some(up))
-                        && let Ok(server) = system::pick_server(&cfg)
+                    if !cfg.managed_auto_build
+                        || managed::list_archives().iter().any(|a| a.build == Some(up))
                     {
                         pending_autobuild = None;
-                        let build = discover::build_of(&server);
-                        // Own thread: a multi-minute cmake build must not
-                        // freeze the status poller. The daily stamp was
-                        // already written above, so this can't re-trigger.
-                        let tx2 = tx.clone();
-                        let server = server.clone();
-                        std::thread::spawn(move || {
-                            let tx3 = tx2.clone();
-                            let mut progress = move |line: String| {
-                                let _ =
-                                    tx3.send(Msg::Progress(format!("[auto-build] {line}")));
-                            };
-                            let measurements =
-                                router::read_measurements(&router::state_dir());
-                            let check =
-                                advisor::check(Some(server), build, &measurements, None);
-                            let sel = advisor::default_backends(&check);
-                            let result = managed::build_release(&check, sel, &mut progress);
-                            let _ = tx2.send(Msg::Managed(managed::status()));
-                            let _ = tx2.send(Msg::Progress(match result {
-                                Ok(b) => format!(
-                                    "[auto-build] b{b} built + archived — select it in \
-                                     Settings → llama-server binary when you want to \
-                                     serve it"
-                                ),
-                                Err(e) => format!("[auto-build] failed: {e:#}"),
-                            }));
-                        });
+                    } else {
+                        let busy_status =
+                            |m: &router::RouterModel| matches!(m.status.as_str(), "loaded" | "loading" | "downloading" | "downloaded");
+                        let idle = match &state {
+                            router::RouterState::Down => true,
+                            router::RouterState::Ours { models } => {
+                                !models.iter().any(busy_status)
+                            }
+                            // External/Trouble: someone else's server — be
+                            // polite, and say why nothing is happening.
+                            _ => false,
+                        };
+                        if idle
+                            && let Some(server) = rcfg
+                                .as_ref()
+                                .map(|r| r.server_bin.clone())
+                                .filter(|p| p.is_file())
+                        {
+                            pending_autobuild = None;
+                            let tx2 = tx.clone();
+                            std::thread::spawn(move || {
+                                let tx3 = tx2.clone();
+                                let mut progress = move |line: String| {
+                                    let _ = tx3
+                                        .send(Msg::Progress(format!("[auto-build] {line}")));
+                                };
+                                let build = discover::build_of(&server);
+                                let measurements =
+                                    router::read_measurements(&router::state_dir());
+                                let check = advisor::check(
+                                    Some(server),
+                                    build,
+                                    &measurements,
+                                    None,
+                                );
+                                let sel = advisor::default_backends(&check);
+                                let result =
+                                    managed::build_release(&check, sel, &mut progress);
+                                let _ = tx2.send(Msg::Managed(managed::status()));
+                                let _ = tx2.send(Msg::Progress(match result {
+                                    Ok(b) => format!(
+                                        "[auto-build] b{b} built + archived — select it \
+                                         in Settings → llama-server binary when you \
+                                         want to serve it"
+                                    ),
+                                    Err(e) => format!("[auto-build] failed: {e:#}"),
+                                }));
+                            });
+                        }
                     }
                 }
                 ctx.request_repaint();
@@ -2910,6 +2944,13 @@ impl App {
             );
             let installs = scan.installs.clone();
             let picked = self.picked_server();
+            // Canonicalized ONCE per frame (installs paths are already
+            // canonical; per-row data_dir + canonicalize churn was a
+            // review catch).
+            let managed_root = {
+                let d = managed::data_dir();
+                d.canonicalize().unwrap_or(d)
+            };
             // The default: no explicit choice, newest of the user's OWN
             // installs (managed builds serve only when chosen here).
             ui.horizontal(|ui| {
@@ -2949,7 +2990,7 @@ impl App {
                     // build number plus the backends it was compiled with
                     // IS the build's identity — b10672-cuda-vulkan.
                     let alias = discover::install_alias(inst);
-                    let tag = if inst.server_path.starts_with(managed::data_dir()) {
+                    let tag = if inst.server_path.starts_with(&managed_root) {
                         " (app-managed)"
                     } else {
                         ""

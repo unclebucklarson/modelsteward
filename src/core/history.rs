@@ -58,10 +58,11 @@ fn path(dir: &Path) -> PathBuf {
     dir.join("history.jsonl")
 }
 
-/// Every journal entry, file order (oldest first). Unparseable lines are
-/// skipped — the journal is advisory, never load-bearing.
-pub fn read_all(dir: &Path) -> Vec<Entry> {
-    std::fs::read_to_string(path(dir))
+/// Read a JSONL file, skipping unparseable lines — shared by the
+/// journal and the meter ledger (they were line-for-line copies;
+/// review catch 2026-08-28). Advisory data, never load-bearing.
+pub fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Vec<T> {
+    std::fs::read_to_string(path)
         .map(|s| {
             s.lines()
                 .filter_map(|l| serde_json::from_str(l).ok())
@@ -70,18 +71,34 @@ pub fn read_all(dir: &Path) -> Vec<Entry> {
         .unwrap_or_default()
 }
 
-/// Append one event; prunes (newest KEEP_PER_MODEL per model) when the
-/// file grows past the threshold.
-pub fn record(dir: &Path, entry: &Entry) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    let mut line = serde_json::to_string(entry)?;
-    line.push('\n');
+/// Append records to a JSONL file, creating parents as needed.
+pub fn append_jsonl<T: serde::Serialize>(path: &Path, items: &[T]) -> Result<()> {
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut lines = String::new();
+    for item in items {
+        lines.push_str(&serde_json::to_string(item)?);
+        lines.push('\n');
+    }
     use std::io::Write;
     std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(path(dir))?
-        .write_all(line.as_bytes())?;
+        .open(path)?
+        .write_all(lines.as_bytes())?;
+    Ok(())
+}
+
+/// Every journal entry, file order (oldest first).
+pub fn read_all(dir: &Path) -> Vec<Entry> {
+    read_jsonl(&path(dir))
+}
+
+/// Append one event; prunes (newest KEEP_PER_MODEL per model) when the
+/// file grows past the threshold.
+pub fn record(dir: &Path, entry: &Entry) -> Result<()> {
+    append_jsonl(&path(dir), std::slice::from_ref(entry))?;
     let count = std::fs::read_to_string(path(dir))
         .map(|s| s.lines().count())
         .unwrap_or(0);

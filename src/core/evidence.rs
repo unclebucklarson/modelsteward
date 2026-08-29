@@ -139,17 +139,23 @@ pub fn topology_advice(
 pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
     #[derive(Default)]
     struct Task {
+        model: Option<String>,
         prompt: Option<u64>,
         generated: Option<u64>,
         release: Option<u64>,
     }
     let mut port_model: BTreeMap<u32, String> = BTreeMap::new();
+    // Ports get REUSED within one router lifetime, and a new child
+    // restarts task ids at 0 — so tasks are keyed by (port, spawn
+    // generation, task) and bound to the model active WHEN FIRST SEEN,
+    // not the port's final tenant. This used to be monitor-grade
+    // ("final mapping is close enough"); the meter's permanent ledger
+    // sits on these numbers now (review catch 2026-08-28), so
+    // attribution is exact.
+    let mut port_gen: BTreeMap<u32, u32> = BTreeMap::new();
     let mut disabled_ports: std::collections::BTreeSet<u32> = Default::default();
     let mut context_ports: std::collections::BTreeSet<u32> = Default::default();
-    // (port, task) → figures; flushed into per-model tallies at the end
-    // using the FINAL port mapping seen — close enough for a monitor, and
-    // per-restart precision isn't worth a full state machine here.
-    let mut tasks: BTreeMap<(u32, u64), Task> = BTreeMap::new();
+    let mut tasks: BTreeMap<(u32, u32, u64), Task> = BTreeMap::new();
 
     for line in log.lines() {
         if let Some(idx) = line.find("spawning server instance with name=") {
@@ -157,6 +163,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
             if let Some((name, port_part)) = rest.split_once(" on port ") {
                 if let Ok(port) = port_part.trim().parse::<u32>() {
                     port_model.insert(port, name.trim().to_string());
+                    *port_gen.entry(port).or_default() += 1;
                 }
             }
             continue;
@@ -172,7 +179,11 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
             continue;
         }
         let Some(task) = task_id(body) else { continue };
-        let t = tasks.entry((port, task)).or_default();
+        let generation = port_gen.get(&port).copied().unwrap_or(0);
+        let t = tasks.entry((port, generation, task)).or_default();
+        if t.model.is_none() {
+            t.model = port_model.get(&port).cloned();
+        }
         // Two dialects (grammar drift found live 2026-08-28, b10630 →
         // b10672: the n_gen / progress lines all but vanished; current
         // builds put per-turn truth in print_timing's "/ N tokens"):
@@ -193,8 +204,10 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
     }
 
     let mut per_model: BTreeMap<String, ModelCacheStats> = BTreeMap::new();
-    for ((port, _), t) in &tasks {
-        let Some(model) = port_model.get(port) else {
+    for ((port, _, _), t) in &tasks {
+        // Bound-at-first-sight; final mapping only as a fallback for
+        // tasks whose lines preceded any spawn line we saw.
+        let Some(model) = t.model.as_ref().or_else(|| port_model.get(port)) else {
             continue;
         };
         let (Some(prompt), Some(generated), Some(release)) = (t.prompt, t.generated, t.release) else {

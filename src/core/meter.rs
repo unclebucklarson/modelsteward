@@ -41,9 +41,54 @@ pub struct Tally {
 
 /// What was already credited from the current log instance.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Cursor {
     pub fingerprint: String,
+    /// v2 (2026-08-28 review): the first LINE alone is near-constant
+    /// across router starts — v2 hashes the first 4KB, which always
+    /// carries run-specific ports/timestamps. The legacy field remains
+    /// so existing cursors aren't treated as a fresh instance (which
+    /// would double-credit everything once).
+    pub fingerprint_v2: Option<String>,
     pub credited: BTreeMap<String, Tally>,
+}
+
+/// Cross-process harvest lock: the GUI poller and a `--meter` CLI run
+/// are separate processes sharing one cursor — an unlocked
+/// read-modify-write double-credits the append-only ledger (review
+/// catch 2026-08-28). Advisory lockfile; a stale one (>120s: a crashed
+/// holder) is stolen.
+pub struct HarvestLock(PathBuf);
+impl Drop for HarvestLock {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn try_lock(dir: &Path) -> Option<HarvestLock> {
+    let path = dir.join("meter.lock");
+    let _ = std::fs::create_dir_all(dir);
+    match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+        Ok(_) => Some(HarvestLock(path)),
+        Err(_) => {
+            let stale = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|t| t.elapsed().ok())
+                .is_some_and(|age| age.as_secs() > 120);
+            if stale {
+                let _ = std::fs::remove_file(&path);
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .ok()
+                    .map(|_| HarvestLock(path))
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn ledger_path(dir: &Path) -> PathBuf {
@@ -54,23 +99,28 @@ fn cursor_path(dir: &Path) -> PathBuf {
     dir.join("meter-cursor.json")
 }
 
-/// A log instance's identity: its first line (the router writes its
-/// header once at start; truncation replaces it). Length is NOT part of
-/// the fingerprint — the same instance grows.
+/// A log instance's identity: the first 4KB (spawn lines and stamps in
+/// there vary per run; the same instance only ever grows, so the prefix
+/// is stable). The legacy first-line fingerprint lives on only to
+/// recognize cursors written before v2.
 pub fn log_fingerprint(log: &str) -> String {
+    crate::core::router::fnv(&log[..log.len().min(4096)])
+}
+
+fn legacy_fingerprint(log: &str) -> String {
     crate::core::router::fnv(log.lines().next().unwrap_or(""))
 }
 
 /// Pure: what the current totals add beyond what was already credited.
-/// A fingerprint change means a fresh log — everything is new. Totals
-/// that went BACKWARD under the same fingerprint (shouldn't happen) are
+/// `same_instance` false means a fresh log — everything is new. Totals
+/// that went BACKWARD under the same instance (shouldn't happen) are
 /// credited at zero, never negative.
 pub fn deltas(
     totals: &BTreeMap<String, Tally>,
     cursor: &Cursor,
-    fingerprint: &str,
+    same_instance: bool,
 ) -> Vec<(String, Tally)> {
-    let fresh = cursor.fingerprint != fingerprint;
+    let fresh = !same_instance;
     totals
         .iter()
         .filter_map(|(model, t)| {
@@ -92,15 +142,32 @@ pub fn deltas(
 }
 
 /// Parse the log, credit the new usage into the ledger, advance the
-/// cursor. Returns how many models got new credit. Safe to call as
-/// often as you like — crediting is idempotent per log content.
+/// cursor. Returns how many models got new credit (0 also when another
+/// process holds the harvest lock — the next tick gets it). Crediting
+/// is idempotent per log content.
 pub fn harvest(dir: &Path, log: &str, now: u64) -> Result<usize> {
-    let totals: BTreeMap<String, Tally> = crate::core::evidence::cache_effectiveness(log)
-        .into_iter()
+    let stats = crate::core::evidence::cache_effectiveness(log);
+    harvest_stats(dir, &stats, log, now)
+}
+
+/// The poller already computes cache stats for the monitor; this
+/// variant credits from them without a second full-log parse (review
+/// catch 2026-08-28 — the log was being parsed twice per mine tick).
+pub fn harvest_stats(
+    dir: &Path,
+    stats: &[crate::core::evidence::ModelCacheStats],
+    log: &str,
+    now: u64,
+) -> Result<usize> {
+    let Some(_lock) = try_lock(dir) else {
+        return Ok(0);
+    };
+    let totals: BTreeMap<String, Tally> = stats
+        .iter()
         .filter(|s| s.turns > 0)
         .map(|s| {
             (
-                s.model,
+                s.model.clone(),
                 Tally {
                     turns: s.turns as u64,
                     prompt: s.prompt_tokens,
@@ -115,54 +182,49 @@ pub fn harvest(dir: &Path, log: &str, now: u64) -> Result<usize> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
-    let new = deltas(&totals, &cursor, &fp);
+    let same_instance = match &cursor.fingerprint_v2 {
+        Some(v2) => *v2 == fp,
+        // Pre-v2 cursor: recognize the instance by the legacy hash so
+        // the upgrade itself can't double-credit.
+        None => !cursor.fingerprint.is_empty() && cursor.fingerprint == legacy_fingerprint(log),
+    };
+    let new = deltas(&totals, &cursor, same_instance);
+    std::fs::create_dir_all(dir)?;
     if !new.is_empty() {
-        std::fs::create_dir_all(dir)?;
         let hour = now - now % 3600;
-        let mut lines = String::new();
-        for (model, d) in &new {
-            lines.push_str(&serde_json::to_string(&Bucket {
+        let buckets: Vec<Bucket> = new
+            .iter()
+            .map(|(model, d)| Bucket {
                 when: hour,
                 model: model.clone(),
                 turns: d.turns,
                 prompt: d.prompt,
                 generated: d.generated,
                 reused: d.reused,
-            })?);
-            lines.push('\n');
-        }
-        use std::io::Write;
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(ledger_path(dir))?
-            .write_all(lines.as_bytes())?;
+            })
+            .collect();
+        crate::core::history::append_jsonl(&ledger_path(dir), &buckets)?;
     }
     let credited = new.len();
-    // The cursor always advances to current totals (even when nothing
-    // was creditable) so a truncation right after a quiet stretch
-    // can't double-credit.
-    std::fs::create_dir_all(dir)?;
-    std::fs::write(
-        cursor_path(dir),
-        serde_json::to_string_pretty(&Cursor {
-            fingerprint: fp,
-            credited: totals,
-        })?,
-    )?;
+    // Advance the cursor when anything actually changed (a quiet tick
+    // rewrote it every 30s forever — write amplification for nothing).
+    let advanced = Cursor {
+        fingerprint: legacy_fingerprint(log),
+        fingerprint_v2: Some(fp),
+        credited: totals,
+    };
+    let changed = credited > 0
+        || cursor.fingerprint_v2.as_deref() != advanced.fingerprint_v2.as_deref()
+        || cursor.credited != advanced.credited;
+    if changed {
+        std::fs::write(cursor_path(dir), serde_json::to_string_pretty(&advanced)?)?;
+    }
     Ok(credited)
 }
 
-/// Every ledger line, file order. Unparseable lines are skipped — the
-/// ledger is advisory, never load-bearing.
+/// Every ledger line, file order.
 pub fn read_all(dir: &Path) -> Vec<Bucket> {
-    std::fs::read_to_string(ledger_path(dir))
-        .map(|s| {
-            s.lines()
-                .filter_map(|l| serde_json::from_str(l).ok())
-                .collect()
-        })
-        .unwrap_or_default()
+    crate::core::history::read_jsonl(&ledger_path(dir))
 }
 
 /// The pure-token report over an optional [since, until) range.
@@ -319,19 +381,21 @@ mod tests {
         // Same instance, partially credited → only the growth.
         let cursor = Cursor {
             fingerprint: "fp1".into(),
+            fingerprint_v2: None,
             credited: BTreeMap::from([("m".to_string(), tal(3, 600, 120, 200))]),
         };
-        let d = deltas(&totals, &cursor, "fp1");
+        let d = deltas(&totals, &cursor, true);
         assert_eq!(d, vec![("m".to_string(), tal(2, 400, 80, 100))]);
         // New instance (router restarted) → everything is new credit.
-        let d = deltas(&totals, &cursor, "fp2");
+        let d = deltas(&totals, &cursor, false);
         assert_eq!(d, vec![("m".to_string(), tal(5, 1000, 200, 300))]);
         // Fully credited, same instance → nothing.
         let cursor = Cursor {
             fingerprint: "fp1".into(),
+            fingerprint_v2: None,
             credited: totals.clone(),
         };
-        assert!(deltas(&totals, &cursor, "fp1").is_empty());
+        assert!(deltas(&totals, &cursor, true).is_empty());
     }
 
     #[test]
@@ -357,6 +421,50 @@ mod tests {
         assert_eq!(r.fleet.turns, 1);
         // Buckets landed on hour boundaries.
         assert!(all.iter().all(|b| b.when % 3600 == 0));
+    }
+
+    #[test]
+    fn harvest_lock_prevents_concurrent_double_credit() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = "load: spawning server instance with name=m on port 40001\n\
+             [40001] I slot update_slots: id  0 | task 7 | new prompt, n_ctx_slot = 8, prompt processing, n_tokens = 100\n\
+             [40001] I slot print_timing: id  0 | task 7 | n_gen = 20\n\
+             [40001] I slot release: id  0 | task 7 | stop processing: n_tokens = 140, truncated = 0\n";
+        // A held lock makes harvest skip (0 credited, ledger untouched).
+        let held = try_lock(dir.path()).expect("first lock");
+        assert_eq!(harvest(dir.path(), log, 3600).unwrap(), 0);
+        assert!(read_all(dir.path()).is_empty());
+        drop(held);
+        assert_eq!(harvest(dir.path(), log, 3600).unwrap(), 1);
+        assert_eq!(read_all(dir.path()).len(), 1, "credited exactly once");
+    }
+
+    #[test]
+    fn pre_v2_cursors_are_recognized_not_double_credited() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = "load: spawning server instance with name=m on port 40001\n\
+             [40001] I slot update_slots: id  0 | task 7 | new prompt, n_ctx_slot = 8, prompt processing, n_tokens = 100\n\
+             [40001] I slot print_timing: id  0 | task 7 | n_gen = 20\n\
+             [40001] I slot release: id  0 | task 7 | stop processing: n_tokens = 140, truncated = 0\n";
+        assert_eq!(harvest(dir.path(), log, 3600).unwrap(), 1);
+        // Rewrite the cursor as a pre-upgrade one: legacy fingerprint
+        // only. The same log must NOT be re-credited after upgrading.
+        let cur: Cursor = serde_json::from_str(
+            &std::fs::read_to_string(dir.path().join("meter-cursor.json")).unwrap(),
+        )
+        .unwrap();
+        let legacy = Cursor {
+            fingerprint: cur.fingerprint.clone(),
+            fingerprint_v2: None,
+            credited: cur.credited.clone(),
+        };
+        std::fs::write(
+            dir.path().join("meter-cursor.json"),
+            serde_json::to_string(&legacy).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(harvest(dir.path(), log, 3700).unwrap(), 0, "no double credit");
+        assert_eq!(read_all(dir.path()).len(), 1);
     }
 
     #[test]

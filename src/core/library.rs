@@ -75,21 +75,23 @@ impl ModelFile {
     /// the file stem, in that order of preference.
     pub fn display_name(&self) -> String {
         let stem = || {
-            let raw = self
-                .path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| self.path.display().to_string());
-            // A split set's first shard represents the whole model —
-            // "GLM-4.5-Air-UD-Q3_K_XL", not "…-00001-of-00002".
-            match raw.rsplit_once("-of-") {
-                Some((rest, _)) => match rest.rsplit_once('-') {
-                    Some((base, part)) if part.chars().all(|c| c.is_ascii_digit()) => {
-                        base.to_string()
-                    }
-                    _ => raw.clone(),
-                },
-                None => raw,
+            // A split set's first shard represents the whole model.
+            // ONE parser decides what counts as a shard (split_part) —
+            // an earlier looser inline copy truncated names like
+            // "pick-1-of-3.gguf" that scan correctly kept as normal
+            // models (review catch 2026-08-28).
+            match split_part(&self.path) {
+                // The set key is already extension-free ("…-UD-Q3_K_XL");
+                // file_stem would chop at the version dot ("GLM-4").
+                Some((set, _, _)) => set
+                    .file_name()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.path.display().to_string()),
+                None => self
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| self.path.display().to_string()),
             }
         };
         match &self.source {
@@ -222,30 +224,6 @@ pub fn scan(
     if let Some(hub) = hf_hub {
         out.extend(hf_hub_models(hub));
     }
-    // Split GGUFs (HF caps files at 50GB, so big quants ship as
-    // model-00001-of-00002.gguf + …): llama.cpp loads the whole model
-    // from the FIRST shard, so only that shard is a model row — with
-    // the other shards' bytes counted into its size — and the rest are
-    // support files, same policy as mmproj. A set whose first shard is
-    // missing (partial download) is no model at all.
-    let mut shard_bytes: std::collections::HashMap<PathBuf, u64> =
-        std::collections::HashMap::new();
-    for m in &out {
-        if let Some((set, part, _)) = split_part(&m.path)
-            && part != 1
-        {
-            *shard_bytes.entry(set).or_default() += m.file_size;
-        }
-    }
-    out.retain(|m| !matches!(split_part(&m.path), Some((_, part, _)) if part != 1));
-    for m in &mut out {
-        if let Some((set, 1, _)) = split_part(&m.path)
-            && let Some(extra) = shard_bytes.get(&set)
-        {
-            m.file_size += extra;
-        }
-    }
-
     // Vision pairing: mmproj*.gguf files aren't models — they're the vision
     // half of a model in the same directory. Pair, then drop them as rows.
     let mmproj_by_dir: std::collections::HashMap<PathBuf, PathBuf> = out
@@ -273,6 +251,32 @@ pub fn scan(
             .unwrap_or((0, 0));
         key == (0, 0) || seen.insert(key)
     });
+    // Split GGUFs (HF caps files at 50GB — AFTER the inode dedupe, or a
+    // scan dir listed twice credits every extra shard's bytes twice into
+    // the surviving row; review catch 2026-08-28), so big quants ship as
+    // model-00001-of-00002.gguf + …): llama.cpp loads the whole model
+    // from the FIRST shard, so only that shard is a model row — with
+    // the other shards' bytes counted into its size — and the rest are
+    // support files, same policy as mmproj. A set whose first shard is
+    // missing (partial download) is no model at all.
+    let mut shard_bytes: std::collections::HashMap<PathBuf, u64> =
+        std::collections::HashMap::new();
+    for m in &out {
+        if let Some((set, part, _)) = split_part(&m.path)
+            && part != 1
+        {
+            *shard_bytes.entry(set).or_default() += m.file_size;
+        }
+    }
+    out.retain(|m| !matches!(split_part(&m.path), Some((_, part, _)) if part != 1));
+    for m in &mut out {
+        if let Some((set, 1, _)) = split_part(&m.path)
+            && let Some(extra) = shard_bytes.get(&set)
+        {
+            m.file_size += extra;
+        }
+    }
+
     // Stable order: shelf, then Ollama, then HF hub — alphabetical within.
     out.sort_by(|a, b| {
         let rank = |m: &ModelFile| match m.source {
