@@ -131,6 +131,7 @@ struct App {
     /// Session-only — opinions aren't measurements and aren't persisted.
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
+    show_guide: bool,
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
     managed_status: Option<managed::ManagedStatus>,
@@ -300,6 +301,7 @@ impl App {
             override_editor: None,
             advisories: Vec::new(),
             advisor_open: false,
+            show_guide: false,
             managed_status: None,
             sel_checkout: None,
             archive_label: String::new(),
@@ -1603,6 +1605,10 @@ impl App {
             }
         });
         ui.menu_button("Help", |ui| {
+            if ui.button("Tuning Guide — the sequence").clicked() {
+                self.show_guide = true;
+                ui.close();
+            }
             if ui.button("About").clicked() {
                 self.show_about = true;
                 ui.close();
@@ -2105,6 +2111,23 @@ impl App {
                 let is_moe_over_vram = sel_row.is_some_and(|r| {
                     r.moe && r.size_bytes / (1024 * 1024) > self.hardware().vram_mib
                 });
+                // The sequencing guard (two live lessons in one battery,
+                // 2026-08-28): without an applied placement, this model
+                // measures everything at a crushed default context.
+                let placement_applied = self.cfg.overrides.get(&id).is_some_and(|o| {
+                    o.extra
+                        .iter()
+                        .any(|(k, _)| k == "cpu-moe" || k == "n-cpu-moe")
+                });
+                if is_moe_over_vram && !placement_applied {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        "⚠ No MoE placement applied yet — bench, agent-turn trials \
+                         (vision/cache/ckpt), and quality would all measure at the \
+                         crushed default context. Run the MoE-offload trial FIRST and \
+                         Apply its winner, then the rest (Help → Tuning Guide).",
+                    );
+                }
                 let has_spec_kept =
                     !trial::applied_keys(&self.cfg, &id, "spec").is_empty();
                 let has_mmproj = sel_row.is_some_and(|r| r.vision);
@@ -3744,6 +3767,80 @@ impl App {
     /// The advisor pane: every AI opinion from this session, newest first,
     /// each naming the model that wrote it. Opinions, not measurements —
     /// the label does the quarantining.
+    /// Help → the tuning sequence (user request 2026-08-28, after two
+    /// live lessons in one battery: measurements taken before a
+    /// placement is applied reflect a config you'll never serve). The
+    /// REAL guards are contextual (the Lab warns at the moment of
+    /// mistake); this is the readable map.
+    fn guide_window(&mut self, ctx: &egui::Context) {
+        if !self.show_guide {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Tuning Guide — the sequence")
+            .collapsible(false)
+            .default_width(560.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical().max_height(460.0).show(ui, |ui| {
+                    for (head, body) in [
+                        (
+                            "Why order matters",
+                            "Trials race configs on top of what's currently applied. \
+                             Measuring before the right foundation is applied records \
+                             numbers for a configuration you'll never actually serve — \
+                             honest, but useless.",
+                        ),
+                        (
+                            "1 · Measure + Bench",
+                            "Library → Load (or Lab → Measure/Bench). This gives every \
+                             later step its baseline: settled context, tool-call check, \
+                             pp/tg speed — and the Lab's time estimates.",
+                        ),
+                        (
+                            "2 · Placement first, for big MoE models",
+                            "A Mixture-of-Experts model bigger than your VRAM settles at \
+                             a crushed ~4k context by default. Run the MoE-offload trial \
+                             and APPLY its winner before anything else — bench, the \
+                             agent-turn trials, and quality all measure through whatever \
+                             placement is applied. (The Lab warns you about this one.)",
+                        ),
+                        (
+                            "3 · Speed menus",
+                            "Speculation (and its dials, after a keep), prefill batch, \
+                             KV precision. Winners are offered, never auto-applied; \
+                             every option stays selectable with its numbers.",
+                        ),
+                        (
+                            "4 · Agent-turn menus",
+                            "Vision cost, cache-reuse, checkpoints — these need an \
+                             agent-usable context (≥ ~24k), which is why placement came \
+                             first. They price what real coding turns cost.",
+                        ),
+                        (
+                            "5 · Quality probe",
+                            "Eval battery + tool calls + multi-hop agent loops. Run it \
+                             on the CONFIG you intend to serve.",
+                        ),
+                        (
+                            "6 · Apply, re-measure, sync",
+                            "Apply winners in the Lab, re-run Measure so opencode.json \
+                             gets the limits of what you actually serve. Re-run \
+                             affected menus after a llama.cpp rebuild — the Rebuild \
+                             scorecard tells you when numbers went stale.",
+                        ),
+                    ] {
+                        ui.strong(head);
+                        ui.label(body);
+                        ui.add_space(6.0);
+                    }
+                });
+            });
+        if !open {
+            self.show_guide = false;
+        }
+    }
+
     fn ai_advisor_window(&mut self, ctx: &egui::Context) {
         if !self.advisor_open {
             return;
@@ -4781,6 +4878,7 @@ impl eframe::App for App {
         self.override_dialog(ui.ctx());
         self.diagnosis_window(ui.ctx());
         self.ai_advisor_window(ui.ctx());
+        self.guide_window(ui.ctx());
         self.advisor_window(ui.ctx());
 
         if self.show_about {
