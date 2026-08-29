@@ -35,11 +35,20 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
 
 Single binary, strictly layered: `src/core/` is a headless, testable engine;
 `src/ui/` is an egui shell over it. Core never depends on egui. Modules:
-`discover` (llama.cpp installs + GPU inventory), `gguf` (header metadata
-reader), `library` (unified model registry: scan dirs + Ollama blob store,
-deduped by file sha), `router` (preset-INI generation and llama-server
-lifecycle), `opencode` (opencode.json diff/apply with backups), `ollama`
-(peer probe via `/api/tags`).
+`discover` (llama.cpp installs + GPU inventory + install aliases),
+`gguf` (header metadata reader), `library` (unified model registry:
+scan dirs + Ollama blobs + HF cache, split-GGUF aware, deduped by
+inode), `router` (preset-INI generation, llama-server lifecycle,
+measurements), `opencode` (opencode.json diff/apply with backups),
+`ollama` (peer probe), `trial` (measured config A/B harness, verdicts
+with magnitude-scaled guards), `quality` (eval battery + tool +
+agent-loop probes), `bench` (llama-bench baselines), `evidence`
+(router.log miner: cache stats, child ports), `meter` (M9 token
+ledger), `history` (append-only journal + rebuild scorecard),
+`advisor` (build check/rebuild/verify engine), `managed` (app-owned
+llama.cpp checkout + archived builds), `aiadvisor` (grounded one-shot
+AI opinions — NEVER load-bearing), `diagnose`, `report`, `cancel`,
+`settings`, `system`.
 
 Non-obvious constraints that shape the code:
 
@@ -60,6 +69,19 @@ Non-obvious constraints that shape the code:
   actually omitted them.
 - **opencode.json limits use server-reported values** — the context the server
   *settled on* after `--fit`, not the GGUF's `n_ctx_train`.
+- **AI is never load-bearing.** Verdicts, flags, syncs, and writes are
+  deterministic; `aiadvisor` output is labeled opinion, grounded in
+  supplied data only, never auto-applied.
+- **Probing binaries is worker territory** — `--version`/`--list-devices`
+  spawn subprocesses (the latter initializes CUDA); never call
+  `pick_server`/`find_installs` in a render loop or poll tick (GUI uses
+  the cached scan; the poller caches its router config).
+- **Selection vs production**: Settings is the ONE surface that selects
+  the serving binary; the Build Advisor makes builds and never selects.
+  Managed builds/archives serve only when explicitly chosen.
+- **Log grammars drift** — evidence.rs speaks both the pre- and
+  post-b10672 dialects; when the meter reads zero while tokens flow,
+  suspect a new dialect before suspecting the code.
 
 ## Environment facts (dev machine)
 

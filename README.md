@@ -14,11 +14,27 @@ downstream from those measurements.
 
 - **Runs models bigger than your GPU.** The headline nobody tells
   novices: a Mixture-of-Experts model several times your VRAM can run
-  *well* with experts in system RAM and attention on the GPU — measured
-  here, an 80B A3B coder hit its full 262,144-token context at ~40
-  tokens/sec on a single 24GB card, 100% quality-gate fidelity. The
-  Library flags oversized MoE models automatically and the Lab's
-  MoE-offload trial finds (and applies) the placement that works.
+  *well* with most experts in system RAM — measured here, an 80B A3B
+  coder hit its full 262,144-token context at 52 tokens/sec generation
+  and 303 t/s prefill on a single 24GB card (partial offload,
+  `--n-cpu-moe 32`), 100% quality-gate fidelity and 100% multi-hop
+  agent-loop reliability. The honest caveat is also measured: cold
+  prefill costs ~30s per 10k prompt tokens, so the first turn of a big
+  agent session takes a beat. The Library flags oversized MoE models
+  automatically and the Lab's MoE-offload trial races full and partial
+  placements to find the one your card affords.
+- **Meters real usage** — a continuous token ledger (turns, prompt vs
+  generated vs cache-served, busiest hours, per-model splits) that
+  survives router restarts, with a cloud-price comparison you control.
+  Local AI isn't free; now it's measured (`--meter`, Server tab).
+- **Manages llama.cpp itself** (opt-in) — an app-owned checkout builds
+  each new release in the background when the machine is idle, archives
+  every build, and serving only ever changes by your explicit click.
+  Rollback is a pin, never a rebuild.
+- **Asks your own models for second opinions** — grounded, one-shot,
+  clearly-labeled AI advisories (failure explanations, a fleet brief,
+  rebuild triage) served by the models the app manages. Opinions, never
+  load-bearing: every verdict and write stays deterministic.
 - **Discovers** your llama.cpp installations (version, backends, which build
   can actually see your GPUs) and every GGUF on the system: your own
   directories ("shelf"), Ollama's blob store (blobs are raw GGUFs served
@@ -125,6 +141,9 @@ modelsteward --start       # router on :8080
 modelsteward --calibrate   # measure new/stale models (add `force` for all)
 modelsteward --bench       # speed baselines, new/stale (or: --bench <id>, add `force`)
 modelsteward --trial <id>  # measured config trial ([spec|ub|kv|load|dials|moe|vision|cache|ckpt|slots]; `keep <variant>` applies)
+modelsteward --quality <id>  # eval battery + tool + multi-hop agent-loop probes
+modelsteward --meter       # token ledger: what your models actually served (today|24h|7d)
+modelsteward --report      # shareable findings report (sanitized md + JSON)
 modelsteward --sync        # write measured limits into opencode.json
 modelsteward --verify-rebuild  # after a rebuild: restart, re-measure, report
 modelsteward --advise      # build advisor report

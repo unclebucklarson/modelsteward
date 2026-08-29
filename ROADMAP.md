@@ -255,104 +255,30 @@ speculative-decoding trial ran (classic draft measured and REJECTED on
 this hardware, ngram adopted instead — spike 5); results-next-to-
 recommendations became the Lab's standing recommendation blocks.
 
-## Where things stand (2026-08-27, 122 tests green — v0.2.0)
+## Where things stand (2026-08-28, 147 tests green — v0.4.0 + the meter)
 
-Since the 08-26 stamp: quality gate v2 + quant-choice advisor (live,
-with measured quality parity on the qwen3.8 quants); cache-effectiveness
-monitor (found vision silently disabling cache-reuse on both daily
-drivers) + the ⚙ vision toggle; lower-is-better trial goals + load-mode
-menu (verdict: keep baseline — warm loads are 4s and dio measured 2x
-slower) + speculation-dials menu (built, first run pending); Lab detail
-scrollbar; Cancel for long-running work; findings report physical-GPU
-truth + JSON sidecar; ghost auto-comment; published as modelsteward on
-GitHub + crates.io with tag-triggered releases.
+v0.4.0 shipped after an 8-angle pre-tag review (13 findings fixed).
+Since the tag: the llama.cpp management intent-split (Settings selects,
+Build Advisor builds — Pin/Unpin vocabulary retired), managed autonomy
+(opt-in auto-build of new releases, idle-gated so it never compiles
+beside a measurement; short-circuits when the newest release is already
+archived), split-GGUF support (first shard = the model, sizes summed),
+and M9 phase 1 — the token meter (continuous router.log harvest into
+meter.jsonl, `--meter [today|24h|7d]`, Server-tab line, cloud-compare
+against an editable price) which immediately caught the b10630→b10672
+log-grammar drift that had silently broken the cache monitor.
 
-### (2026-08-26 stamp)
-
-Since the 08-25 stamp: M6p2 verification loop DONE (`--verify-rebuild` +
-auto-chained after guided rebuilds; live verdict: b10630 unlocked
-nothing, confirmed 4 Ollama-only conversions, cost ~9% ctx fleet-wide —
-honestly synced); measurement history journal (history.jsonl + hover
-trails); measure flows refresh the preset first (new-on-disk models are
-measurable); Start-Router-&-Continue prompt replaces dead-end errors;
-trial verdicts explain themselves (Why? — deterministic, no AI); the
-⚡ Lab tab landed with five campaigns (Measure/Bench/spec/ub/kv),
-standing recommendations with Apply/Revert (mid-campaign popup removed),
-and the quality gate (rewrite fidelity, multiset-scored) unlocking the
-KV-precision menu. Findings-report export (tier 1 sharing) in flight.
-
-Older stamps below kept for history.
-
-### (2026-08-25 stamp)
-
-M7 phase 2 core landed and campaigned (ngram-simple kept on 4 models;
-north-mini also kept ub-2048 via the tradeoff flow), the wild-readiness
-pass closed the babysitter gaps, archive migrates measurements + carries
-mmproj, action columns got headers, daily upstream freshness landed.
-
-M7 is real: baselines swept (10 models, build 10454), GUI Bench action
-landed, and the first Tier B trial ran end to end (spike 5) — ngram-simple
-speculative decoding ADOPTED on the daily driver, classic 4B draft
-REJECTED on single-24GB hardware. Also landed since the 08-20 marker:
-HF-download timeout fix, ghost-alias cleanup (opencode.json `-2` entry),
-vision serving for the Qwen3.8 shelf models (mmproj re-linked + measured
-ctx correction) and OpenCode image-modality sync.
-
-**M7 phase 2 core DONE (2026-08-24 evening):** `core/trial.rs` +
-`--trial <id> [keep <variant>]` + per-row 🧪 with verdict dialog (Keep
-persists via the override path; trials.json watched like measurements).
-Fleet campaign ran: ngram-simple KEPT on qwen3.8-q4/q5, laguna,
-north-mini (+29% to +118% rewrite); ornith + qwen3.6 keep baseline
-(under the 10% bar). See spike 5 addendum for the numbers and the
-acceptance-is-a-bad-proxy finding.
-
-Next, in rough order:
-
-**Wild-readiness pass (DONE 2026-08-25, user-directed):** every manual
-Claude intervention became a feature — (1) verdict dialog v2 shows the
-full measured table and surfaces guard-rejected tradeoffs as explicit
-"Keep X anyway" choices with gains/costs in plain language (north-mini's
-+50%-prefill case would have died silently); (2) contention-aware
-measuring: calibrate skips-without-recording and trials abort cleanly
-when another session's model holds the server (router::loaded_other
-evidence), and diagnose classifies legacy 500/limit records as
-ServerBusy, not model faults; (3) a trial keep carries its measured
-settled-ctx into measurements (stale-marked) and re-syncs the OpenCode
-limit immediately. Standing rule adopted: every hand-fix prompts
-"should the app do this itself?".
-
-1. **M7 phase 2 remainder** — CLOSED into M8: ctv q4_0 became the kv
-   menu (quality-gated), the menu picker became the Lab's campaign
-   checkboxes, results-next-to-recommendations became the Lab's standing
-   blocks. Still open in M8: `--cpu-moe`, remaining ngram variants.
-2. ✔ **Ghost comment-out by the app** (DONE 2026-08-26, user-approved
-   after the same leftover confused twice): sync auto-comments an orphan
-   only when the REACHABLE router omits its id AND no measurement backs
-   it — measured-but-unoffered entries stay reported-only. Comment-outs
-   with note + backup, announced in the sync summary (✂). First live
-   catch: the unsloth Q5 cache entry whose blob/preset had evaporated.
-3. **M6 phase 2**: post-rebuild verification loop; local-AI advisor
-   layer. ✔ AI advisor MVP (DONE 2026-08-27, design talk held): core/
-   aiadvisor.rs — `Advisor` trait, RouterAdvisor backend (the models the
-   app already serves; offline, private). Settled scope: AI is NEVER
-   load-bearing — one-shot grounded generations only, no chat, output
-   labeled "opinions, not measurements" naming the answering model,
-   nothing auto-applied, nothing leaves the machine. First feature:
-   "Ask a served model" on Why? dialogs whose failure the rules
-   couldn't classify (Cause::Unknown) — prompt carries the stored
-   error, machine facts, and the child server's log tail (mined via
-   evidence::child_port); answers collect in the Advisor window
-   (Tools menu). NEXT advisor features (user-ranked): fleet brief
-   (synthesize the findings JSON), rebuild triage (read upstream
-   commits against YOUR model set); later backends: Ollama, OpenAI-
-   compatible URL (cloud = explicit opt-in).
-   ✔ Daily upstream freshness (DONE 2026-08-25, user request —
-   manual checks left the checkout 167 commits stale): the status poller
-   runs one quiet `git fetch` per day (remote-tracking refs only, never
-   the working tree), persists the stamp to upstream.json, shows
-   freshness at the top of the Server tab, and logs when a newer build
-   appears.
-4. Connections phase 2; Tier C (slot persistence, LAN serving).
+The MoE reliability arc closed with numbers: the agent-loop probe
+(3 multi-hop tool-executor drives per quality run) scored the 80B at
+100% loops / 100% tools / 83% evals, and the moe-v2 rematch found the
+sweet spot — ncpu-moe-32: 52 t/s generation (+30% over cpu-moe),
+303 t/s prefill (+49%), full 262,144 context; ncpu-moe-24 finds the
+VRAM wall honestly. The verdict machinery learned its final guard
+lesson: an agent-unusable baseline (ctx < 24,576) no longer sets the
+price floor for the Context goal — fidelity still never waives. The
+live-session pain was quantified as cold-prefill UX (~30s per 10k
+tokens), not unreliability; MoE documentation claims stand on measured
+ground.
 
 ## M8 — Peak performance program (mapped 2026-08-25 with user; "tweak
 them to their absolute maximum")
