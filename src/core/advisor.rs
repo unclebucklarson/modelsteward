@@ -615,6 +615,16 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
                 .into(),
         ));
     }
+    if !crate::core::energy::rapl_readable() {
+        out.push((
+            "CPU energy counters are root-locked (RAPL)".into(),
+            "The Lab's J/token column measures GPU energy only until the kernel \
+             lets us read the CPU package counter. Unlock once with: sudo chmod \
+             a+r /sys/class/powercap/intel-rapl:0/energy_uj (resets on reboot; a \
+             udev rule makes it stick). Nothing is estimated in its absence."
+                .into(),
+        ));
+    }
     if c.dirty == Some(true) {
         out.push((
             "Your llama.cpp checkout has local changes".into(),

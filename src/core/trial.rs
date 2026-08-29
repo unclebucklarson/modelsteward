@@ -292,6 +292,10 @@ pub struct TrialResult {
     /// Agent-turn probe: prefill milliseconds of the SECOND turn (same
     /// conversation, middle edit, cache_prompt on) — real agent latency.
     pub turn2_prompt_ms: Option<f64>,
+    /// M9 p2: marginal joules per GENERATED token over the novel-code
+    /// window (GPU via NVML sampling; CPU via RAPL when readable),
+    /// idle baseline subtracted. None = no power source measurable.
+    pub j_per_token: Option<f64>,
     /// Fraction of the second turn's prompt served from cache.
     pub turn2_reuse: Option<f64>,
     /// Load or generation failure — the result is still recorded so a
@@ -699,7 +703,10 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
          speculated tokens the model confirmed. 2nd-turn ms: the agent-turn probe — \
          a big prompt sent, then re-sent with a middle edit (what agents do every \
          turn); this is how long the second turn's prefill took, with how much of it \
-         the prompt cache served. fidelity: the quality gate — how much of a module \
+         the prompt cache served. J/tok: marginal joules per generated token \
+         (GPU measured via NVML, CPU via RAPL when readable, idle draw \
+         subtracted) — the energy half of what a token costs. fidelity: the \
+         quality gate — how much of a module \
          the model was told to preserve came back verbatim (a drop means the config \
          is degrading output, and no speed win survives that)."
             .to_string(),
@@ -929,6 +936,7 @@ struct GenStats {
     prompt_n: Option<u64>,
     prompt_ms: Option<f64>,
     cache_n: Option<u64>,
+    predicted_n: Option<u64>,
     draft_n: Option<u64>,
     draft_accepted: Option<u64>,
     content: String,
@@ -1005,6 +1013,7 @@ fn agent_turn_ask(port: u16, model: &str, edited: bool) -> Result<GenStats> {
         prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
         prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
         cache_n: t.get("cache_n").and_then(|v| v.as_u64()),
+        predicted_n: t.get("predicted_n").and_then(|v| v.as_u64()),
         draft_n: None,
         draft_accepted: None,
         content: String::new(),
@@ -1048,6 +1057,7 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
         prompt_n: t.get("prompt_n").and_then(|v| v.as_u64()),
         prompt_ms: t.get("prompt_ms").and_then(|v| v.as_f64()),
         cache_n: t.get("cache_n").and_then(|v| v.as_u64()),
+        predicted_n: t.get("predicted_n").and_then(|v| v.as_u64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
         content: body
@@ -1062,10 +1072,25 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
 /// novel-code generations, one rewrite generation.
 fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResult> {
     let _ = timed_generation(port, model, NOVEL_PROMPTS[0], 128); // warmup: CUDA graphs
-    let mut novel = Vec::new();
-    for p in NOVEL_PROMPTS {
-        novel.push(timed_generation(port, model, p, 512)?.tps);
-    }
+    // Energy: idle baseline first (model loaded, nothing running), then
+    // the novel-generation window measured — marginal J over generated
+    // tokens is the honest per-token bill (M9 phase 2).
+    let idle = crate::core::energy::idle_baseline(2.0);
+    let measured = crate::core::energy::measure_window(|| -> Result<Vec<GenStats>> {
+        let mut out = Vec::new();
+        for p in NOVEL_PROMPTS {
+            out.push(timed_generation(port, model, p, 512)?);
+        }
+        Ok(out)
+    });
+    let gens = measured.value?;
+    let gen_tokens: u64 = gens.iter().filter_map(|g| g.predicted_n).sum();
+    let j_per_token = measured
+        .sample
+        .marginal_j(&idle)
+        .filter(|_| gen_tokens > 0)
+        .map(|j| j / gen_tokens as f64);
+    let novel: Vec<f64> = gens.iter().map(|g| g.tps).collect();
     let rw = timed_generation(port, model, &rewrite_prompt(), 1024)?;
     // The prefill probe is ~6k tokens; a config whose context settled
     // below that (an over-VRAM model at default placement crushes to
@@ -1091,6 +1116,7 @@ fn measure_loaded(port: u16, model: &str, settled_ctx: u64) -> Result<TrialResul
         pp_prefill: pf.and_then(|g| g.prompt_tps),
         turn2_prompt_ms: turn2.map(|(ms, _)| ms),
         turn2_reuse: turn2.and_then(|(_, r)| r),
+        j_per_token,
         fidelity: Some(rewrite_fidelity(&rewrite_code(), &rw.content)),
         settled_ctx: Some(settled_ctx),
         load_secs: None, // stamped by the round, which owns the load

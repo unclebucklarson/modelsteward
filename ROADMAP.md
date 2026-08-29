@@ -555,7 +555,18 @@ Original spec:
   continuously (poller snapshots deltas into meter.jsonl, append-only
   like history.jsonl) or counts die with each restart.
 
-**Energy metrics (phase 2 — the instrument):**
+**Energy metrics (phase 2): ✔ INSTRUMENT BUILT 2026-08-28** —
+core/energy.rs: GPU joules via NVML sampling (all GPUs summed, ~2Hz,
+unprivileged), CPU joules via RAPL package counters (wraparound
+handled; root-locked on this kernel → honestly None, never estimated,
+with a Build Advisor unlock hint mirroring the persistence-mode one).
+Marginal accounting: idle baseline sampled just before the window,
+subtracted, clamped at zero. First consumer: every trial round now
+records **J/token** over the novel-generation window (TrialResult.
+j_per_token, "J/tok" table column, glossary) — energy is a verdict-
+visible axis from the next campaign run onward. Still open in p2:
+J/token → verdict guards/tie-breaks once real numbers exist; meter
+$-line using measured J/token × kwh price (phase 3). Original spec:
 - NVML power sampling (GPU) + Intel RAPL energy counters (CPU package,
   /sys/class/powercap — real joules) around generations: idle baseline
   vs under-load → marginal J/token per model, measured not nameplate.

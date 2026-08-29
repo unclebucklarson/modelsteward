@@ -7,6 +7,7 @@ pub mod bench;
 pub mod cancel;
 pub mod diagnose;
 pub mod discover;
+pub mod energy;
 pub mod evidence;
 pub mod gguf;
 pub mod history;

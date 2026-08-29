@@ -4275,7 +4275,7 @@ fn trial_table_grid(
     egui::Grid::new(salt).striped(true).show(ui, |ui| {
         for h in [
             "", "novel t/s", "rewrite t/s", "prefill t/s", "context", "load s",
-            "2nd-turn ms", "fidelity", "accepted",
+            "2nd-turn ms", "J/tok", "fidelity", "accepted",
         ] {
             ui.strong(h);
         }
@@ -4310,6 +4310,11 @@ fn trial_table_grid(
                             .unwrap_or_default();
                         format!("{m:.0}{reuse}")
                     })
+                    .unwrap_or_else(|| "—".into()),
+            );
+            ui.label(
+                r.j_per_token
+                    .map(|j| format!("{j:.1}"))
                     .unwrap_or_else(|| "—".into()),
             );
             ui.label(
