@@ -101,6 +101,13 @@ pub fn failure_hint(error: &str) -> String {
 
 /// MoE detection for advice: the architecture says so, or the name
 /// carries the active-params convention ("A3B", "A22B", …).
+/// The stable identity the ignore list keys on: the file path when the
+/// row has one (survives display renames), else the router id.
+pub fn ignore_key(path: Option<&std::path::Path>, router_id: Option<&str>) -> Option<String> {
+    path.map(|p| p.display().to_string())
+        .or_else(|| router_id.map(str::to_string))
+}
+
 pub fn looks_moe(meta: Option<&GgufMeta>, display: &str) -> bool {
     if let Some(m) = meta {
         // The header's expert_count is definitive when present; arch

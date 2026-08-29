@@ -131,6 +131,7 @@ struct App {
     /// Session-only — opinions aren't measurements and aren't persisted.
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
+    show_ignored: bool,
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
     managed_status: Option<managed::ManagedStatus>,
@@ -300,6 +301,7 @@ impl App {
             override_editor: None,
             advisories: Vec::new(),
             advisor_open: false,
+            show_ignored: false,
             managed_status: None,
             sel_checkout: None,
             archive_label: String::new(),
@@ -1630,7 +1632,18 @@ impl App {
         }
         let mut pending: Option<RowAction> = None;
         let mut why: Option<DiagnosisView> = None;
-        let rows = self.rows.clone();
+        let all_rows = self.rows.clone();
+        let is_ignored = |r: &rows::Row| {
+            rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
+                .is_some_and(|k| self.cfg.ignored.contains(&k))
+        };
+        let ignored_count = all_rows.iter().filter(|r| is_ignored(r)).count();
+        let rows: Vec<rows::Row> = all_rows
+            .iter()
+            .filter(|r| self.show_ignored || !is_ignored(r))
+            .cloned()
+            .collect();
+        let mut toggle_ignore: Option<(String, bool)> = None;
         // History trails for the ctx and Speed hovers: the journal's recent
         // entries per model, one line each, newest first.
         let age = |when: u64| -> String {
@@ -1683,6 +1696,7 @@ impl App {
                     for h in [
                         "Model", "Source", "Size", "Feat", "Quant", "Measured ctx", "Speed",
                         "Server", "OpenCode", "Load", "Tune", "Archive", "Advice", "Why",
+                        "",
                     ] {
                         ui.strong(h);
                     }
@@ -1941,12 +1955,71 @@ impl App {
                         } else {
                             ui.label("");
                         }
+                        // Ignore/Restore (user request 2026-08-28): a model
+                        // that can never load here shouldn't be a permanent
+                        // red row. Reversible; drops out of the preset too.
+                        if let Some(key) =
+                            rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
+                        {
+                            let ignored_now = self.cfg.ignored.contains(&key);
+                            let label = if ignored_now { "Restore" } else { "Ignore" };
+                            if ui
+                                .small_button(label)
+                                .on_hover_text(if ignored_now {
+                                    "Bring this model back into the Library, preset, \
+                                     and Lab."
+                                } else {
+                                    "Hide this model and stop offering it (preset, \
+                                     Lab, calibrate). Reversible via the footer's \
+                                     'show ignored'."
+                                })
+                                .clicked()
+                            {
+                                toggle_ignore = Some((key, !ignored_now));
+                            }
+                        } else {
+                            ui.label("");
+                        }
                         ui.end_row();
                     }
                 });
         });
         if let Some(v) = why {
             self.diagnosis = Some(v);
+        }
+        if ignored_count > 0 {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.weak(format!(
+                    "{ignored_count} ignored model{}",
+                    if ignored_count == 1 { "" } else { "s" }
+                ));
+                ui.checkbox(&mut self.show_ignored, "show");
+            });
+        }
+        if let Some((key, ignore)) = toggle_ignore {
+            if ignore {
+                self.cfg.ignored.push(key);
+            } else {
+                self.cfg.ignored.retain(|k| k != &key);
+            }
+            match self.cfg.save(&system::config_file()) {
+                Ok(()) => {
+                    // The preset follows immediately — the router stops (or
+                    // resumes) offering it on its next reload.
+                    let cfg = self.cfg.clone();
+                    self.spawn("updating preset (ignore list changed)", move |tx| {
+                        let _ = tx.send(match system::write_preset(&cfg, &[]) {
+                            Ok((_, n)) => {
+                                let _ = router::reload(cfg.port);
+                                Msg::Finished(format!("preset regenerated ({n} models)"))
+                            }
+                            Err(e) => Msg::Error(format!("preset: {e:#}")),
+                        });
+                    });
+                }
+                Err(e) => self.log(format!("ERROR saving ignore list: {e:#}")),
+            }
         }
         if let Some(action) = pending {
             self.run_row_action(action);
@@ -1967,6 +2040,10 @@ impl App {
             .rows
             .iter()
             .filter(|r| r.router_id.is_some() && !r.embedding && r.failure.is_none())
+            .filter(|r| {
+                !rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
+                    .is_some_and(|k| self.cfg.ignored.contains(&k))
+            })
             .map(|r| (r.router_id.clone().unwrap(), r.display.clone()))
             .collect();
         let mut run_clicked = false;
@@ -3177,6 +3254,7 @@ impl App {
             models_max,
             checkouts: self.cfg.checkouts.clone(),
             cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
+            ignored: self.cfg.ignored.clone(),
             managed_auto_build: self.managed_auto_edit,
             overrides: self.cfg.overrides.clone(),
         })

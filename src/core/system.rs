@@ -284,6 +284,12 @@ pub fn write_preset(
 ) -> Result<(PathBuf, usize)> {
     let models = scan_models(cfg, extra_dirs);
     let mut entries = router::default_entries(&models);
+    // Ignored models leave the preset entirely — the router stops
+    // offering what the user told us to stop offering.
+    entries.retain(|(alias, m, _)| {
+        let by_path = cfg.ignored.contains(&m.path.display().to_string());
+        !by_path && !cfg.ignored.contains(alias)
+    });
     // Apply the user's per-model overrides (stored in config.json so preset
     // regeneration keeps them). Overrides keyed to ids that aren't preset
     // aliases (cache models) become bare sections configuring those ids.

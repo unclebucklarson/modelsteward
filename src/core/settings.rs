@@ -73,6 +73,13 @@ pub struct AppConfig {
     /// whatever YOU would actually pay; the report labels it as your
     /// number, never a quote.
     pub cloud_price_per_mtok: f64,
+    /// Models the user told the app to stop offering (user request
+    /// 2026-08-28: the Ollama-only conversions that can NEVER load in
+    /// llama.cpp sat in the Library as permanent red rows and were
+    /// re-tried by every calibrate). Keys are row identities
+    /// (path, else router id); ignored models leave the preset, the
+    /// Library's main view, and the Lab — reversibly.
+    pub ignored: Vec<String>,
     /// Autonomy for the managed checkout (user decision 2026-08-28):
     /// when the daily freshness check finds a new release, BUILD and
     /// ARCHIVE it automatically — but never pin it: what the router
@@ -96,6 +103,7 @@ impl Default for AppConfig {
             overrides: Default::default(),
             checkouts: Vec::new(),
             cloud_price_per_mtok: 3.0,
+            ignored: Vec::new(),
             managed_auto_build: false,
         }
     }
