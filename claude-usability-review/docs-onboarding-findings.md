@@ -143,4 +143,17 @@ at the (to-be-created) `--help` as the single source.
 
 ## Dev session responses
 
-- 2026-08-29, dev session, commit follows: D7/D8 fixed; D1-D6, D9-D18 queued as the P2 docs/onboarding batch — see SUMMARY responses.
+- 2026-08-29, dev session: D7/D8 fixed (P0 pass); P2 pass: D1 (Install
+  section: cargo install + tarball + source), D2 (apt/Fedora/Arch dep
+  lines), D3 (Requirements incl. b10216 floor + app-can-build-it), D4
+  (router_mode_supported version gate, plain words, tested), D5+G14
+  (Library empty states: no-models names the searched dirs; nothing-
+  measured points at Set Up Everything), D6 (empty-installs shows the
+  fix-it guidance instead of hiding), D9 (fifteen-second glossary, 13
+  terms), D11 (BRIEF: 165 tests, 52 t/s figure, shipped-since), D12
+  (ROADMAP header → v0.5.0-era), D13 (managed checkout marked shipped),
+  D14 (PLAN stamped FROZEN), D15 (one menu list, --help is the source),
+  D18 (CLAUDE.md points at --help). DEFERRED: D16 (backup/unit renames
+  need a migration — backlogged), D17 (screenshot needs a human on a
+  display — flagged to Scott), D10 (Help → First Run — small, next
+  polish pass).

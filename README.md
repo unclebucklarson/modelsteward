@@ -65,8 +65,8 @@ downstream from those measurements.
   tokens/sec at the real serving KV types — stored beside the measurements
   and shown in the Library's Speed column, re-measured only when the build
   changes.
-- **Tunes with trials, not folklore** (⚡ Lab tab, or `--trial <id>
-  [spec|ub|kv|load|dials]`): pick a model, pick campaigns — Measure,
+- **Tunes with trials, not folklore** (⚡ Lab tab, or `--trial <id> <menu>
+  <menu>`): pick a model, pick campaigns — Measure,
   Bench, speculation modes and their dials, prefill batch, KV precision,
   load mode, the quality probe — and Run (with a Cancel that stops at
   the next safe boundary, keeping partial results). Each trial
@@ -123,6 +123,50 @@ downstream from those measurements.
 - **Coexists with Ollama** as a peer: shows what the daemon holds in VRAM
   and warns on contention. It observes Ollama; it never manages it. The same
   discipline applies to any llama-server this app didn't start.
+
+## Requirements
+
+- **Linux.** (The GUI needs the usual desktop libs — see Install.)
+- **llama.cpp's `llama-server`, build b10216 or newer** (router mode:
+  `--models-preset`, hot-swap, `--fit`). Don't have one? The app builds it
+  for you: Server menu → Check My llama.cpp → Managed llama.cpp → Set up.
+- A GPU helps enormously but isn't required; NVIDIA/AMD/Intel all work via
+  the backend the Build Advisor detects.
+- OpenCode is **optional** — sync simply skips when it isn't installed, and
+  any OpenAI-compatible app connects via the Connections tab.
+
+## Install
+
+```sh
+# from crates.io
+sudo apt-get install libgtk-3-dev libxkbcommon-dev libwayland-dev \
+  libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev   # Debian/Ubuntu
+# Fedora: gtk3-devel libxkbcommon-devel wayland-devel libxcb-devel
+# Arch:   gtk3 libxkbcommon wayland libxcb
+cargo install modelsteward
+
+# or grab a prebuilt tarball from the GitHub releases page:
+#   https://github.com/unclebucklarson/modelsteward/releases
+
+# or from source
+git clone https://github.com/unclebucklarson/modelsteward && cd modelsteward
+cargo run --release            # GUI; CLI: cargo run --release -- --help
+```
+
+## Fifteen-second glossary
+
+**GGUF** the model file format llama.cpp runs · **quant** (Q4_K_XL, q8_0…)
+how compressed the weights are — smaller = less VRAM, some quality cost ·
+**context** how many tokens a conversation can hold · **KV cache** the
+memory holding that conversation (its precision is tunable) · **pp / tg**
+prompt-processing / token-generation speed, tokens per second · **prefill**
+reading your prompt before the first output token · **MoE / A3B** a
+Mixture-of-Experts model; "A3B" = 3B parameters active per token — these
+can run well even when far bigger than your VRAM · **mmproj** a model's
+vision companion file · **router mode** one llama-server hot-swapping many
+models on one port · **preset** the generated `router.ini` describing them
+· **--fit** llama.cpp auto-sizing context to your VRAM · **speculation**
+drafting tokens cheaply and letting the model confirm them.
 
 ## Quick start
 

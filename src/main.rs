@@ -354,6 +354,11 @@ fn with_port(cfg: &settings::AppConfig, rest: &[String]) -> settings::AppConfig 
 }
 
 fn start(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    if let Err(e) = router::router_mode_supported(discover::build_of(
+        &system::router_config(cfg).server_bin,
+    )) {
+        anyhow::bail!(e);
+    }
     if !system::preset_path().exists() {
         let (path, n) = system::write_preset(cfg, &[])?;
         println!("wrote {} with {n} models", path.display());
@@ -475,6 +480,23 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
 /// The one-shot: preset if missing → start if down → wait healthy →
 /// incremental calibrate → sync. Everything narrated; nothing guessed.
 fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    // Fail early and name the actual problem (usability review C7: a
+    // model-less machine used to run the whole pipeline and die with a
+    // circular 'run --calibrate first').
+    let models = system::scan_models(cfg, &[]);
+    if models.is_empty() {
+        anyhow::bail!(
+            "no GGUF models found. Looked in: {} — plus any Ollama store and the \
+             HuggingFace cache. Put a .gguf under one of those, add a directory to \
+             scan_dirs in {}, or pull one with Ollama, then re-run --setup",
+            cfg.scan_dirs
+                .iter()
+                .map(|d| d.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
+            system::config_file().display()
+        );
+    }
     let dir = router::state_dir();
     let rcfg = system::router_config(cfg);
     match router::status(&dir, &rcfg) {

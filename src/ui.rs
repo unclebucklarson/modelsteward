@@ -1703,6 +1703,35 @@ impl App {
             ui.label("scanning…");
             return;
         }
+        // First-run empty states (usability review D5/G14): a bare
+        // header strip over nothing explained nothing.
+        if self.rows.is_empty() {
+            ui.add_space(12.0);
+            ui.strong("No models found yet.");
+            ui.label(format!(
+                "Looked in: {} — plus any Ollama blob store and the HuggingFace cache.",
+                self.cfg
+                    .scan_dirs
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            ui.label(
+                "Add a directory with GGUF files in Settings → Model scan \
+                 directories, or pull a model with Ollama — it will appear here \
+                 automatically.",
+            );
+            return;
+        }
+        if !self.measurements.values().any(|m| m.n_ctx.is_some()) {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Nothing measured yet — File → Set Up Everything starts the router, \
+                 measures every model, and wires up OpenCode in one go.",
+            );
+            ui.add_space(4.0);
+        }
         let router_up = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
         if !router_up {
             ui.horizontal(|ui| {
@@ -3238,9 +3267,22 @@ impl App {
         // Detected installs: autodiscovery meets manual pointing — one
         // click adopts a found binary instead of typing its path.
         if let Some(scan) = &self.scan
+            && scan.installs.is_empty()
+        {
+            // Usability review D6: with zero installs this section used
+            // to hide entirely — exactly when its guidance was needed.
+            ui.add_space(4.0);
+            ui.strong("No llama.cpp found on this machine");
+            ui.label(
+                "modelsteward drives llama.cpp's llama-server (b10216+). Either \
+                 point the field above at an existing binary with Browse…, or let \
+                 the app build one for you: Server menu → Check My llama.cpp → \
+                 Managed llama.cpp → Set up (clone + build newest release).",
+            );
+        }
+        if let Some(scan) = &self.scan
             && !scan.installs.is_empty()
         {
-            ui.add_space(4.0);
             ui.add_space(4.0);
             ui.strong("llama-server binary — what serves your models");
             ui.small(
@@ -4653,10 +4695,15 @@ impl App {
 // ─── worker bodies ───────────────────────────────────────────────────────────
 
 fn start_router(cfg: &settings::AppConfig) -> anyhow::Result<u32> {
+    let rcfg = system::router_config(cfg);
+    // Plain words beat a 30s timeout (usability review D4).
+    if let Err(e) = router::router_mode_supported(discover::build_of(&rcfg.server_bin)) {
+        anyhow::bail!(e);
+    }
     if !system::preset_path().exists() {
         system::write_preset(cfg, &[])?;
     }
-    router::start(&router::state_dir(), &system::router_config(cfg))
+    router::start(&router::state_dir(), &rcfg)
 }
 
 fn run_calibration(

@@ -255,7 +255,7 @@ speculative-decoding trial ran (classic draft measured and REJECTED on
 this hardware, ngram adopted instead — spike 5); results-next-to-
 recommendations became the Lab's standing recommendation blocks.
 
-## Where things stand (2026-08-28, 147 tests green — v0.4.0 + the meter)
+## Where things stand (2026-08-29, 165 tests green — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 
 v0.4.0 shipped after an 8-angle pre-tag review (13 findings fixed).
 Since the tag: the llama.cpp management intent-split (Settings selects,
@@ -645,6 +645,8 @@ acquisition is storage-side.
 
 ## Parked / ideas
 
+- ✔ SHIPPED 2026-08-27/28 (see M8 #5 + Managed llama.cpp in the Build
+  Advisor) — kept below as the original idea record.
 - **App-managed llama.cpp checkout** (user idea 2026-08-25): the app
   creates and owns a default checkout (e.g. `~/.local/share/
   modelsteward/llama.cpp`), telling the user hands-off — making

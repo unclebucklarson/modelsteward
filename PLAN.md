@@ -1,4 +1,4 @@
-# modelsteward — Plan (founding design, kept as history)
+# modelsteward — Plan (founding design — FROZEN 2026-08-25; ROADMAP.md is current)
 
 > **Status 2026-08-25:** M0–M5.7, M6 phase 1, M6.5 phases 1–2, the
 > Connections pivot, M7 phases 1–2 (baselines + the measured-trial

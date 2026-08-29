@@ -44,6 +44,26 @@ pub struct ModelOverrides {
     pub no_mmproj: bool,
 }
 
+/// The oldest llama-server this app can drive: router mode
+/// (`--models-preset`, hot-swap, `--fit`) landed around b10216 — the
+/// build the founding spikes verified against. Older builds exit
+/// instantly and used to surface as an unexplained 30s timeout
+/// (usability review D4).
+pub const MIN_ROUTER_BUILD: u64 = 10_216;
+
+/// Plain-language pre-start check. None (unprobeable) passes — the
+/// timeout path still catches truly broken binaries.
+pub fn router_mode_supported(build: Option<u64>) -> Result<(), String> {
+    match build {
+        Some(b) if b < MIN_ROUTER_BUILD => Err(format!(
+            "your llama-server is b{b}, which predates router mode — this app needs \
+             b{MIN_ROUTER_BUILD} or newer. The Build Advisor (Server → Check My \
+             llama.cpp) can build a current one for you."
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// One extra-flags line → (key, value). Accepts what model cards teach
 /// (usability review G7): leading dashes stripped, space OR `=`
 /// separates, a bare flag means true.
@@ -981,6 +1001,22 @@ pub fn reload(port: u16) -> Result<Vec<RouterModel>> {
         .context("router reload failed")?
         .into_json()?;
     Ok(parse_models_response(&body))
+}
+
+#[cfg(test)]
+mod tests_version_gate {
+    use super::*;
+
+    #[test]
+    fn pre_router_builds_get_a_plain_language_refusal() {
+        // Usability review D4: a b10088 used to die as "router did not
+        // come up within 30s — see router.log".
+        let e = router_mode_supported(Some(10_088)).unwrap_err();
+        assert!(e.contains("b10088") && e.contains("10216") && e.contains("Build Advisor"));
+        assert!(router_mode_supported(Some(10_216)).is_ok());
+        assert!(router_mode_supported(Some(10_675)).is_ok());
+        assert!(router_mode_supported(None).is_ok(), "unprobeable → let the timeout judge");
+    }
 }
 
 #[cfg(test)]

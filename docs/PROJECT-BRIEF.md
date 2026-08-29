@@ -120,7 +120,7 @@ hardened by a wider install base.
 
 The lab's most striking demonstration: models far larger than the GPU
 are usable — an 80-billion-parameter mixture-of-experts coding model ran
-at its full 262k context near 40 tokens/sec on a single consumer 24GB
+at its full 262k context at 52 tokens/sec (partial expert offload) on a single consumer 24GB
 card, with expert weights in system RAM and placement chosen by
 measurement rather than folklore.
 
@@ -132,6 +132,6 @@ swallowed. Its first campaigns adopted ngram speculative decoding
 fleet-wide where it earned its keep (up to +118% generation on
 edit-heavy agent work, zero VRAM) while measuring and rejecting the
 classic draft-model pairing conventional wisdom recommended — on a
-single 24GB card it costs 96% of usable context. Planned next: the
+single 24GB card it costs 96% of usable context. Shipped since: the
 post-rebuild verification loop ("this rebuild unlocked N models ✓") and
 a sibling project for model inventory/backup with content-hash identity.
