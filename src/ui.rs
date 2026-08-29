@@ -131,7 +131,6 @@ struct App {
     /// Session-only — opinions aren't measurements and aren't persisted.
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
-    show_ignored: bool,
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
     managed_status: Option<managed::ManagedStatus>,
@@ -301,7 +300,6 @@ impl App {
             override_editor: None,
             advisories: Vec::new(),
             advisor_open: false,
-            show_ignored: false,
             managed_status: None,
             sel_checkout: None,
             archive_label: String::new(),
@@ -1632,17 +1630,11 @@ impl App {
         }
         let mut pending: Option<RowAction> = None;
         let mut why: Option<DiagnosisView> = None;
-        let all_rows = self.rows.clone();
-        let is_ignored = |r: &rows::Row| {
+        let rows = self.rows.clone();
+        let is_disabled = |r: &rows::Row| {
             rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
-                .is_some_and(|k| self.cfg.ignored.contains(&k))
+                .is_some_and(|k| self.cfg.disabled.contains(&k))
         };
-        let ignored_count = all_rows.iter().filter(|r| is_ignored(r)).count();
-        let rows: Vec<rows::Row> = all_rows
-            .iter()
-            .filter(|r| self.show_ignored || !is_ignored(r))
-            .cloned()
-            .collect();
         let mut toggle_ignore: Option<(String, bool)> = None;
         // History trails for the ctx and Speed hovers: the journal's recent
         // entries per model, one line each, newest first.
@@ -1702,12 +1694,20 @@ impl App {
                     }
                     ui.end_row();
                     for r in &rows {
-                        ui.label(&r.display).on_hover_text(
-                            r.router_id
-                                .as_deref()
-                                .map(|id| format!("served as: {id}"))
-                                .unwrap_or_else(|| "no servable identity".into()),
-                        );
+                        let disabled = is_disabled(r);
+                        if disabled {
+                            ui.weak(&r.display).on_hover_text(
+                                "Disabled by you — visible but not measured, benched, \
+                                 offered by the router, or raced in the Lab.",
+                            );
+                        } else {
+                            ui.label(&r.display).on_hover_text(
+                                r.router_id
+                                    .as_deref()
+                                    .map(|id| format!("served as: {id}"))
+                                    .unwrap_or_else(|| "no servable identity".into()),
+                            );
+                        }
                         ui.label(&r.source).on_hover_text(match r.source.as_str() {
                             "shelf" => {
                                 "Your shelf: locally stored, manually managed models — the \
@@ -1902,7 +1902,11 @@ impl App {
                         } else {
                             r.advice.clone()
                         };
-                        ui.colored_label(color, short).on_hover_text(&r.advice);
+                        if disabled {
+                            ui.weak("disabled — not measured, benched, or offered");
+                        } else {
+                            ui.colored_label(color, short).on_hover_text(&r.advice);
+                        }
                         if r.advice_level != rows::AdviceLevel::Good {
                             if ui
                                 .button("Why?")
@@ -1961,21 +1965,20 @@ impl App {
                         if let Some(key) =
                             rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
                         {
-                            let ignored_now = self.cfg.ignored.contains(&key);
-                            let label = if ignored_now { "Restore" } else { "Ignore" };
+                            let label = if disabled { "Enable" } else { "Disable" };
                             if ui
                                 .small_button(label)
-                                .on_hover_text(if ignored_now {
-                                    "Bring this model back into the Library, preset, \
-                                     and Lab."
+                                .on_hover_text(if disabled {
+                                    "Resume measuring, benching, and offering this \
+                                     model."
                                 } else {
-                                    "Hide this model and stop offering it (preset, \
-                                     Lab, calibrate). Reversible via the footer's \
-                                     'show ignored'."
+                                    "Keep the row visible but stop acting on it: no \
+                                     measure, no bench, no Lab, not offered by the \
+                                     router. Reversible."
                                 })
                                 .clicked()
                             {
-                                toggle_ignore = Some((key, !ignored_now));
+                                toggle_ignore = Some((key, !disabled));
                             }
                         } else {
                             ui.label("");
@@ -1987,28 +1990,18 @@ impl App {
         if let Some(v) = why {
             self.diagnosis = Some(v);
         }
-        if ignored_count > 0 {
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.weak(format!(
-                    "{ignored_count} ignored model{}",
-                    if ignored_count == 1 { "" } else { "s" }
-                ));
-                ui.checkbox(&mut self.show_ignored, "show");
-            });
-        }
-        if let Some((key, ignore)) = toggle_ignore {
-            if ignore {
-                self.cfg.ignored.push(key);
+        if let Some((key, disable)) = toggle_ignore {
+            if disable {
+                self.cfg.disabled.push(key);
             } else {
-                self.cfg.ignored.retain(|k| k != &key);
+                self.cfg.disabled.retain(|k| k != &key);
             }
             match self.cfg.save(&system::config_file()) {
                 Ok(()) => {
                     // The preset follows immediately — the router stops (or
                     // resumes) offering it on its next reload.
                     let cfg = self.cfg.clone();
-                    self.spawn("updating preset (ignore list changed)", move |tx| {
+                    self.spawn("updating preset (disabled list changed)", move |tx| {
                         let _ = tx.send(match system::write_preset(&cfg, &[]) {
                             Ok((_, n)) => {
                                 let _ = router::reload(cfg.port);
@@ -2018,7 +2011,7 @@ impl App {
                         });
                     });
                 }
-                Err(e) => self.log(format!("ERROR saving ignore list: {e:#}")),
+                Err(e) => self.log(format!("ERROR saving disabled list: {e:#}")),
             }
         }
         if let Some(action) = pending {
@@ -2042,7 +2035,7 @@ impl App {
             .filter(|r| r.router_id.is_some() && !r.embedding && r.failure.is_none())
             .filter(|r| {
                 !rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
-                    .is_some_and(|k| self.cfg.ignored.contains(&k))
+                    .is_some_and(|k| self.cfg.disabled.contains(&k))
             })
             .map(|r| (r.router_id.clone().unwrap(), r.display.clone()))
             .collect();
@@ -3254,7 +3247,7 @@ impl App {
             models_max,
             checkouts: self.cfg.checkouts.clone(),
             cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
-            ignored: self.cfg.ignored.clone(),
+            disabled: self.cfg.disabled.clone(),
             managed_auto_build: self.managed_auto_edit,
             overrides: self.cfg.overrides.clone(),
         })

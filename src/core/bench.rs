@@ -184,12 +184,24 @@ pub fn run_baselines(
         cancel.check()?;
         let n = i + 1;
         let file = by_id[id];
-        let kv = cfg
-            .overrides
-            .get(id)
+        let ov = cfg.overrides.get(id);
+        let kv = ov
             .and_then(|o| o.cache_type_kv.clone())
             .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string());
-        let extra = vec!["-ctk".to_string(), kv.clone(), "-ctv".to_string(), kv];
+        let mut extra = vec!["-ctk".to_string(), kv.clone(), "-ctv".to_string(), kv];
+        // An over-VRAM MoE can't load raw — llama-bench has no --fit —
+        // but it DOES take --n-cpu-moe, so the bench mirrors the model's
+        // applied placement (cpu-moe → all layers; n-cpu-moe → as set).
+        // Without an applied placement the failure was guaranteed (found
+        // live 2026-08-28: GLM + the 80B errored while gpt-oss benched).
+        if let Some(o) = ov {
+            let has = |k: &str| o.extra.iter().find(|(ek, _)| ek == k).map(|(_, v)| v.clone());
+            if let Some(n) = has("n-cpu-moe") {
+                extra.extend(["-ncmoe".to_string(), n]);
+            } else if has("cpu-moe").is_some() {
+                extra.extend(["-ncmoe".to_string(), "999".to_string()]);
+            }
+        }
         progress(format!(
             "[{n}/{total}] benching {id} (pp512 + tg128 ×3 — a 27B takes about a minute)…"
         ));
