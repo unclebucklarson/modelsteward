@@ -33,6 +33,8 @@ pub struct GgufMeta {
     /// llama.cpp exploits it is a separate (build-version) question.
     #[serde(default)]
     pub has_mtp: bool,
+    /// `<arch>.expert_count` — Some(n > 0) means Mixture-of-Experts.
+    pub expert_count: Option<u64>,
 }
 
 /// Hard ceiling on how much header we're willing to read. Real metadata
@@ -75,6 +77,15 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
             "general.file_type" => {
                 if let Some(n) = as_u64(&mut r, ty)? {
                     meta.quantization = Some(file_type_name(n));
+                }
+            }
+            k if k.ends_with(".expert_count") => {
+                // The definitive MoE signal — any architecture (GLM,
+                // Qwen, gpt-oss…) with experts declares this; names
+                // don't always say so (live miss 2026-08-28:
+                // GLM-4.5-Air carries no A12B token in its filename).
+                if let Some(n) = as_u64(&mut r, ty)? {
+                    meta.expert_count = Some(n);
                 }
             }
             k if k.ends_with(".context_length") => {

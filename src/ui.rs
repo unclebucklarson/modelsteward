@@ -2030,9 +2030,10 @@ impl App {
                 let sel_row = self.rows.iter().find(|r| {
                     r.router_id.as_deref() == Some(id.as_str())
                 });
+                // Header-derived (expert_count) — a name heuristic missed
+                // GLM-4.5-Air live, whose filename carries no A-number.
                 let is_moe_over_vram = sel_row.is_some_and(|r| {
-                    rows::looks_moe(None, &r.display)
-                        && r.size_bytes / (1024 * 1024) > self.hardware().vram_mib
+                    r.moe && r.size_bytes / (1024 * 1024) > self.hardware().vram_mib
                 });
                 let has_spec_kept =
                     !trial::applied_keys(&self.cfg, &id, "spec").is_empty();

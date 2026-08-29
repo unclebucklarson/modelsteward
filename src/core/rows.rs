@@ -49,6 +49,8 @@ pub struct Row {
     pub path: Option<std::path::PathBuf>,
     /// Archivable = lives in a store some other tool owns/prunes.
     pub archivable: bool,
+    /// Header-derived MoE flag (expert_count/arch/name, best available).
+    pub moe: bool,
     /// Feature badges: vision projector paired, MTP tensors present,
     /// embedding architecture.
     pub vision: bool,
@@ -100,11 +102,15 @@ pub fn failure_hint(error: &str) -> String {
 /// MoE detection for advice: the architecture says so, or the name
 /// carries the active-params convention ("A3B", "A22B", …).
 pub fn looks_moe(meta: Option<&GgufMeta>, display: &str) -> bool {
-    if meta
-        .and_then(|m| m.architecture.as_deref())
-        .is_some_and(|a| a.contains("moe"))
-    {
-        return true;
+    if let Some(m) = meta {
+        // The header's expert_count is definitive when present; arch
+        // strings and name tokens are fallbacks for meta-less rows.
+        if m.expert_count.is_some_and(|n| n > 0) {
+            return true;
+        }
+        if m.architecture.as_deref().is_some_and(|a| a.contains("moe")) {
+            return true;
+        }
     }
     let d = display.to_lowercase();
     d.split(['-', '_', ' '])
@@ -340,6 +346,7 @@ pub fn assemble(
             )
         };
         let vision = m.mmproj.is_some();
+        let moe = looks_moe(m.meta.as_ref(), &m.display_name());
         let mtp = m.meta.as_ref().is_some_and(|x| x.has_mtp);
         let embedding = library::is_embedding(m.meta.as_ref());
         let (advice_level, advice) = if embedding {
@@ -403,6 +410,7 @@ pub fn assemble(
             advice_level,
             advice,
             vision,
+            moe,
             mtp,
             embedding,
             pp_tps,
@@ -482,6 +490,7 @@ pub fn assemble(
             advice_level,
             advice,
             vision: false,
+            moe: false,
             mtp: false,
             embedding: false,
             pp_tps,
