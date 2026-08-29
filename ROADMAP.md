@@ -514,13 +514,17 @@ Older items:
   (probe token budgets are known), warns loudly ≥90 min, and asks for
   Measure+Bench first when no baseline exists. The 3-hour GLM surprise
   can't recur unannounced.
-- **Advisor answerer should weigh SPEED alongside quality**: the
-  best-measured-quality rule can pick a 15-18 t/s giant to write a
-  fleet brief. Add a speed factor (quality-first, speed tie-break at
-  minimum), and consider a user-pinnable "advisor model". Candidate
-  small-but-capable resident: gpt-oss-20b (~13GB, fits VRAM whole,
-  strong tool discipline) — doubles as the fits-in-VRAM MoE control
-  the test matrix wants anyway.
+- **NEXT CODE BLOCK — "the advisor's finished form" (confirmed with
+  user 2026-08-29):** (a) answerer selection goes quality-first,
+  speed-weighted (a 15-18 t/s giant should not write fleet briefs),
+  plus a user-pinnable "advisor model" in config; (b) the DESIGNATED
+  CANDIDATE for that seat is **gpt-oss-20b** — measured on this
+  machine at 131k ctx, 5,861 pp / 160 tg, fully VRAM-resident
+  (~13GB), downloaded 2026-08-28 — to be confirmed by its quality
+  probe (evals + tools + agent loops) before it gets the chair: the
+  advisor model must EARN the seat with measured scores, same as any
+  other recommendation in this app; (c) build "Ask about tuning"
+  (below) on the same selection.
 - **"Hand testing off to an AI"** — REJECTED with reasoning: campaign
   orchestration, ETAs, and scheduling are deterministic and already
   encoded; AI is never load-bearing here (standing rule). The AI's
