@@ -70,6 +70,10 @@ pub struct AppConfig {
     pub checkouts: Vec<PathBuf>,
     /// $/kWh for the Meter's measured-cost line — YOUR electricity
     /// price (default is a rough US average; edit to your bill's rate).
+    /// Pinned advisory answerer (None = auto: best measured quality,
+    /// fastest within the tie — see aiadvisor::pick_advisor). The seat
+    /// is EARNED: pin a model its quality probe vouches for.
+    pub advisor_model: Option<String>,
     pub kwh_price_usd: f64,
     /// $/Mtok OUTPUT price used by the Meter's cloud-comparison counter
     /// (M9 p1). A ballpark mid-tier API price as of 2026-08 — edit to
@@ -104,6 +108,7 @@ impl Default for AppConfig {
             models_max: 1,
             overrides: Default::default(),
             checkouts: Vec::new(),
+            advisor_model: None,
             kwh_price_usd: 0.15,
             cloud_price_per_mtok: 3.0,
             disabled: Vec::new(),

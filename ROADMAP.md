@@ -514,8 +514,17 @@ Older items:
   (probe token budgets are known), warns loudly ≥90 min, and asks for
   Measure+Bench first when no baseline exists. The 3-hour GLM surprise
   can't recur unannounced.
-- **NEXT CODE BLOCK — "the advisor's finished form" (confirmed with
-  user 2026-08-29):** (a) answerer selection goes quality-first,
+- **✔ BUILT 2026-08-29 (test-first; the advisor's finished form):**
+  gpt-oss-20b PASSED its seat exam — 6/6 evals, 5/5 tools, 3/3 agent
+  loops, the fleet's best quality card, at 160 t/s — and the tested
+  seat rules (aiadvisor::pick_advisor: pin wins; else best quality
+  tier, fastest within it) now select it automatically, no pin
+  needed. Settings gained an Advisor-model selector (Auto default,
+  loop scores shown). "Ask about tuning" shipped: a question box in
+  the Advisor window, grounded on TUNING_CORPUS (the curated,
+  code-versioned knob notes — the RAG-that-isn't) plus this machine's
+  findings JSON, answered by the earned advisor; first live answer
+  cited real rows and recommended the honest trial. Original plan: (a) answerer selection goes quality-first,
   speed-weighted (a 15-18 t/s giant should not write fleet briefs),
   plus a user-pinnable "advisor model" in config; (b) the DESIGNATED
   CANDIDATE for that seat is **gpt-oss-20b** — measured on this

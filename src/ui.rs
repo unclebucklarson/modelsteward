@@ -133,6 +133,7 @@ struct App {
     /// Session-only — opinions aren't measurements and aren't persisted.
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
+    tuning_question: String,
     show_guide: bool,
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
@@ -306,6 +307,7 @@ impl App {
             override_editor: None,
             advisories: Vec::new(),
             advisor_open: false,
+            tuning_question: String::new(),
             show_guide: false,
             managed_status: None,
             sel_checkout: None,
@@ -1570,7 +1572,7 @@ impl App {
                 open_path = Some(opencode::default_config_path());
                 ui.close();
             }
-            if ui.button("Advisor (AI opinions)").clicked() {
+            if ui.button("Advisor — opinions + Ask about tuning").clicked() {
                 self.advisor_open = true;
                 ui.close();
             }
@@ -3275,6 +3277,53 @@ impl App {
             }
         }
         ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label("Advisor model");
+                let current = self
+                    .cfg
+                    .advisor_model
+                    .clone()
+                    .unwrap_or_else(|| "Auto (best quality, fastest tie)".into());
+                let mut change: Option<Option<String>> = None;
+                egui::ComboBox::from_id_salt("advisor-model")
+                    .selected_text(current)
+                    .show_ui(ui, |ui| {
+                        if ui
+                            .selectable_label(
+                                self.cfg.advisor_model.is_none(),
+                                "Auto (best quality, fastest tie)",
+                            )
+                            .clicked()
+                        {
+                            change = Some(None);
+                        }
+                        for (id, m) in &self.measurements {
+                            if m.n_ctx.is_none() {
+                                continue;
+                            }
+                            let label = format!(
+                                "{id}{}",
+                                m.loop_reliability
+                                    .map(|l| format!(" (loops {:.0}%)", l * 100.0))
+                                    .unwrap_or_default()
+                            );
+                            if ui
+                                .selectable_label(
+                                    self.cfg.advisor_model.as_deref() == Some(id),
+                                    label,
+                                )
+                                .clicked()
+                            {
+                                change = Some(Some(id.clone()));
+                            }
+                        }
+                    });
+                if let Some(c) = change {
+                    self.cfg.advisor_model = c;
+                    let _ = self.cfg.save(&system::config_file());
+                }
+                ui.small("answers failure explanations, briefs, triage, and tuning questions");
+            });
             ui.checkbox(
                 &mut self.managed_auto_edit,
                 "Keep managed llama.cpp current (build + archive new releases \
@@ -3376,6 +3425,7 @@ impl App {
             ollama_port,
             models_max,
             checkouts: self.cfg.checkouts.clone(),
+            advisor_model: self.cfg.advisor_model.clone(),
             kwh_price_usd: self.cfg.kwh_price_usd,
             cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
             disabled: self.cfg.disabled.clone(),
@@ -3669,38 +3719,14 @@ impl App {
         });
     }
 
-    /// Pick the model that answers an advisory: the highest MEASURED
-    /// quality wins (an opinion is only as good as its author — the
-    /// first live fleet brief went to whichever model sorted first
-    /// alphabetically); a loaded model breaks ties to avoid a swap.
-    /// Never the excluded (usually failing) model itself.
+    /// Delegates to the tested core rules: pinned advisor, else best
+    /// quality tier, fastest within it (see aiadvisor::pick_advisor).
     fn pick_answerer(&self, exclude: Option<&str>) -> Option<String> {
-        let loaded: std::collections::HashSet<&str> = match &self.router_state {
-            Some(router::RouterState::Ours { models }) => models
-                .iter()
-                .filter(|m| m.status == "loaded")
-                .map(|m| m.id.as_str())
-                .collect(),
-            _ => Default::default(),
-        };
-        self.measurements
-            .iter()
-            .filter(|(id, m)| Some(id.as_str()) != exclude && m.n_ctx.is_some())
-            .max_by(|(a_id, a), (b_id, b)| {
-                let key = |id: &str, m: &&router::Measurement| {
-                    (
-                        m.eval_score.unwrap_or(0.0),
-                        m.tool_reliability.unwrap_or(0.0),
-                        u8::from(loaded.contains(id)),
-                    )
-                };
-                let (ae, at, al) = key(a_id, a);
-                let (be, bt, bl) = key(b_id, b);
-                ae.total_cmp(&be)
-                    .then(at.total_cmp(&bt))
-                    .then(al.cmp(&bl))
-            })
-            .map(|(id, _)| id.clone())
+        aiadvisor::pick_advisor(
+            &self.measurements,
+            self.cfg.advisor_model.as_deref(),
+            exclude,
+        )
     }
 
     /// Managed-checkout worker: clone if needed, fetch tags, check out
@@ -3954,11 +3980,32 @@ impl App {
             return;
         }
         let mut open = true;
+        let mut ask: Option<String> = None;
         egui::Window::new("Advisor — AI opinions, not measurements")
             .collapsible(false)
             .default_width(520.0)
             .open(&mut open)
             .show(ctx, |ui| {
+                // Ask about tuning (the RAG-that-isn't, 2026-08-29):
+                // grounded on the curated knob notes + THIS machine's
+                // findings, answered by the earned advisor model.
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.tuning_question)
+                            .desired_width(360.0)
+                            .hint_text("Ask about tuning — e.g. should I use q4_0 KV?"),
+                    );
+                    if ui
+                        .add_enabled(
+                            self.busy.is_none() && !self.tuning_question.trim().is_empty(),
+                            egui::Button::new("Ask"),
+                        )
+                        .clicked()
+                    {
+                        ask = Some(self.tuning_question.trim().to_string());
+                    }
+                });
+                ui.add_space(6.0);
                 if self.advisories.is_empty() {
                     ui.weak(
                         "Nothing yet. When a failure stumps the rule-based Why?, \
@@ -3980,6 +4027,48 @@ impl App {
         if !open {
             self.advisor_open = false;
         }
+        if let Some(q) = ask {
+            self.action_ask_tuning(&q);
+        }
+    }
+
+    /// Ask-about-tuning worker: regenerate findings, ground the curated
+    /// corpus + this machine's JSON, ask the earned advisor.
+    fn action_ask_tuning(&mut self, question: &str) {
+        let Some(answerer) = self.pick_answerer(None) else {
+            self.log("tuning questions need a measured model to ask — measure one first".to_string());
+            return;
+        };
+        let cfg = self.cfg.clone();
+        let port = self.cfg.port;
+        let question = question.to_string();
+        self.tuning_question.clear();
+        self.spawn(&format!("asking {answerer} about tuning"), move |tx| {
+            let result = (|| -> anyhow::Result<String> {
+                crate::core::report::generate(&cfg)?;
+                let json = std::fs::read_to_string(
+                    router::state_dir().join("findings-report.json"),
+                )?;
+                let backend = aiadvisor::RouterAdvisor {
+                    port,
+                    model: answerer.clone(),
+                };
+                use aiadvisor::Advisor as _;
+                backend.ask(
+                    aiadvisor::BRIEF_SYSTEM,
+                    &aiadvisor::tuning_prompt(&question, &json),
+                )
+            })();
+            let _ = tx.send(match result {
+                Ok(text) => Msg::Advisory {
+                    subject: format!("tuning: {question}"),
+                    model: answerer,
+                    text,
+                },
+                Err(e) => Msg::Error(format!("tuning question: {e:#}")),
+            });
+            let _ = tx.send(Msg::Finished("tuning answer ready".into()));
+        });
     }
 
     fn diagnosis_window(&mut self, ctx: &egui::Context) {

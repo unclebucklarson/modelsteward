@@ -78,6 +78,106 @@ impl Advisor for RouterAdvisor {
     }
 }
 
+/// Pick who answers an advisory (test-first 2026-08-29): a pinned
+/// advisor always wins; otherwise quality first — but within the top
+/// quality tier the FASTER model answers (the fleet's best scores at
+/// 160 t/s shouldn't lose the chair to an equal at 18). Models with no
+/// quality data rank below any measured-quality model; when nothing
+/// has quality data, fastest measured wins. `exclude` is never chosen.
+pub fn pick_advisor(
+    measurements: &std::collections::BTreeMap<String, crate::core::router::Measurement>,
+    pinned: Option<&str>,
+    exclude: Option<&str>,
+) -> Option<String> {
+    if let Some(p) = pinned
+        && Some(p) != exclude
+        && measurements.contains_key(p)
+    {
+        return Some(p.to_string());
+    }
+    let quality = |m: &crate::core::router::Measurement| -> Option<f64> {
+        let parts: Vec<f64> = [m.eval_score, m.tool_reliability, m.loop_reliability]
+            .into_iter()
+            .flatten()
+            .collect();
+        (!parts.is_empty()).then(|| parts.iter().sum::<f64>() / parts.len() as f64)
+    };
+    let candidates: Vec<(&String, &crate::core::router::Measurement)> = measurements
+        .iter()
+        .filter(|(id, m)| Some(id.as_str()) != exclude && m.n_ctx.is_some())
+        .collect();
+    let best_q = candidates.iter().filter_map(|(_, m)| quality(m)).fold(
+        f64::NEG_INFINITY,
+        f64::max,
+    );
+    let tier: Vec<_> = if best_q.is_finite() {
+        candidates
+            .iter()
+            .filter(|(_, m)| quality(m).is_some_and(|q| q >= best_q - 0.02))
+            .collect()
+    } else {
+        candidates.iter().collect()
+    };
+    tier.iter()
+        .max_by(|(_, a), (_, b)| {
+            a.tg_tps
+                .unwrap_or(0.0)
+                .total_cmp(&b.tg_tps.unwrap_or(0.0))
+        })
+        .map(|(id, _)| (*id).clone())
+}
+
+/// The curated tuning-knowledge corpus the "Ask about tuning" advisory
+/// grounds on — deliberately SMALL and versioned with the code (the
+/// RAG alternative was rejected 2026-08-28: stale retrieval is worse
+/// than no retrieval). Everything here is something this app measured
+/// or reasoned in the open.
+pub const TUNING_CORPUS: &str = "\
+KNOB NOTES (measured on real hardware by this app's trials):\n\
+- Speculation (spec-type): model-free ngram modes cost zero VRAM. Wildly \
+  per-model: +121% rewrite on one 27B, a 3x SLOWDOWN on another model's \
+  rewrite. Always trial, never copy another model's setting. Acceptance \
+  rate is a bad proxy for speed. Classic draft-model speculation collapsed \
+  context and ran 6x slower on a 24GB card.\n\
+- Prefill batch (ubatch-size): raises prompt-processing speed at some VRAM \
+  cost; wins are real (+26-50%) when context headroom exists.\n\
+- KV precision (cache-type-v q4_0): buys context, can cost output quality \
+  and rewrite speed — the fidelity gate exists because a config that \
+  degrades output is never a win. q8_0 KV measured ~2x usable context vs \
+  f16 at equal quality on this class of hardware.\n\
+- MoE placement (cpu-moe / n-cpu-moe): the headline for models bigger \
+  than VRAM — experts in system RAM restored 4096 -> 131k-262k context. \
+  Partial offload (n-cpu-moe) trades context for speed; the VRAM wall is \
+  found by measurement, and PLACEMENT MUST BE APPLIED FIRST or every \
+  other measurement reflects a crushed default context.\n\
+- Threads: only matter once experts live on CPU; E-cores measured -45% \
+  to -59% generation — P-cores-only can win.\n\
+- cache-reuse: only works on models whose attention can shift its KV \
+  cache; SWA/hybrid models silently disable it and resume from sparse \
+  checkpoints instead (checkpoint-min-step is the lever, late edits \
+  only). Vision serving disables mid-edit reuse but NOT prefix caching; \
+  vision's real cost is VRAM -> context.\n\
+- Sampling (temp/top-k/top-p): shapes output, not speed; agent clients \
+  send their own — server defaults only matter for simple clients.\n\
+- ngl on a single GPU: don't — -ngl auto + --fit already place layers.\n\
+SEQUENCE for valid results: Measure+Bench -> MoE placement (if over \
+VRAM) -> speed menus -> agent-turn menus -> quality probe -> apply \
+winners, re-measure, sync.\n";
+
+/// Ask-about-tuning prompt: the user's question, this machine's own
+/// findings, and the curated corpus — grounded opinion, never doctrine.
+pub fn tuning_prompt(question: &str, findings_json: &str) -> String {
+    format!(
+        "A user of modelsteward asks a tuning question. Answer from the \
+         KNOB NOTES and from THIS MACHINE'S findings report below — cite \
+         the user's own numbers where they exist, recommend running the \
+         relevant Lab trial when the honest answer is 'measure it', and \
+         say when the notes don't cover something.\n\n\
+         Question: {question}\n\n{TUNING_CORPUS}\n\
+         This machine's findings (JSON):\n{findings_json}\n"
+    )
+}
+
 /// The system prompt shared by all advisory features: confine the model
 /// to the evidence, forbid invention, keep it short and honest.
 pub const SYSTEM: &str = "You are the advisory layer of modelsteward, a tool that \
@@ -182,6 +282,74 @@ pub fn log_tail_for(log: &str, model: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meas(
+        eval: Option<f64>,
+        tools: Option<f64>,
+        loops: Option<f64>,
+        tg: Option<f64>,
+    ) -> crate::core::router::Measurement {
+        crate::core::router::Measurement {
+            n_ctx: Some(50_000),
+            eval_score: eval,
+            tool_reliability: tools,
+            loop_reliability: loops,
+            tg_tps: tg,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn advisor_seat_rules() {
+        // Contracts (test-first 2026-08-29):
+        // 1. A pinned advisor always wins (that's what pinning means).
+        // 2. Otherwise: quality first — but within the top quality tier
+        //    (ties), the FASTER model answers (an 18 t/s giant should
+        //    not write fleet briefs a 160 t/s equal could).
+        // 3. Higher quality still beats higher speed across tiers.
+        // 4. `exclude` (the failing model) is never chosen.
+        // 5. Models with no quality data lose to any measured-quality
+        //    model, but can win when nothing has quality data (fastest).
+        let mut m = std::collections::BTreeMap::new();
+        m.insert("giant".to_string(), meas(Some(0.83), Some(1.0), Some(1.0), Some(18.0)));
+        m.insert("fast".to_string(), meas(Some(0.83), Some(1.0), Some(1.0), Some(160.0)));
+        m.insert("weak".to_string(), meas(Some(0.5), Some(0.8), None, Some(200.0)));
+        m.insert("unknown".to_string(), meas(None, None, None, Some(300.0)));
+
+        // Rule 2: equal quality → faster answers.
+        assert_eq!(pick_advisor(&m, None, None).as_deref(), Some("fast"));
+        // Rule 3: speedy-but-weaker never outranks the quality tier.
+        assert_ne!(pick_advisor(&m, None, None).as_deref(), Some("weak"));
+        // Rule 1: pin wins.
+        assert_eq!(
+            pick_advisor(&m, Some("giant"), None).as_deref(),
+            Some("giant")
+        );
+        // Rule 4: exclusion respected even for the best.
+        assert_eq!(
+            pick_advisor(&m, None, Some("fast")).as_deref(),
+            Some("giant")
+        );
+        // Rule 5: nothing has quality data → fastest measured wins.
+        let mut bare = std::collections::BTreeMap::new();
+        bare.insert("a".to_string(), meas(None, None, None, Some(50.0)));
+        bare.insert("b".to_string(), meas(None, None, None, Some(150.0)));
+        assert_eq!(pick_advisor(&bare, None, None).as_deref(), Some("b"));
+    }
+
+    #[test]
+    fn tuning_prompt_grounds_on_corpus_and_the_machines_numbers() {
+        let p = tuning_prompt(
+            "should I use q4_0 KV cache?",
+            "{\"measurements\":{\"m\":{\"n_ctx\":115456}}}",
+        );
+        assert!(p.contains("should I use q4_0 KV cache?"));
+        assert!(p.contains("115456"), "the user's own numbers ride along");
+        // The curated corpus travels with every question.
+        for needle in ["cache-reuse", "fidelity", "MoE", "placement"] {
+            assert!(p.contains(needle), "corpus missing {needle}");
+        }
+    }
 
     #[test]
     fn failure_prompt_carries_the_evidence_and_only_the_evidence() {
