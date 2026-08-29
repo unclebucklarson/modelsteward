@@ -74,6 +74,8 @@ enum Msg {
     CacheStats(Vec<evidence::ModelCacheStats>),
     /// Today's meter summary line (None = nothing metered yet today).
     Meter(Option<String>),
+    /// Live router activity for the status bar (None = quiet).
+    Activity(Option<String>),
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -149,6 +151,7 @@ struct App {
     history: Vec<history::Entry>,
     cache_stats: Vec<evidence::ModelCacheStats>,
     meter_line: Option<String>,
+    live_activity: Option<String>,
     /// Token for the CURRENT long-running operation; Cancel flips it and
     /// workers stop at their next safe boundary.
     cancel_token: cancel::CancelToken,
@@ -269,6 +272,7 @@ impl App {
                 advisor::now_epoch(),
                 None,
             ),
+            live_activity: None,
             cancel_token: cancel::CancelToken::default(),
             start_prompt: None,
             lab_selected: None,
@@ -444,6 +448,8 @@ impl App {
             let mut last_history_mtime = None;
             let log_path = router::state_dir().join("router.log");
             let mut last_log_len: u64 = 0;
+            let mut last_activity_len: u64 = 0;
+            let mut quiet_ticks: u32 = 0;
             let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
             let cfg_path = system::config_file();
             let mut last_cfg_mtime = None;
@@ -496,6 +502,38 @@ impl App {
                 // Prompt-cache effectiveness: re-mine when the log grew,
                 // throttled to twice a minute (the log can be large).
                 let log_len = std::fs::metadata(&log_path).map(|m| m.len()).unwrap_or(0);
+                // Live activity: when the log grew this tick, classify
+                // its tail (8KB read, pure parse); when it goes quiet for
+                // two ticks, clear. Answers "is it even working?" at a
+                // glance instead of a log dive (two live cases in two
+                // days).
+                if log_len != last_activity_len {
+                    last_activity_len = log_len;
+                    quiet_ticks = 0;
+                    let hint = std::fs::File::open(&log_path).ok().and_then(|mut f| {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let start = log_len.saturating_sub(8192);
+                        f.seek(SeekFrom::Start(start)).ok()?;
+                        let mut tail = String::new();
+                        f.read_to_string(&mut tail).ok()?;
+                        evidence::activity_hint(&tail)
+                    });
+                    let text = hint.and_then(|h| match h {
+                        evidence::Activity::TurnStarted => Some("working…".to_string()),
+                        evidence::Activity::Prefilling(pct) => {
+                            Some(format!("prefilling {pct:.0}%"))
+                        }
+                        // A completed turn means quiet again — no claim.
+                        evidence::Activity::TurnFinished { .. } => None,
+                    });
+                    let _ = tx.send(Msg::Activity(text));
+                } else {
+                    quiet_ticks += 1;
+                    if quiet_ticks == 3 {
+                        // ~6s of silence: whatever we claimed is stale.
+                        let _ = tx.send(Msg::Activity(None));
+                    }
+                }
                 if log_len != last_log_len && last_mine.elapsed().as_secs() >= 30 {
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
@@ -1320,6 +1358,7 @@ impl App {
                 Msg::History(h) => self.history = h,
                 Msg::CacheStats(c) => self.cache_stats = c,
                 Msg::Meter(m) => self.meter_line = m,
+                Msg::Activity(a) => self.live_activity = a,
                 // NOTE: does not clear `busy` — a Lab campaign may still be
                 // mid-sequence; the worker ends with Finished. No dialog:
                 // verdicts live in the Lab's standing recommendations
@@ -4392,19 +4431,26 @@ impl App {
         ui.horizontal(|ui| {
             let (dot, text) = match &self.router_state {
                 Some(router::RouterState::Ours { models }) => {
-                    let loaded: Vec<_> = models
+                    // Loading/downloading models are the activity users
+                    // most often mistake for a hang — say so.
+                    let active: Vec<String> = models
                         .iter()
-                        .filter(|m| m.status == "loaded")
-                        .map(|m| m.id.as_str())
+                        .filter_map(|m| match m.status.as_str() {
+                            "loaded" => Some(m.id.clone()),
+                            "loading" => Some(format!("{} (loading…)", m.id)),
+                            "downloading" => Some(format!("{} (downloading…)", m.id)),
+                            _ => None,
+                        })
                         .collect();
-                    (
-                        egui::Color32::from_rgb(0, 170, 0),
-                        if loaded.is_empty() {
-                            "router: up (nothing loaded)".to_string()
-                        } else {
-                            format!("router: up — {}", loaded.join(", "))
-                        },
-                    )
+                    let mut text = if active.is_empty() {
+                        "router: up (nothing loaded)".to_string()
+                    } else {
+                        format!("router: up — {}", active.join(", "))
+                    };
+                    if let Some(a) = &self.live_activity {
+                        text.push_str(&format!(" · {a}"));
+                    }
+                    (egui::Color32::from_rgb(0, 170, 0), text)
                 }
                 Some(router::RouterState::External { .. }) => {
                     (egui::Color32::from_rgb(220, 150, 0), "external server".into())

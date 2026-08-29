@@ -78,6 +78,55 @@ fn port_prefix(line: &str) -> Option<(u32, &str)> {
     Some((port, rest[end + 1..].trim_start()))
 }
 
+/// What the router was doing at the end of the log tail — the live
+/// activity indicator's brain (test-first 2026-08-29; born from two
+/// "is it even working?" sessions in two days). Pure over the tail;
+/// the poller supplies freshness (a hint is only shown while the log
+/// is actually growing).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Activity {
+    /// A turn was accepted; nothing streamed yet.
+    TurnStarted,
+    /// Long-prompt processing, percent complete (0-100).
+    Prefilling(f64),
+    /// A turn just completed at this generation speed.
+    TurnFinished { tps: f64 },
+}
+
+pub fn activity_hint(tail: &str) -> Option<Activity> {
+    for line in tail.lines().rev() {
+        if line.contains("prompt processing, n_tokens")
+            && let Some(i) = line.find("progress = ")
+        {
+            let rest = &line[i + "progress = ".len()..];
+            let num: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect();
+            if let Ok(p) = num.parse::<f64>() {
+                return Some(Activity::Prefilling(p * 100.0));
+            }
+        }
+        if line.contains("launch_slot") && line.contains("processing task") {
+            return Some(Activity::TurnStarted);
+        }
+        if line.contains("| ") && line.contains(" eval time =") && !line.contains("prompt") {
+            // "…(   33.39 ms per token,    29.94 tokens per second)"
+            if let Some(i) = line.rfind(',') {
+                let num: String = line[i + 1..]
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                if let Ok(tps) = num.parse::<f64>() {
+                    return Some(Activity::TurnFinished { tps });
+                }
+            }
+        }
+    }
+    None
+}
+
 /// The port of the child server instance currently serving `model`,
 /// mined from the router's spawn lines (the LAST one wins — the router
 /// respawns on every load and the log keeps history). Slot save/restore
@@ -315,6 +364,32 @@ mod tests {
         assert_eq!((s.turns, s.generated_tokens), (1, 70));
         assert_eq!(s.prompt_tokens, 285, "release 355 - generated 70");
         assert_eq!(s.reused_tokens, 285 - 286_u64.min(285), "processed 286 >= prompt: no reuse credit");
+    }
+
+    #[test]
+    fn activity_hint_reads_the_last_meaningful_line() {
+        // Contracts (test-first 2026-08-29): the LAST activity-bearing
+        // line wins; noise is ignored; completions beat the prefill
+        // progress that preceded them; an empty/quiet tail is None.
+        let prefill = "[41001] 0.35.083 I slot print_timing: id  0 | task 9 | prompt processing, n_tokens =    139, progress = 0.84, t = 18.04 s / 7.70 tokens per second";
+        let started = "[41001] 0.36.000 I slot launch_slot_: id  0 | task 10 | processing task, is_child = 0";
+        let finished = "[41001] 0.36.468 I slot print_timing: id  0 | task 9 |        eval time =     634.50 ms /    20 tokens (   33.39 ms per token,    29.94 tokens per second)";
+        let noise = "[41001] 0.36.470 I slot      release: id  0 | task 9 | stop processing: n_tokens = 184, truncated = 0";
+
+        assert_eq!(
+            activity_hint(&format!("{started}\n{prefill}\n")),
+            Some(Activity::Prefilling(84.0))
+        );
+        assert_eq!(
+            activity_hint(&format!("{prefill}\n{started}\n")),
+            Some(Activity::TurnStarted)
+        );
+        assert_eq!(
+            activity_hint(&format!("{prefill}\n{finished}\n{noise}\n")),
+            Some(Activity::TurnFinished { tps: 29.94 })
+        );
+        assert_eq!(activity_hint("just some unrelated lines\n"), None);
+        assert_eq!(activity_hint(""), None);
     }
 
     #[test]

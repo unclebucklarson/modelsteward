@@ -655,6 +655,12 @@ acquisition is storage-side.
   by inode so the shelf copy replaces the cache row. Solves both the
   "unoffered variant" quirk and "at the mercy of Ollama/HF" pruning.
 
+- ✔ Live activity indicator (built 2026-08-29, test-first): the status
+  bar now says what the router is DOING — "model (loading…)",
+  "prefilling 84%", "working…" — from router /models statuses plus a
+  pure log-tail classifier (evidence::activity_hint) gated by
+  log-growth freshness in the poller. Born from two is-it-even-working
+  sessions in two days.
 - Multi-GPU override UI (device pinning, per-device fit targets) — core
   is list-based already; UI lands when a second GPU exists to test with.
 - OpenCode deeper integration (default model selection, agent presets).
