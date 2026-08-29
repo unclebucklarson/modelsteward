@@ -410,11 +410,14 @@ pub fn near_misses(
         };
         let waived = purpose_waived(goal, b_ctx, ctx, imp);
         let (b_novel, b_rewrite) = if waived {
+            // Same dominance rule as the verdict: floors only from
+            // usable candidates giving at least as much of the goal.
             raced
                 .iter()
                 .filter(|(l, _)| *l != BASELINE)
                 .filter_map(|(_, r)| {
-                    (r.settled_ctx? >= crate::core::rows::AGENT_MIN_CTX)
+                    let c = r.settled_ctx?;
+                    (c >= crate::core::rows::AGENT_MIN_CTX && c >= ctx)
                         .then_some((r.tg_novel?, r.tg_rewrite?))
                 })
                 .fold((0.0f64, 0.0f64), |(n, w), (cn, cw)| (n.max(cn), w.max(cw)))
@@ -487,16 +490,23 @@ pub fn verdict(
             reason: "baseline lacks the goal metric — re-run the trial".into(),
         };
     };
-    // The price reference for waived candidates: the fastest speeds any
-    // agent-USABLE candidate achieved in this race.
-    let (ub_novel, ub_rewrite) = candidates
-        .iter()
-        .filter(|(l, _)| *l != BASELINE)
-        .filter_map(|(_, r)| {
-            (r.settled_ctx? >= crate::core::rows::AGENT_MIN_CTX)
-                .then_some((r.tg_novel?, r.tg_rewrite?))
-        })
-        .fold((0.0f64, 0.0f64), |(n, w), (cn, cw)| (n.max(cn), w.max(cw)));
+    // The price reference for a waived candidate: the fastest speeds
+    // among usable candidates that give AT LEAST AS MUCH of the goal —
+    // a config may not be vetoed by one that sacrifices the very thing
+    // being optimized (GLM live catch 2026-08-28: a 27k-ctx round at
+    // 18 t/s would have vetoed the 131k round at 13.6 — crowning a
+    // fifth of the context).
+    let usable_floor = |min_ctx: u64| {
+        candidates
+            .iter()
+            .filter(|(l, _)| *l != BASELINE)
+            .filter_map(|(_, r)| {
+                let c = r.settled_ctx?;
+                (c >= crate::core::rows::AGENT_MIN_CTX && c >= min_ctx)
+                    .then_some((r.tg_novel?, r.tg_rewrite?))
+            })
+            .fold((0.0f64, 0.0f64), |(n, w), (cn, cw)| (n.max(cn), w.max(cw)))
+    };
     // (label, primary, rewrite, waived)
     let mut best: Option<(&String, f64, f64, bool)> = None;
     let mut guard_rejected = 0usize;
@@ -532,6 +542,7 @@ pub fn verdict(
         // Fidelity is NEVER waived — quality is not a currency.
         let waived = purpose_waived(goal, b_ctx, ctx, imp);
         let (ref_novel, ref_rewrite, ctx_guarded) = if waived {
+            let (ub_novel, ub_rewrite) = usable_floor(ctx);
             (ub_novel, ub_rewrite, false)
         } else {
             (b_novel, b_rewrite, (ctx as f64) < b_ctx as f64 * ctx_floor)
@@ -1852,6 +1863,26 @@ mod tests {
         let base_usable = mk(59.2, 60.0, 100_000);
         let v2 = verdict(Goal::Context, &base_usable, &c);
         assert_eq!(v2.winner, None, "{}", v2.reason);
+    }
+
+    #[test]
+    fn small_usable_configs_cannot_veto_big_context_wins() {
+        // GLM live shape (2026-08-28): a barely-usable 27k round at
+        // baseline speed must not set the floor that vetoes the 131k
+        // round — floors come only from configs giving at least as
+        // much of the goal.
+        let mk = |novel: f64, rewrite: f64, ctx: u64| {
+            let mut t = r(novel, rewrite, ctx);
+            t.fidelity = Some(1.0);
+            t
+        };
+        let base = mk(18.4, 18.0, 4096);
+        let mut c = std::collections::BTreeMap::new();
+        c.insert("cpu-moe".to_string(), mk(13.6, 13.5, 131_072));
+        c.insert("ncpu-moe-40".to_string(), mk(15.1, 15.0, 111_104));
+        c.insert("ncpu-moe-32".to_string(), mk(18.0, 17.9, 27_136));
+        let v = verdict(Goal::Context, &base, &c);
+        assert_eq!(v.winner.as_deref(), Some("cpu-moe"), "{}", v.reason);
     }
 
     #[test]
