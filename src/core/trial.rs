@@ -253,6 +253,31 @@ pub fn checkpoint_variants() -> Vec<Variant> {
     ]
 }
 
+/// Rough minutes a campaign will take on THIS model, from its measured
+/// speeds — built 2026-08-28 after a user watched GLM (18 t/s) turn a
+/// "~1 hour" selection into three: the static per-campaign labels
+/// assume 27B-class speed, but every probe pays per token. Coarse on
+/// purpose (± a third); None when the model has no speed baseline yet.
+/// Per trial round: ~2,176 generated tokens + ~11,200 prefill tokens +
+/// load/overhead.
+pub fn campaign_eta_minutes(
+    menu_name: &str,
+    tg_tps: Option<f64>,
+    pp_tps: Option<f64>,
+) -> Option<f64> {
+    let tg = tg_tps.filter(|t| *t > 0.0)?;
+    let pp = pp_tps.filter(|p| *p > 0.0).unwrap_or(tg * 10.0);
+    let round_secs = 2176.0 / tg + 11_200.0 / pp + 25.0;
+    let rounds = match menu_name {
+        "quality" => {
+            // 6 evals (~800 gen each) + 5 tool shots + 3 multi-hop loops.
+            return Some(((6.0 * 800.0 + 3.0 * 500.0 + 5.0 * 60.0) / tg + 90.0) / 60.0);
+        }
+        name => menu(name).map(|(v, _)| v.len() + 1)? as f64,
+    };
+    Some(rounds * round_secs / 60.0)
+}
+
 /// A named menu: which variants to race and how to judge them.
 pub fn menu(name: &str) -> Option<(Vec<Variant>, Goal)> {
     match name {

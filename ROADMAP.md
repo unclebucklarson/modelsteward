@@ -507,6 +507,37 @@ Older items:
   tension, accepted for advisory-only use; becomes real work when
   multi-GPU hardware exists to test against).
 
+## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
+
+- **Campaign ETAs — ✔ BUILT same day (deterministic, no AI needed):**
+  the Lab sums a per-campaign estimate from the model's MEASURED tg/pp
+  (probe token budgets are known), warns loudly ≥90 min, and asks for
+  Measure+Bench first when no baseline exists. The 3-hour GLM surprise
+  can't recur unannounced.
+- **Advisor answerer should weigh SPEED alongside quality**: the
+  best-measured-quality rule can pick a 15-18 t/s giant to write a
+  fleet brief. Add a speed factor (quality-first, speed tie-break at
+  minimum), and consider a user-pinnable "advisor model". Candidate
+  small-but-capable resident: gpt-oss-20b (~13GB, fits VRAM whole,
+  strong tool discipline) — doubles as the fits-in-VRAM MoE control
+  the test matrix wants anyway.
+- **"Hand testing off to an AI"** — REJECTED with reasoning: campaign
+  orchestration, ETAs, and scheduling are deterministic and already
+  encoded; AI is never load-bearing here (standing rule). The AI's
+  role stays advisory (explain, brief, triage).
+- **Tuning-knowledge assistant — YES; RAG — NO (for now):** a vector
+  store over a curated knob corpus is heavy machinery whose failure
+  mode is confidently-stale advice, and llama.cpp semantics drift
+  weekly (this week alone: log grammar, fit-vs-override behavior).
+  The app's real, current knowledge is SMALL — the explain()
+  glossaries, the knob-review REJECTED list, the roadmap findings,
+  the findings JSON — well under a context window. Build instead: an
+  "Ask about tuning" advisory that prompt-grounds on that curated
+  corpus + the user's own measurements (no retrieval layer, no
+  embeddings to rot). Revisit RAG only if the corpus outgrows
+  context; the boundary rule stands (the user's notes-app RAG is a
+  Connections CLIENT, not this app's job).
+
 ## M9 — The Meter (queued 2026-08-27, design talk with user)
 
 **Premise:** local AI is not free — you pay in electricity and hardware

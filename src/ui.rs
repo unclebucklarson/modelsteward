@@ -2180,6 +2180,70 @@ impl App {
                      a snapshot/restore workflow would buy on your hardware. \
                      Nothing to apply yet; it prices the future feature.",
                 );
+                // Model-aware time estimate (user request 2026-08-28: a
+                // 3-hour GLM battery arrived unannounced — the static
+                // labels assume 27B-class speed). Measured, not guessed:
+                // scaled from this model's benched tg/pp.
+                {
+                    let m = self.measurements.get(&id);
+                    let tg = m.and_then(|m| m.tg_tps);
+                    let pp = m.and_then(|m| m.pp_tps);
+                    let selected: Vec<&str> = [
+                        (self.lab_spec, "spec"),
+                        (self.lab_ub, "ub"),
+                        (self.lab_kv, "kv"),
+                        (self.lab_quality, "quality"),
+                        (self.lab_load, "load"),
+                        (self.lab_dials, "dials"),
+                        (self.lab_moe, "moe"),
+                        (self.lab_vision, "vision"),
+                        (self.lab_cache, "cache"),
+                        (self.lab_ckpt, "ckpt"),
+                    ]
+                    .iter()
+                    .filter(|(on, _)| *on)
+                    .map(|(_, n)| *n)
+                    .collect();
+                    let mins: Option<f64> = selected
+                        .iter()
+                        .map(|n| trial::campaign_eta_minutes(n, tg, pp))
+                        .sum::<Option<f64>>();
+                    match mins {
+                        Some(total) if !selected.is_empty() => {
+                            let extra = 3.0 * (self.lab_measure as u8
+                                + self.lab_bench as u8
+                                + self.lab_slots as u8)
+                                as f64;
+                            let total = total + extra;
+                            let msg = if total >= 90.0 {
+                                format!(
+                                    "⚠ Estimated {:.0} min – {:.0} h at this model's \
+                                     measured speed — slow models pay per token; \
+                                     consider fewer campaigns per sitting",
+                                    total,
+                                    (total * 1.3 / 60.0).ceil()
+                                )
+                            } else {
+                                format!(
+                                    "Estimated ~{total:.0} min at this model's measured speed"
+                                )
+                            };
+                            if total >= 90.0 {
+                                ui.colored_label(ui.visuals().warn_fg_color, msg);
+                            } else {
+                                ui.small(msg);
+                            }
+                        }
+                        None if !selected.is_empty() => {
+                            ui.small(
+                                "No speed baseline yet — run Measure + Bench first \
+                                 for a time estimate (the static labels assume a \
+                                 fast 27B-class model).",
+                            );
+                        }
+                        _ => {}
+                    }
+                }
                 let idle = self.busy.is_none();
                 let any = self.lab_measure
                     || self.lab_bench
