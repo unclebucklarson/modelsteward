@@ -163,7 +163,12 @@ pub fn pick_server(cfg: &settings::AppConfig) -> Result<PathBuf> {
         .or(own.first())
         .or(managed.first())
         .map(|i| i.server_path.clone())
-        .ok_or_else(|| anyhow::anyhow!("no llama-server found; set one in Settings"))
+        .ok_or_else(|| anyhow::anyhow!(
+            "no llama-server found — pick one in the GUI (Settings tab), set \
+             \"server_bin\" in {}, or build one (GUI: Server → Build Advisor; \
+             CLI: --advise)",
+            config_file().display()
+        ))
 }
 
 pub fn router_config(cfg: &settings::AppConfig) -> router::RouterConfig {

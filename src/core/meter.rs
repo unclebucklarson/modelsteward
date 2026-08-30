@@ -407,7 +407,7 @@ pub fn fmt_report(
         } else if f.generated > 0 {
             out.push_str(
                 "measured local cost: no served config has an energy measurement yet — \
-                 run a Lab trial (any menu) to get J/token\n",
+                 run a trial (CLI: --trial <id> <menu>; GUI: Lab tab) to get J/token\n",
             );
         }
     }

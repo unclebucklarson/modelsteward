@@ -93,15 +93,16 @@ pub fn run(bench: &Path, model: &Path, extra_args: &[String]) -> Result<Baseline
 /// (Server → Bench). Unloads OUR router's models to free the GPU (a server
 /// we didn't start is never touched — it errors instead), then benches
 /// `target` if given, else every measured, non-embedding model whose
-/// baseline is missing or from another build. Returns how many were benched;
-/// per-model failures are narrated and skipped, not fatal.
+/// baseline is missing or from another build. Returns (benched, failed);
+/// per-model failures are narrated and skipped, not fatal — callers
+/// decide whether a partial run counts as success (usability review C5).
 pub fn run_baselines(
     cfg: &crate::core::settings::AppConfig,
     target: Option<String>,
     force: bool,
     cancel: &crate::core::cancel::CancelToken,
     progress: &mut dyn FnMut(String),
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     use crate::core::{discover, library, router, rows, system};
 
     let server = system::pick_server(cfg)?;
@@ -150,7 +151,7 @@ pub fn run_baselines(
             "nothing to bench — every measured model already has a baseline from this build"
                 .into(),
         );
-        return Ok(0);
+        return Ok((0, 0));
     }
 
     // Only now, with real work ahead, free the GPU: our router's resident
@@ -180,6 +181,7 @@ pub fn run_baselines(
 
     let total = targets.len();
     let mut benched = 0;
+    let mut failed = 0;
     for (i, id) in targets.iter().enumerate() {
         cancel.check()?;
         let n = i + 1;
@@ -232,10 +234,20 @@ pub fn run_baselines(
                 );
                 benched += 1;
             }
-            Err(e) => progress(format!("[{n}/{total}] {id}: bench failed: {e:#}")),
+            Err(e) => {
+                let msg = format!("{e:#}");
+                // A recognized cause gets its plain-language hint right
+                // in the narration (usability review C6).
+                let hint = match crate::core::diagnose::classify(&msg) {
+                    crate::core::diagnose::Cause::Unknown => String::new(),
+                    _ => format!(" — {}", crate::core::diagnose::short_hint(&msg)),
+                };
+                failed += 1;
+                progress(format!("[{n}/{total}] {id}: bench failed: {msg}{hint}"));
+            }
         }
     }
-    Ok(benched)
+    Ok((benched, failed))
 }
 
 #[cfg(test)]

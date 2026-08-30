@@ -736,9 +736,14 @@ impl App {
                 &cancel_token,
                 &mut progress,
             ) {
-                Ok(0) => Msg::Finished("bench: nothing to do — all baselines current".into()),
-                Ok(n) => Msg::Finished(format!(
+                Ok((0, 0)) => {
+                    Msg::Finished("bench: nothing to do — all baselines current".into())
+                }
+                Ok((n, 0)) => Msg::Finished(format!(
                     "benched {n} model(s) — Speed column updated (pp/tg tokens per second)"
+                )),
+                Ok((n, f)) => Msg::Finished(format!(
+                    "benched {n} model(s), {f} failed — the log lines above say why"
                 )),
                 Err(e) => Msg::Error(format!("bench: {e:#}")),
             });
@@ -4963,7 +4968,7 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
         }
         other => {
             let _ = tx.send(Msg::Error(format!(
-                "setup: port {} is not ours: {other:?}",
+                "setup: port {} is not ours: {other}",
                 cfg.port
             )));
             return false;

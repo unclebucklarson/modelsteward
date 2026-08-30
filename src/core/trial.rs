@@ -838,6 +838,56 @@ pub fn served_j_per_token(
 /// reasoning (user request 2026-08-25: the table isn't self-evident to
 /// someone just learning model optimization). Deterministic and testable;
 /// no model involved.
+/// An aligned results table for the CLI (usability review C11: the
+/// glossary described columns the terminal never printed — the numbers
+/// lived only in scrollback). The GUI has its own grid.
+pub fn fmt_results_table(raced: &std::collections::BTreeMap<String, TrialResult>) -> String {
+    let f1 = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
+    let f0 = |v: Option<f64>| v.map(|x| format!("{x:.0}")).unwrap_or_else(|| "—".into());
+    let pct = |v: Option<f64>| {
+        v.map(|x| format!("{:.0}%", x * 100.0)).unwrap_or_else(|| "—".into())
+    };
+    let mut rows: Vec<Vec<String>> = vec![
+        ["variant", "novel t/s", "rewrite t/s", "prefill t/s", "context", "2nd-turn ms", "J/tok", "fidelity", "accepted"]
+            .iter().map(|s| s.to_string()).collect(),
+    ];
+    for (label, r) in raced {
+        rows.push(vec![
+            label.clone(),
+            f1(r.tg_novel),
+            f1(r.tg_rewrite),
+            f0(r.pp_prefill),
+            r.settled_ctx.map(|c| c.to_string()).unwrap_or_else(|| "—".into()),
+            f0(r.turn2_prompt_ms),
+            r.j_per_token.map(|j| format!("{j:.2}")).unwrap_or_else(|| "—".into()),
+            pct(r.fidelity),
+            pct(r.accept_rewrite),
+        ]);
+    }
+    let widths: Vec<usize> = (0..rows[0].len())
+        .map(|i| rows.iter().map(|r| r[i].chars().count()).max().unwrap_or(0))
+        .collect();
+    rows.iter()
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .map(|(i, c)| {
+                    let pad = widths[i].saturating_sub(c.chars().count());
+                    if i == 0 {
+                        format!("{}{}", c, " ".repeat(pad))
+                    } else {
+                        format!("{}{}", " ".repeat(pad), c)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("  ")
+                .trim_end()
+                .to_string()
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn explain(report: &TrialReport) -> Vec<String> {
     let mut out = Vec::new();
     out.push(
@@ -1333,7 +1383,7 @@ pub fn run_slot_trial(
     match router::status(&dir, &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
         other => anyhow::bail!(
-            "the slot trial needs our router running on port {}; state is {other:?}",
+            "the slot trial needs our router running on port {}; {other}",
             cfg.port
         ),
     }
@@ -1513,7 +1563,7 @@ pub fn run_trial(
     match router::status(&dir, &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
         other => anyhow::bail!(
-            "trials need our router running on port {}; state is {other:?}",
+            "trials need our router running on port {}; {other}",
             cfg.port
         ),
     }
@@ -1710,6 +1760,34 @@ pub fn keep_variant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cli_results_table_prints_the_numbers_the_glossary_describes() {
+        // Usability review C11: the glossary used to describe a table
+        // that never printed. Every raced variant gets an aligned row;
+        // missing measurements render as an em dash, not a blank.
+        let mut raced = std::collections::BTreeMap::new();
+        raced.insert(
+            "baseline (moe)".to_string(),
+            TrialResult {
+                tg_novel: Some(13.6),
+                tg_rewrite: Some(20.1),
+                pp_prefill: Some(571.0),
+                settled_ctx: Some(131072),
+                fidelity: Some(1.0),
+                ..Default::default()
+            },
+        );
+        raced.insert("cpu-moe".to_string(), TrialResult::default());
+        let t = fmt_results_table(&raced);
+        let lines: Vec<&str> = t.lines().collect();
+        assert_eq!(lines.len(), 3, "header + two variants:\n{t}");
+        assert!(lines[0].starts_with("variant"), "{t}");
+        assert!(lines[1].contains("131072") && lines[1].contains("13.6"), "{t}");
+        assert!(lines[2].contains('—'), "unmeasured cells show a dash:\n{t}");
+        // Aligned: the header and rows share a width.
+        assert_eq!(lines[0].chars().count(), lines[0].trim_end().chars().count());
+    }
 
     fn r(novel: f64, rewrite: f64, ctx: u64) -> TrialResult {
         TrialResult {

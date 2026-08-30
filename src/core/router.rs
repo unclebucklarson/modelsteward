@@ -287,6 +287,28 @@ pub enum RouterState {
     Trouble { detail: String },
 }
 
+/// Plain sentences for user-facing messages (usability review C9/G13:
+/// `{:?}` was leaking Rust enum syntax at users).
+impl std::fmt::Display for RouterState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RouterState::Down => write!(f, "nothing is answering that port"),
+            RouterState::Ours { models } => {
+                write!(f, "our router is up ({} models)", models.len())
+            }
+            RouterState::External { detail } => write!(
+                f,
+                "another server (not started by this app) is using the port — {detail}. \
+                 This app observes it but won't touch it; change the port or stop that server"
+            ),
+            RouterState::Trouble { detail } => write!(
+                f,
+                "our router should be there but the port isn't answering — {detail}"
+            ),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RouterModel {
     pub id: String,
@@ -1043,6 +1065,18 @@ mod tests_flags {
 mod tests {
     use super::*;
     use crate::core::library::Source;
+
+    #[test]
+    fn router_state_display_is_plain_language() {
+        // Usability review C9/G13: no Rust enum syntax at users.
+        let ext = RouterState::External { detail: "llama-server pid 4242".into() };
+        let text = format!("{ext}");
+        assert!(!text.contains('{') && !text.contains("External"), "{text}");
+        assert!(text.contains("won't touch"), "{text}");
+        assert!(format!("{}", RouterState::Down).contains("nothing is answering"));
+        let ours = RouterState::Ours { models: vec![] };
+        assert!(format!("{ours}").contains("0 models"));
+    }
 
     fn model(path: &str) -> ModelFile {
         ModelFile {

@@ -42,14 +42,16 @@
 //!
 //! Ports default to the configured value (~/.config/modelsteward/config.json).
 
-use modelsteward::core::{advisor, bench, cancel, discover, opencode, router, settings, system, trial};
+use modelsteward::core::{
+    advisor, bench, cancel, diagnose, discover, opencode, router, settings, system, trial,
+};
 use std::path::PathBuf;
 
 const USAGE: &str = "usage: modelsteward [no args → GUI] | --setup | --scan|--preset [dir ...] \
 | --start|--status|--reload|--stop [port] | --calibrate [port] [force] | --bench [id] [force] \
 | --trial <id> [spec|ub|kv|load|dials|moe|vision|cache|ckpt|slots] [keep <variant>|keep baseline] \
 | --quality <id> [shots] | --meter [today|24h|7d] | --sync [port] | --verify-rebuild | --report \
-| --advise | --install-service | --help | --version";
+| --advise | --config | --install-service | --help | --version";
 
 const HELP: &str = "modelsteward — measured, not guessed: a llama.cpp router manager that tunes \
 local models and keeps OpenAI-compatible apps configured from real measurements.
@@ -73,7 +75,11 @@ local models and keeps OpenAI-compatible apps configured from real measurements.
   --verify-rebuild      after a rebuild: restart, re-measure, report
   --report              shareable findings report (sanitized md + JSON)
   --advise              build advisor report
+  --config              print the config file path + effective settings
   --install-service     write a systemd user unit for the router
+
+exit codes: 0 ok · 1 error · 2 bad usage · 3 partial (some models measured/benched, some failed)
+streams: progress → stderr, results → stdout (safe to pipe/redirect results)
 
 files: config ~/.config/modelsteward/config.json · preset router.ini (same dir)
        measurements/trials/meter ~/.local/state/modelsteward/
@@ -97,6 +103,9 @@ fn main() {
         None => {
             if let Err(e) = modelsteward::ui::run() {
                 eprintln!("GUI failed: {e}");
+                eprintln!(
+                    "(no display? the CLI works everywhere — run `modelsteward --help`)"
+                );
                 std::process::exit(1);
             }
             Ok(())
@@ -110,22 +119,33 @@ fn main() {
         Some("--preset") => system::write_preset(&cfg, &paths_from(&args[1..])).map(|(path, n)| {
             println!("wrote {} with {n} models", path.display());
         }),
-        Some("--start") => start(&with_port(&cfg, &args[1..])),
-        Some("--status") => {
-            let cfg = with_port(&cfg, &args[1..]);
-            let state = router::status(&router::state_dir(), &system::router_config(&cfg));
+        Some("--start") => with_port(&cfg, &args[1..]).and_then(|c| start(&c)),
+        Some("--status") => with_port(&cfg, &args[1..]).map(|c| {
+            let state = router::status(&router::state_dir(), &system::router_config(&c));
             println!("{}", serde_json::to_string_pretty(&state).unwrap());
-            Ok(())
-        }
-        Some("--reload") => router::reload(with_port(&cfg, &args[1..]).port).map(|models| {
-            println!("{}", serde_json::to_string_pretty(&models).unwrap());
         }),
+        Some("--reload") => with_port(&cfg, &args[1..])
+            .and_then(|c| router::reload(c.port))
+            .map(|models| {
+                println!("{}", serde_json::to_string_pretty(&models).unwrap());
+            }),
         Some("--stop") => router::stop(&router::state_dir(), &system::preset_path()),
         Some("--calibrate") => {
             let force = args[1..].iter().any(|a| a == "force");
-            calibrate(&with_port(&cfg, &args[1..]), force)
+            with_port(&cfg, &args[1..]).and_then(|c| calibrate(&c, force))
         }
-        Some("--sync") => sync(&with_port(&cfg, &args[1..])),
+        Some("--sync") => with_port(&cfg, &args[1..]).and_then(|c| {
+            if c.port != cfg.port {
+                // Usability review C14: a one-off port bakes into
+                // opencode.json and outlives this run.
+                eprintln!(
+                    "note: writing baseURL for port {} into opencode.json, but your \
+                     configured port is {} — agents point at {} until you --sync again",
+                    c.port, cfg.port, c.port
+                );
+            }
+            sync(&c)
+        }),
         Some("--advise") => {
             let server = system::pick_server(&cfg).ok();
             let build = server.as_deref().and_then(discover::build_of);
@@ -153,48 +173,13 @@ fn main() {
         Some("--trial") => trial_cmd(&cfg, &args[1..]),
         Some("--verify-rebuild") => verify_rebuild(&cfg),
         Some("--quality") => quality_cmd(&cfg, &args[1..]),
-        Some("--meter") => {
-            // Harvest the live log first so the report is current, then
-            // print the requested range (UTC hour buckets).
-            use modelsteward::core::meter;
-            let dir = router::state_dir();
-            let now = advisor::now_epoch();
-            if let Ok(text) = std::fs::read_to_string(dir.join("router.log")) {
-                let _ = meter::harvest(&dir, &text, now);
-            }
-            let (label, since) = match args.get(1).map(String::as_str) {
-                Some("today") => ("today (UTC)", Some(now - now % 86_400)),
-                Some("24h") => ("last 24h", Some(now.saturating_sub(86_400))),
-                Some("7d") => ("last 7 days", Some(now.saturating_sub(7 * 86_400))),
-                _ => ("all time", None),
-            };
-            let r = meter::report(&meter::read_all(&dir), since, None);
-            let trials = trial::read_trials(&dir);
-            let j: std::collections::BTreeMap<String, f64> = r
-                .per_model
-                .keys()
-                .filter_map(|m| {
-                    trials
-                        .get(m)
-                        .and_then(|t| trial::served_j_per_token(&cfg, m, t))
-                        .map(|j| (m.clone(), j))
-                })
-                .collect();
-            let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
-            print!(
-                "{}",
-                meter::fmt_report(
-                    &r,
-                    label,
-                    cfg.cloud_price_per_mtok,
-                    Some((&cost, cfg.kwh_price_usd)),
-                )
-            );
-            Ok(())
-        }
+        Some("--meter") => meter_cmd(&cfg, args.get(1).map(String::as_str)),
         Some("--report") => match modelsteward::core::report::generate(&cfg) {
             Ok(path) => {
+                // Usability review C18: TWO shareable files are written;
+                // the warning must cover both.
                 println!("findings report written: {}", path.display());
+                println!("machine-readable twin: {}", path.with_extension("json").display());
                 println!(
                     "review it before sharing — it is sanitized (no paths/usernames) but \
                      the judgment is yours; nothing is ever sent by the app"
@@ -209,6 +194,19 @@ fn main() {
                 "activate: systemctl --user daemon-reload && systemctl --user enable --now llamacpp-router"
             );
         }),
+        Some("--config") => {
+            // Usability review C21/C8: make the effective settings and
+            // their file inspectable — a corrupt or surprising config
+            // becomes diagnosable in one command.
+            println!("config file:   {}", system::config_file().display());
+            println!(
+                "measurements:  {}",
+                router::state_dir().join("measurements.json").display()
+            );
+            println!("effective settings:");
+            println!("{}", serde_json::to_string_pretty(&cfg).unwrap());
+            Ok(())
+        }
         Some("--help" | "-h" | "help") => {
             // Usability review C1: --help used to look like a crash
             // (usage → stderr, exit 2). Full help, stdout, exit 0.
@@ -230,17 +228,72 @@ fn main() {
     }
 }
 
+/// The token-ledger report. Split out of main so a bad range can be a
+/// real error (usability review C12: `--meter 30d` silently printed
+/// all-time).
+fn meter_cmd(cfg: &settings::AppConfig, range: Option<&str>) -> anyhow::Result<()> {
+    use modelsteward::core::meter;
+    let dir = router::state_dir();
+    let now = advisor::now_epoch();
+    // Harvest the live log first so the report is current, then print
+    // the requested range (UTC hour buckets).
+    if let Ok(text) = std::fs::read_to_string(dir.join("router.log")) {
+        let _ = meter::harvest(&dir, &text, now);
+    }
+    let (label, since) = match range {
+        Some("today") => ("today (UTC)", Some(now - now % 86_400)),
+        Some("24h") => ("last 24h", Some(now.saturating_sub(86_400))),
+        Some("7d") => ("last 7 days", Some(now.saturating_sub(7 * 86_400))),
+        None => ("all time", None),
+        Some(other) => anyhow::bail!(
+            "unknown range {other:?} — valid: today, 24h, 7d (no range = all time)"
+        ),
+    };
+    let r = meter::report(&meter::read_all(&dir), since, None);
+    let trials = trial::read_trials(&dir);
+    let j: std::collections::BTreeMap<String, f64> = r
+        .per_model
+        .keys()
+        .filter_map(|m| {
+            trials
+                .get(m)
+                .and_then(|t| trial::served_j_per_token(cfg, m, t))
+                .map(|jt| (m.clone(), jt))
+        })
+        .collect();
+    let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
+    print!(
+        "{}",
+        meter::fmt_report(&r, label, cfg.cloud_price_per_mtok, Some((&cost, cfg.kwh_price_usd)))
+    );
+    Ok(())
+}
+
 /// M7 baselines: run llama-bench (pp512 + tg128) per model and store the
 /// tokens/sec beside the context measurements. The logic lives in
 /// core::bench::run_baselines, shared with the GUI's Server → Bench items.
 fn bench_baselines(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let force = rest.iter().any(|a| a == "force");
     let target = rest.iter().find(|a| *a != "force").cloned();
-    let n = bench::run_baselines(cfg, target, force, &cancel::CancelToken::default(), &mut |line| {
-        println!("{line}")
-    })?;
+    let (n, failed) =
+        bench::run_baselines(cfg, target, force, &cancel::CancelToken::default(), &mut |line| {
+            eprintln!("{line}")
+        })?;
     if n > 0 {
-        println!("{n} model(s) benched — Speed column and measurements.json updated");
+        println!(
+            "{n} model(s) benched, {failed} failed — baselines stored in \
+             measurements.json (the Library's Speed column)"
+        );
+    } else if failed == 0 {
+        // Usability review C15: silence looked like a hang.
+        println!("all baselines current — nothing to do (add `force` to re-run, or name a model id)");
+    }
+    if n == 0 && failed > 0 {
+        anyhow::bail!("every bench failed — the lines above say why");
+    }
+    if failed > 0 {
+        // Partial failure: scripted callers must not read this as green.
+        std::process::exit(3);
     }
     Ok(())
 }
@@ -260,7 +313,7 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
             cfg,
             model,
             &cancel::CancelToken::default(),
-            &mut |line| println!("{line}"),
+            &mut |line| eprintln!("{line}"),
         )?;
         return Ok(());
     }
@@ -288,8 +341,12 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         &variants,
         goal,
         &cancel::CancelToken::default(),
-        &mut |line| println!("{line}"),
+        &mut |line| eprintln!("{line}"),
     )?;
+    // The numbers themselves, aligned (usability review C11: the glossary
+    // used to describe a table that was never printed).
+    println!("{}", trial::fmt_results_table(&report.raced));
+    println!();
     match &report.verdict.winner {
         Some(w) => println!(
             "verdict: {w} wins — apply with: modelsteward --trial {model} {menu_name} keep {w}"
@@ -314,11 +371,16 @@ fn quality_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()>
     let Some(model) = rest.first() else {
         anyhow::bail!("--quality needs a model id");
     };
-    let shots: u32 = rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let shots: u32 = match rest.get(1) {
+        Some(s) => s.parse().map_err(|_| {
+            anyhow::anyhow!("shots must be a number, got {s:?} — e.g. --quality {model} 10")
+        })?,
+        None => 5,
+    };
     match router::status(&router::state_dir(), &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
         other => anyhow::bail!(
-            "quality probe needs our router on port {}; state is {other:?}",
+            "quality probe needs our router on port {}; {other}",
             cfg.port
         ),
     }
@@ -327,7 +389,7 @@ fn quality_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()>
         model,
         shots,
         &cancel::CancelToken::default(),
-        &mut |l| println!("{l}"),
+        &mut |l| eprintln!("{l}"),
     )?;
     println!(
         "{model}: eval battery {:.0}% ({}/{}), tool-call reliability {:.0}% over {} shots",
@@ -345,12 +407,17 @@ fn paths_from(rest: &[String]) -> Vec<PathBuf> {
 }
 
 /// A positional port argument overrides the configured one for this run.
-fn with_port(cfg: &settings::AppConfig, rest: &[String]) -> settings::AppConfig {
+/// A positional that ISN'T a port is an error, not a silent no-op
+/// (usability review C12: `--start 80800` used to quietly use the
+/// configured port).
+fn with_port(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<settings::AppConfig> {
     let mut cfg = cfg.clone();
-    if let Some(p) = rest.first().and_then(|p| p.parse().ok()) {
-        cfg.port = p;
+    if let Some(a) = rest.iter().find(|a| *a != "force") {
+        cfg.port = a.parse().map_err(|_| {
+            anyhow::anyhow!("not a port: {a:?} (expected a number 1-65535)")
+        })?;
     }
-    cfg
+    Ok(cfg)
 }
 
 fn start(cfg: &settings::AppConfig) -> anyhow::Result<()> {
@@ -379,7 +446,7 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     match router::status(&dir, &system::router_config(cfg)) {
         router::RouterState::Ours { .. } => {}
         other => anyhow::bail!(
-            "calibration needs our router running on port {}; state is {other:?}. \
+            "measuring needs our router running on port {}; {other}. \
              Try --start first.",
             cfg.port
         ),
@@ -398,14 +465,38 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &mut |line| {
         eprintln!("{line}");
     })?;
+    let (mut measured, mut failed) = (0usize, 0usize);
     for (id, m) in &results {
         match (&m.n_ctx, &m.error) {
-            (Some(ctx), _) => println!("{id}: settled context {ctx}"),
-            (None, Some(e)) => println!("{id}: FAILED — {e}"),
+            (Some(ctx), _) => {
+                measured += 1;
+                println!("{id}: settled context {ctx} tokens");
+            }
+            (None, Some(e)) => {
+                failed += 1;
+                println!("{id}: FAILED — {e}");
+                // The same plain-language brain the GUI's Why? uses
+                // (usability review C6).
+                println!(
+                    "  ↳ {}",
+                    diagnose::diagnose(Some(e), false, false, None, id).explanation
+                );
+            }
             _ => println!("{id}: unmeasured"),
         }
     }
-    println!("stored in {}", dir.join("measurements.json").display());
+    println!(
+        "{measured} measured, {failed} failed — stored in {}",
+        dir.join("measurements.json").display()
+    );
+    if measured == 0 && failed > 0 {
+        anyhow::bail!("every model failed to measure — the lines above say why");
+    }
+    if failed > 0 {
+        // Usability review C5: `--calibrate && --sync` must not read
+        // green on a partial run. 3 = partial failure.
+        std::process::exit(3);
+    }
     Ok(())
 }
 
@@ -521,7 +612,7 @@ fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
             println!();
             anyhow::ensure!(up, "router did not come up within 30s — see router.log");
         }
-        other => anyhow::bail!("port {} is not ours to set up: {other:?}", cfg.port),
+        other => anyhow::bail!("port {} is not ours to set up: {other}", cfg.port),
     }
     calibrate(cfg, false)?;
     sync(cfg)
@@ -542,7 +633,7 @@ fn verify_rebuild(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         }
         router::RouterState::Down => {}
         other => anyhow::bail!(
-            "port {} is not ours to restart ({other:?}) — verification needs our router",
+            "port {} is not ours to restart ({other}) — verification needs our router",
             cfg.port
         ),
     }
