@@ -299,7 +299,33 @@ pub fn resolve_menu_arg(arg: Option<&str>) -> Result<&str> {
 /// startup means a restore is owed.
 pub fn arm_trial_marker(dir: &Path, model: &str) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(dir.join("trial-in-progress"), model).map_err(Into::into)
+    // Line 2 is the arming process's PID: heal must be able to tell a
+    // LIVE trial from a dead one (live incident 2026-08-30: a
+    // `--version` from a second terminal "healed" a running campaign,
+    // yanking its trial preset mid-round).
+    std::fs::write(
+        dir.join("trial-in-progress"),
+        format!("{model}\n{}", std::process::id()),
+    )
+    .map_err(Into::into)
+}
+
+/// Parse a marker file: (model, PID of the process that armed it).
+/// Old markers (pre-PID) have no second line.
+pub fn marker_fields(contents: &str) -> (String, Option<u32>) {
+    let mut lines = contents.lines();
+    let model = lines.next().unwrap_or_default().to_string();
+    (model, lines.next().and_then(|p| p.trim().parse().ok()))
+}
+
+/// Is the arming process still alive AND still this program? (PID
+/// reuse would otherwise let an unrelated process block healing.)
+/// Thin /proc probe — the decision logic lives in marker_fields +
+/// heal, which are tested.
+fn marker_owner_alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/comm"))
+        .map(|c| c.contains("modelsteward"))
+        .unwrap_or(false)
 }
 
 pub fn clear_trial_marker(dir: &Path) {
@@ -317,7 +343,14 @@ pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
     if !trial_marker_present(&dir) {
         return None;
     }
-    let model = std::fs::read_to_string(dir.join("trial-in-progress")).unwrap_or_default();
+    let (model, pid) = marker_fields(
+        &std::fs::read_to_string(dir.join("trial-in-progress")).unwrap_or_default(),
+    );
+    // A live owner means the trial is RUNNING, not interrupted — leave
+    // its preset alone.
+    if pid.is_some_and(marker_owner_alive) {
+        return None;
+    }
     let _ = system::write_preset(cfg, &[]);
     let _ = router::reload(cfg.port);
     clear_trial_marker(&dir);
@@ -2397,6 +2430,19 @@ mod tests {
         assert!(trial_marker_present(dir.path()));
         clear_trial_marker(dir.path());
         assert!(!trial_marker_present(dir.path()));
+        // Live incident 2026-08-30: `--version` from a second terminal
+        // healed a RUNNING campaign (marker present, owner alive),
+        // yanking its trial preset mid-round. The marker now carries
+        // the arming PID so heal can tell live from dead.
+        arm_trial_marker(dir.path(), "some-model").unwrap();
+        let raw = std::fs::read_to_string(dir.path().join("trial-in-progress")).unwrap();
+        let (model, pid) = marker_fields(&raw);
+        assert_eq!(model, "some-model");
+        assert_eq!(pid, Some(std::process::id()));
+        // Pre-PID markers (old builds) parse with no owner — heal
+        // treats those as interrupted, as before.
+        assert_eq!(marker_fields("legacy-model"), ("legacy-model".into(), None));
+        assert_eq!(marker_fields(""), (String::new(), None));
     }
 
     #[test]

@@ -5363,9 +5363,54 @@ impl eframe::App for App {
                 .resizable(false)
                 .open(&mut self.show_about)
                 .show(ui.ctx(), |ui| {
-                    ui.label(format!("modelsteward {}", env!("CARGO_PKG_VERSION")));
+                    let id = system::build_id();
+                    ui.horizontal(|ui| {
+                        ui.strong(format!("modelsteward {id}"));
+                        if ui
+                            .small_button("copy")
+                            .on_hover_text(
+                                "Copies the build id — paste it into a bug report \
+                                 so we can dial into this exact build.",
+                            )
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(id.clone());
+                        }
+                    });
                     ui.label("Manages llama.cpp (router mode) + OpenCode config.");
                     ui.label("Measured, not guessed.");
+                    ui.add_space(6.0);
+                    ui.hyperlink_to(
+                        "Project home (GitHub)",
+                        "https://github.com/unclebucklarson/modelsteward",
+                    );
+                    ui.hyperlink_to(
+                        "User's guide — the first hour",
+                        "https://github.com/unclebucklarson/modelsteward/blob/main/docs/GUIDE.md",
+                    );
+                    ui.hyperlink_to(
+                        "Releases & changelog",
+                        "https://github.com/unclebucklarson/modelsteward/releases",
+                    );
+                    // Pre-fill the issue with the build id: the whole
+                    // point of carrying one (user request 2026-08-29).
+                    let enc: String = id
+                        .bytes()
+                        .map(|b| match b {
+                            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'.' | b'-' => {
+                                (b as char).to_string()
+                            }
+                            _ => format!("%{b:02X}"),
+                        })
+                        .collect();
+                    ui.hyperlink_to(
+                        "Report a bug or send feedback",
+                        format!(
+                            "https://github.com/unclebucklarson/modelsteward/issues/new?body=Build%3A%20{enc}"
+                        ),
+                    );
+                    ui.add_space(6.0);
+                    ui.weak("Dual-licensed MIT OR Apache-2.0.");
                 });
         }
 

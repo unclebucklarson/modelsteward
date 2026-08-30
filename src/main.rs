@@ -86,6 +86,21 @@ files: config ~/.config/modelsteward/config.json · preset router.ini (same dir)
 docs:  https://github.com/unclebucklarson/modelsteward";
 
 fn main() {
+    // Pure-info commands answer before ANY state work — no migrations,
+    // no config load, and above all no trial-heal (live incident
+    // 2026-08-30: `--version` beside a running GUI campaign triggered
+    // the heal and yanked the trial's preset mid-round).
+    match std::env::args().nth(1).as_deref() {
+        Some("--help" | "-h" | "help") => {
+            println!("{HELP}");
+            return;
+        }
+        Some("--version" | "-V") => {
+            println!("modelsteward {}", system::build_id());
+            return;
+        }
+        _ => {}
+    }
     // Runs before anything reads config/state: the 2026-08-26 rename
     // moved both directories, and the data must follow the name.
     for note in system::migrate_snap_strays() {
@@ -214,7 +229,8 @@ fn main() {
             Ok(())
         }
         Some("--version" | "-V") => {
-            println!("modelsteward {}", env!("CARGO_PKG_VERSION"));
+            // Full build identity — what a bug report should carry.
+            println!("modelsteward {}", system::build_id());
             Ok(())
         }
         _ => {

@@ -23,6 +23,18 @@ pub fn config_dir() -> PathBuf {
     settings::xdg_dir("XDG_CONFIG_HOME", ".config")
 }
 
+/// The full build identity for About and `--version`: version, git
+/// describe (or "release" for tarball/crates.io builds), build date.
+/// One string a bug report can carry that pins the exact software.
+pub fn build_id() -> String {
+    format!(
+        "{} ({}, {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("STEWARD_BUILD_GIT"),
+        env!("STEWARD_BUILD_DATE"),
+    )
+}
+
 pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
 }
@@ -337,6 +349,16 @@ pub fn write_preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn build_id_pins_the_exact_software() {
+        // User request 2026-08-29: a bug report must identify the
+        // build. Version + git describe (or "release") + date.
+        let id = build_id();
+        assert!(id.starts_with(env!("CARGO_PKG_VERSION")), "{id}");
+        assert!(id.contains('(') && id.ends_with(')'), "{id}");
+        assert!(!id.contains("(, "), "git field must never be empty: {id}");
+    }
 
     #[test]
     fn systemd_unit_runs_llama_server_with_our_preset() {
