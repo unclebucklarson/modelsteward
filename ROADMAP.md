@@ -551,6 +551,24 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
+- **Connections p2 gets its driver: pi-agent + hermes-agent config
+  sync (external request via Scott, 2026-08-30 — the project's first
+  outside feature ask).** Design settled with Scott: a `Connector`
+  trait in core (probe/diff/apply/backup + a capabilities declaration
+  per agent — context limits? tool flags?); opencode.rs becomes the
+  first implementation (pure refactor, testable, can start now); each
+  new agent lands test-first against fixture files made from REAL
+  sample configs. GUI: NO re-org — Connections is the agent-config
+  home (per the 2026-08-29 tab-semantics decision): one collapsible
+  section per detected agent, same ✔/⟳/✖/? mirror as OpenCode. Sync
+  (CLI + File menu) fans out to enabled connectors. BLOCKED ON
+  REQUIREMENTS from the requester: exact repos/docs for both agents, a
+  sanitized sample config from a working install of each, how each
+  selects models + honors context limits, config reload behavior,
+  comment-preservation expectations. Formats are never guessed —
+  measured, not guessed applies to schemas too. Requester becomes the
+  live-validation tester (they have the installs).
+
 - **✔ Build-corner design session (2026-08-30, all four BUILT same
   day):** Scott's nitpicks, decided via mocked options. (1) Analyzing
   selector now offers every DISCOVERED install's checkout (not just
