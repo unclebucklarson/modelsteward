@@ -14,7 +14,7 @@ Every knob below was chosen by the app's trial harness — raced against
 alternatives on this machine, winner applied by hand:
 
 | Knob | Value | How it was chosen |
-| --- | --- |---|
+| --- | --- | --- |
 | Speculation | `ngram-simple` | spec trial: +121% rewrite speed at 45% draft acceptance, zero VRAM cost |
 | Speculation dials | `n=8, m=64` | dials trial winner |
 | Context | 111,360 tokens | what `--fit` measured on this GPU (not the model card's number) |
