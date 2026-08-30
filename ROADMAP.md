@@ -257,7 +257,14 @@ recommendations became the Lab's standing recommendation blocks.
 
 ## Work queue — next up (ordered; 2026-08-29)
 
-1. **BENCHED BUG (top priority when work resumes): advisories fail on
+1. ✔ FIXED 2026-08-30 (v0.6.0): advisories now send BOTH reasoning
+   kwargs (enable_thinking:false + reasoning_effort:"low" — templates
+   ignore what they don't know), and an empty answer falls back to the
+   reasoning channel, labeled, instead of erroring. Test-pinned
+   (advisory_kwargs/extract_answer). LIVE VALIDATION PENDING: asking
+   gpt-oss would evict the Minecraft session (models_max=1) — run one
+   advisory when the machine is free. Original diagnosis kept below.
+   Was: **BENCHED BUG (top priority when work resumes): advisories fail on
    gpt-oss** — "produced no answer (reasoning channel)". Diagnosed:
    RouterAdvisor sends only `enable_thinking:false` (Qwen-family
    kwarg); gpt-oss's Harmony template listens to `reasoning_effort`

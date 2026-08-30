@@ -30,6 +30,47 @@ pub struct RouterAdvisor {
     pub model: String,
 }
 
+/// The kwargs every advisory request sends. Two dialects, one truth
+/// (BENCHED BUG fixed 2026-08-30, diagnosed 2026-08-29): Qwen-family
+/// templates listen to `enable_thinking`; gpt-oss's Harmony template
+/// ignores it and listens to `reasoning_effort` — both verified in
+/// llama.cpp's common/chat.cpp. Send BOTH; templates ignore kwargs
+/// they don't know.
+pub fn advisory_template_kwargs() -> serde_json::Value {
+    serde_json::json!({ "enable_thinking": false, "reasoning_effort": "low" })
+}
+
+/// Pull the answer out of a chat completion: `content` when present;
+/// otherwise fall back to the reasoning channel — a model that
+/// deliberated its whole budget still usually SAID the useful thing
+/// there, and a labeled fallback beats "produced no answer".
+pub fn extract_answer(body: &serde_json::Value) -> Result<String> {
+    let msg = body
+        .get("choices")
+        .and_then(|c| c.get(0))
+        .and_then(|c| c.get("message"));
+    let text = |key: &str| {
+        msg.and_then(|m| m.get(key))
+            .and_then(|s| s.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(content) = text("content") {
+        return Ok(content);
+    }
+    if let Some(reasoning) = text("reasoning_content") {
+        return Ok(format!(
+            "(the model never finalized an answer — this is its reasoning \
+             channel, read with that in mind)\n\n{reasoning}"
+        ));
+    }
+    anyhow::bail!(
+        "the model produced no answer (it may have spent its whole \
+         token budget on its reasoning channel) — try again or ask a \
+         different model"
+    )
+}
+
 impl Advisor for RouterAdvisor {
     fn ask(&self, system: &str, user: &str) -> Result<String> {
         let body: serde_json::Value =
@@ -44,9 +85,8 @@ impl Advisor for RouterAdvisor {
                     // Reasoning-channel models think before they answer —
                     // a 49k-token fleet brief burned 500, then 2500 tokens
                     // of pure thinking with zero content (found live
-                    // 2026-08-28). Ask for the answer, not the deliberation;
-                    // templates without the kwarg ignore it.
-                    "chat_template_kwargs": { "enable_thinking": false },
+                    // 2026-08-28; gpt-oss's dialect found live 2026-08-29).
+                    "chat_template_kwargs": advisory_template_kwargs(),
                     // Advisory prompts must not seed the server's prompt
                     // cache — the app MEASURES that cache (review catch
                     // 2026-08-28: a 49k-token brief would have skewed the
@@ -57,20 +97,7 @@ impl Advisor for RouterAdvisor {
                 }))
                 .context("advisor request")?
                 .into_json()?;
-        body.get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|c| c.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|s| s.as_str())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "the model produced no answer (it may have spent its whole \
-                     token budget on its reasoning channel) — try again or ask a \
-                     different model"
-                )
-            })
+        extract_answer(&body)
     }
 
     fn describe(&self) -> String {
@@ -282,6 +309,35 @@ pub fn log_tail_for(log: &str, model: &str, n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn advisory_kwargs_speak_both_reasoning_dialects() {
+        // BENCHED BUG, fixed 2026-08-30: the fleet brief on gpt-oss-20b
+        // failed with "produced no answer" because only enable_thinking
+        // was sent and Harmony listens to reasoning_effort. Both kwargs
+        // ship on every advisory; unknown kwargs are ignored by templates.
+        let k = advisory_template_kwargs();
+        assert_eq!(k["enable_thinking"], false);
+        assert_eq!(k["reasoning_effort"], "low");
+    }
+
+    #[test]
+    fn empty_content_falls_back_to_the_reasoning_channel_labeled() {
+        let body = serde_json::json!({"choices": [{"message": {
+            "content": "", "reasoning_content": "The fastest quality model is gpt-oss."
+        }}]});
+        let a = extract_answer(&body).unwrap();
+        assert!(a.contains("reasoning channel"), "{a}");
+        assert!(a.contains("gpt-oss"), "{a}");
+        // Real content wins outright, no label.
+        let body = serde_json::json!({"choices": [{"message": {
+            "content": "Use cpu-moe.", "reasoning_content": "hmm"
+        }}]});
+        assert_eq!(extract_answer(&body).unwrap(), "Use cpu-moe.");
+        // Nothing at all is still an honest error.
+        let body = serde_json::json!({"choices": [{"message": {"content": ""}}]});
+        assert!(extract_answer(&body).is_err());
+    }
 
     fn meas(
         eval: Option<f64>,
