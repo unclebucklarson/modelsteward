@@ -170,6 +170,10 @@ drafting tokens cheaply and letting the model confirm them.
 
 ## Quick start
 
+New here? **[docs/GUIDE.md](docs/GUIDE.md)** walks the whole first
+hour — install to tuned, metered serving — with what you should see at
+every step.
+
 ```sh
 cargo run --release            # the GUI
 ```

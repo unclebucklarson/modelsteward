@@ -218,7 +218,9 @@ last Lab selection set in config.json (they're already config-shaped).
   all actions (Load/Tune/shelf/Why?/Disable/In-OpenCode), and a visible
   History section (also resolves G25's discoverability). G10 partially
   addressed (grid header hovers); trial-table headers still pending in
-  P3. Tab-semantics question still open for Scott.
+  P3. Tab-semantics: DECIDED by Scott 2026-08-29 — the OpenCode
+  mirror STAYS inside Connections; the generalization was deliberate.
+  Closed.
 - 2026-08-29, dev session (P3 GUI batch): G9 addressed — worker says
   "measuring finished" to match the GUI's Measure; CLI errors say
   "measuring needs…"; the Tuning Guide gains a "Same thing, different

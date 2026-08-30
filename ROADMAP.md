@@ -271,8 +271,8 @@ recommendations became the Lab's standing recommendation blocks.
 2. ✔ Library master-detail BUILT 2026-08-29 (Scott chose it from three
    mocked options): slim 8-column grid + filter + advice sort;
    selection detail panel with full advice, quality scores, every
-   action, and visible history (G25 resolved). Tab-semantics question
-   (OpenCode mirror inside Connections) still awaits Scott's yes/no.
+   action, and visible history (G25 resolved). Tab-semantics DECIDED
+   2026-08-29: OpenCode mirror stays inside Connections (Scott's yes).
 3. ✔ Usability P3 batch DONE 2026-08-29 (two commits): CLI exit codes
    + diagnosis + parse errors + --config; Lab (k/n) progress + inline
    Cancel; trial-header hovers; Settings "Apply now" button; vocabulary
@@ -280,8 +280,15 @@ recommendations became the Lab's standing recommendation blocks.
    Was: Usability P3 batch: CLI diagnose + exit codes, vocabulary
    unification, trial-header hovers, Settings offers actions not
    instructions, G11 progress/cancel placement.
-4. Then: QA / user-guide / remaining-work discussion (user-requested).
-5. README screenshot (D17) once one is saved to disk.
+4. ✔ QA/guides/work-left discussion HELD 2026-08-29 (The Steward's
+   Map brief). Scott's decisions: tab semantics = Connections keeps the
+   mirror; QA = release checklist + pre-tag review now, CLI harness
+   later (docs/RELEASE-CHECKLIST.md); docs/GUIDE.md written (Scott
+   working through it); next tag = v0.5.1 (tagged). Lab gained a
+   where-settings-live note (user question → feature, per the rule).
+5. gpt-oss advisor reasoning_effort fix — NOW the top dev item (see 1).
+6. README screenshot (D17) once one is saved to disk.
+7. Help → First Run (D10) — small, next polish pass.
 
 ## Where things stand (2026-08-29, 165 tests green — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 

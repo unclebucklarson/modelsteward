@@ -2158,6 +2158,15 @@ impl App {
             "Pick a model, pick campaigns, Run. Every number is measured on this \
              machine; winners are offered, never auto-applied.",
         );
+        // User question 2026-08-29 ("where do the lab settings go?") —
+        // answer it on the page, not just in a hover.
+        ui.weak(
+            "Where applied settings live: Apply stores a winner as this model's \
+             override in the app's config.json, rewrites the router preset \
+             (router.ini), and reloads the router — llama-server gets those flags \
+             next time it loads this model. opencode.json never carries these \
+             knobs; it only gets the measured results (context limit, tool support).",
+        );
         ui.separator();
         let candidates: Vec<(String, String)> = self
             .rows
