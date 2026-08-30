@@ -19,7 +19,7 @@ jobs:
   build-and-release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # A tag that doesn't match Cargo.toml ships a mislabeled binary and
       # a doomed crate publish — fail fast (learned from v0.2.0's first
       # attempt, which tagged while Cargo.toml still said 0.1.0).
@@ -51,7 +51,7 @@ jobs:
           (cd dist && sha256sum $NAME.tar.gz > $NAME.tar.gz.sha256)
       - name: Publish release
         if: github.event_name == 'push'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.tar.gz
@@ -67,7 +67,7 @@ jobs:
     needs: build-and-release
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Skip if this version is already on crates.io
         id: check
         run: |

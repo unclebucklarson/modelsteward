@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # eframe (winit/glow) and rfd (GTK file dialogs) need these to BUILD;
       # nothing graphical runs in CI.
       - name: Install system dependencies
