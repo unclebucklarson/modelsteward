@@ -19,6 +19,7 @@ pub mod ollama;
 pub mod quality;
 pub mod report;
 pub mod opencode;
+pub mod piagent;
 pub mod router;
 pub mod rows;
 pub mod settings;

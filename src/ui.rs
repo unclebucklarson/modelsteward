@@ -13,7 +13,7 @@
 
 use crate::core::{
     advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, meter,
-    ollama, opencode, router, rows, settings, system, trial,
+    ollama, opencode, piagent, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -1084,8 +1084,11 @@ impl App {
         let measurements = self.measurements.clone();
         self.spawn("syncing opencode.json", move |tx| {
             match run_sync(&cfg, &measurements) {
-                Ok(report) => {
+                Ok((report, pi_line)) => {
                     let _ = tx.send(Msg::SyncDone(report));
+                    if let Some(l) = pi_line {
+                        let _ = tx.send(Msg::Progress(l));
+                    }
                     send_configured(tx);
                 }
                 Err(e) => {
@@ -3327,6 +3330,107 @@ impl App {
         ui.separator();
         ui.strong("OpenCode (synced connector)");
         self.opencode_section(ui);
+        ui.add_space(8.0);
+        ui.separator();
+        self.pi_section(ui);
+    }
+
+    /// pi coding agent (Connections p2, first external request —
+    /// 2026-08-30). Same shape as the OpenCode mirror: what we wrote,
+    /// what it means, and the one action. Absent install says so
+    /// plainly rather than hiding — a reader shouldn't wonder whether
+    /// the app looked.
+    fn pi_section(&mut self, ui: &mut egui::Ui) {
+        let path = piagent::default_models_path();
+        let installed = piagent::pi_present(&path);
+        ui.strong("pi coding agent (synced connector)");
+        if !installed {
+            ui.small(format!(
+                "Not installed — nothing to sync. Looked for {}. \
+                 Install pi and the next sync writes a provider there.",
+                path.parent().map(|p| p.display().to_string()).unwrap_or_default()
+            ));
+            return;
+        }
+        ui.label(format!("Config: {}", path.display()));
+        ui.small(
+            "We own only the 'modelsteward' provider in this file; everything else \
+             (your own providers, models, settings) is left untouched and backed up \
+             before every write. pi's own llama.cpp integration assumes a 128k \
+             context when the router doesn't report one — these entries carry the \
+             context each model MEASURED on this machine instead.",
+        );
+        ui.add_space(4.0);
+        let entries = piagent::configured_models(&path);
+        if entries.is_empty() {
+            ui.small(
+                "No modelsteward provider in pi's config yet — press Sync below (or \
+                 File -> Set Up Everything).",
+            );
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("pi-models")
+                .max_height(160.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("pi-grid").striped(true).show(ui, |ui| {
+                        ui.strong("Model (pi id)");
+                        ui.strong("Context written");
+                        ui.strong("Status");
+                        ui.end_row();
+                        for (id, ctx) in &entries {
+                            ui.label(id);
+                            ui.label(ctx.to_string());
+                            // Same verdict vocabulary as the OpenCode
+                            // mirror: does what we wrote still match
+                            // what we measure today?
+                            let measured = self
+                                .measurements
+                                .get(id)
+                                .and_then(|m| m.n_ctx)
+                                .map(opencode::safety_context);
+                            match measured {
+                                Some(want) if want == *ctx => {
+                                    ui.colored_label(egui::Color32::from_rgb(0, 170, 0), "✔ synced")
+                                }
+                                Some(want) => ui.colored_label(
+                                    ui.visuals().warn_fg_color,
+                                    format!("⟳ differs (measured {want})"),
+                                ),
+                                None => ui.colored_label(
+                                    ui.visuals().weak_text_color(),
+                                    "? no current measurement",
+                                ),
+                            };
+                            ui.end_row();
+                        }
+                    });
+                });
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(self.busy.is_none(), egui::Button::new("Sync pi + OpenCode"))
+                .on_disabled_hover_text("another operation is running")
+                .on_hover_text(
+                    "Writes every measured model into both agents' configs (same \
+                     action as Sync all measured above).",
+                )
+                .clicked()
+            {
+                self.action_sync();
+            }
+            if ui
+                .small_button("open config")
+                .on_hover_text("Open pi's models.json in your editor")
+                .clicked()
+            {
+                match std::process::Command::new("xdg-open").arg(&path).spawn() {
+                    Ok(_) => self.log(format!("opened {}", path.display())),
+                    Err(e) => self.log(format!("ERROR opening {}: {e}", path.display())),
+                }
+            }
+            ui.weak("In pi: /model to pick one of these.");
+        });
     }
 
     fn opencode_section(&mut self, ui: &mut egui::Ui) {
@@ -3773,8 +3877,11 @@ impl App {
                 return;
             }
             match run_sync(&cfg, &measurements) {
-                Ok(report) => {
+                Ok((report, pi_line)) => {
                     let _ = tx.send(Msg::SyncDone(report));
+                    if let Some(l) = pi_line {
+                        let _ = tx.send(Msg::Progress(l));
+                    }
                     send_configured(tx);
                     let _ = tx.send(Msg::Finished(
                         "settings applied: router restarted, preset regenerated, opencode.json synced".into(),
@@ -5322,10 +5429,14 @@ fn run_calibration(
     )
 }
 
+/// Sync every connected agent: opencode.json (the original) and, when
+/// pi is installed, its models.json (Connections p2, 2026-08-30). The
+/// second return is a human line about the pi side, None when pi
+/// isn't installed.
 fn run_sync(
     cfg: &settings::AppConfig,
     measurements: &router::Measurements,
-) -> anyhow::Result<opencode::SyncReport> {
+) -> anyhow::Result<(opencode::SyncReport, Option<String>)> {
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let vision = router::vision_ids_in_preset(&system::preset_path());
     let desired: Vec<_> = measurements
@@ -5361,7 +5472,27 @@ fn run_sync(
         report.orphans.retain(|id| !ghosts.contains(id));
         report.ghosts_commented = ghosts;
     }
-    Ok(report)
+    // pi coding agent (Connections p2): measured contexts into
+    // ~/.pi/agent/models.json — pi's native router integration assumes
+    // 128k when the router doesn't say (measured 2026-08-30).
+    let pi_path = piagent::default_models_path();
+    let pi_line = match piagent::sync_file(
+        &pi_path,
+        &format!("http://127.0.0.1:{}/v1", cfg.port),
+        &desired,
+    ) {
+        Ok(r) if r.skipped_missing => None,
+        Ok(r) => Some(format!(
+            "pi agent synced ({}): {} added, {} updated, {} removed{}",
+            pi_path.display(),
+            r.added.len(),
+            r.updated.len(),
+            r.removed.len(),
+            if r.created_file { " — models.json created" } else { "" },
+        )),
+        Err(e) => Some(format!("pi agent sync FAILED: {e:#}")),
+    };
+    Ok((report, pi_line))
 }
 
 /// Sync exactly one measured model into opencode.json.
@@ -5585,8 +5716,11 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
     let _ = tx.send(Msg::Measurements(measurements.clone()));
     step("syncing opencode.json");
     match run_sync(cfg, &measurements) {
-        Ok(report) => {
+        Ok((report, pi_line)) => {
             let _ = tx.send(Msg::SyncDone(report));
+            if let Some(l) = pi_line {
+                let _ = tx.send(Msg::Progress(l));
+            }
             send_configured(tx);
             let _ = tx.send(Msg::Progress(
                 "setup complete — OpenCode is ready to use these models".into(),

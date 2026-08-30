@@ -551,7 +551,24 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
-- **Connections p2 gets its driver: pi-agent + hermes-agent config
+- **✔ pi-agent connector SHIPPED 2026-08-30** (first external request,
+  half one). Schema read from earendil-works/pi
+  `src/core/model-config.ts` + the live install; connector owns ONLY
+  `providers.modelsteward` in ~/.pi/agent/models.json, backs up before
+  every write, refuses commented files rather than flattening them,
+  idempotent. THE REASON IT EARNS ITS KEEP (measured): pi HAS native
+  llama.cpp support, but its provider takes context from the router's
+  /models metadata and our router reports n_ctx=null for unloaded
+  models — so pi assumes 128000 for everything. Live-validated: 18
+  models written with measured contexts (daily driver 105,728 not
+  128,000; gemma-4-31B 59,136 — pi would have overrun it by 2.2x),
+  vision flags from the preset, user's ollama provider byte-identical.
+  Wired into every sync path (GUI action, Set Up Everything, Apply
+  Settings, CLI --sync) + a Connections mirror with ✔/⟳/? verdicts.
+  NEXT (hermes-agent): needs the same requirements — repo/docs, a
+  sanitized sample config, how it selects models, reload behavior.
+  Original ask below.
+  **Connections p2 gets its driver: pi-agent + hermes-agent config
   sync (external request via Scott, 2026-08-30 — the project's first
   outside feature ask).** Design settled with Scott: a `Connector`
   trait in core (probe/diff/apply/backup + a capabilities declaration

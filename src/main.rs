@@ -43,7 +43,8 @@
 //! Ports default to the configured value (~/.config/modelsteward/config.json).
 
 use modelsteward::core::{
-    advisor, bench, cancel, diagnose, discover, opencode, router, settings, system, trial,
+    advisor, bench, cancel, diagnose, discover, opencode, piagent, router, settings, system,
+    trial,
 };
 use std::path::PathBuf;
 
@@ -546,6 +547,22 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         for id in &report.orphans {
             println!("  ? {id}");
         }
+    }
+    // pi coding agent (Connections p2, 2026-08-30): measured context
+    // windows into ~/.pi/agent/models.json — pi's native router
+    // integration assumes 128k when the router doesn't report n_ctx.
+    let pi_path = piagent::default_models_path();
+    match piagent::sync_file(&pi_path, &base_url, &desired) {
+        Ok(r) if r.skipped_missing => {}
+        Ok(r) => println!(
+            "pi agent synced ({}): {} added, {} updated, {} removed{}",
+            pi_path.display(),
+            r.added.len(),
+            r.updated.len(),
+            r.removed.len(),
+            if r.created_file { " — models.json created" } else { "" },
+        ),
+        Err(e) => eprintln!("pi agent sync FAILED: {e:#}"),
     }
     Ok(())
 }
