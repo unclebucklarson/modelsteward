@@ -5120,7 +5120,15 @@ impl App {
             ui.label(text);
             ui.separator();
             if let Some((free, total)) = self.live_vram {
-                ui.label(format!("VRAM: {free} / {total} MiB free"));
+                // used/total, matching nvidia-smi's orientation — the
+                // old "{free} / {total} MiB free" read as a used/total
+                // meter and looked wildly wrong (user report 2026-08-30;
+                // the NUMBER was correct, the label lied).
+                ui.label(format!(
+                    "VRAM: {} / {total} MiB used · {free} free",
+                    total.saturating_sub(free)
+                ))
+                .on_hover_text("Live from nvidia-smi, whole card (all processes), ~2s refresh.");
                 ui.separator();
             }
             if let Some(scan) = &self.scan {
