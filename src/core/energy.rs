@@ -194,7 +194,7 @@ mod tests {
     #[test]
     fn counter_delta_handles_wraparound() {
         assert_eq!(counter_delta(100, 250, 1000), 150);
-        // Wrapped: 900 → top (1000) is 100, plus 50 past zero.
+        // Wrapped: 900 -> top (1000) is 100, plus 50 past zero.
         assert_eq!(counter_delta(900, 50, 1000), 150);
         assert_eq!(counter_delta(0, 0, 1000), 0);
     }
@@ -212,20 +212,20 @@ mod tests {
         };
         // (3000 - 250) + (500 - 100) = 3150
         assert_eq!(s.marginal_j(&idle), Some(3150.0));
-        // Idle hotter than the window → clamps to zero, not negative.
+        // Idle hotter than the window -> clamps to zero, not negative.
         let hot_idle = Baseline {
             gpu_w: Some(400.0),
             cpu_w: Some(100.0),
         };
         assert_eq!(s.marginal_j(&hot_idle), Some(0.0));
-        // CPU untracked (RAPL root-locked) → GPU-only, honestly partial.
+        // CPU untracked (RAPL root-locked) -> GPU-only, honestly partial.
         let gpu_only = EnergySample {
             secs: 10.0,
             gpu_j: Some(3000.0),
             cpu_j: None,
         };
         assert_eq!(gpu_only.marginal_j(&idle), Some(2750.0));
-        // Nothing measurable → None, never a guess.
+        // Nothing measurable -> None, never a guess.
         let none = EnergySample {
             secs: 10.0,
             gpu_j: None,

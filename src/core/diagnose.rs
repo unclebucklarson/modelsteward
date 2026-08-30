@@ -122,7 +122,7 @@ pub fn diagnose(
         );
         let (explanation, remedies) = match cause {
             Cause::NeedsNewerBuild => match build_is_current {
-                // Newest build still rejects it → the file itself is the
+                // Newest build still rejects it -> the file itself is the
                 // outlier (typically an Ollama-specific conversion).
                 Some(true) => (
                     "Your llama.cpp is already the newest build, and it still can't \

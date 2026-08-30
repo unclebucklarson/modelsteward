@@ -94,6 +94,7 @@ enum Pane {
 
 /// A deferred row action, collected during rendering and executed after
 /// (so table closures never need `&mut self`).
+#[derive(Clone)]
 enum RowAction {
     Load(String),
     Unload(String),
@@ -139,6 +140,7 @@ struct App {
     tuning_question: String,
     settings_needs_apply: bool,
     show_meter: bool,
+    confirm_disrupt: Option<(String, Disrupt)>,
     meter_report: String,
     meter_report_range: Option<&'static str>,
     library_filter: String,
@@ -211,6 +213,18 @@ enum AfterStart {
     },
 }
 
+/// A deferred action waiting behind the interrupt-confirmation dialog
+/// (user request 2026-08-30, after nearly disturbing a live overnight
+/// coding session): anything that would reload/unload/evict while the
+/// router is actively serving asks first.
+#[derive(Clone)]
+enum Disrupt {
+    Row(RowAction),
+    Dispatch(AfterStart, bool),
+    Stop,
+    ApplySettings,
+}
+
 impl AfterStart {
     fn describe(&self) -> String {
         match self {
@@ -258,7 +272,7 @@ struct OverrideEditor {
     extra_text: String,
     promoted: Vec<PromotedField>,
     /// The optimized context baseline: what --fit measured on this machine
-    /// (None = not measured yet → auto).
+    /// (None = not measured yet -> auto).
     optimized_ctx: Option<u64>,
     /// This model has a vision projector available on disk.
     has_mmproj: bool,
@@ -333,6 +347,7 @@ impl App {
             tuning_question: String::new(),
             settings_needs_apply: false,
             show_meter: false,
+            confirm_disrupt: None,
             meter_report: String::new(),
             meter_report_range: None,
             library_filter: String::new(),
@@ -494,7 +509,7 @@ impl App {
             let mut pending_autobuild: Option<u64> = None;
             loop {
                 let cfg = system::load_config();
-                // router_config → pick_server probes every install with
+                // router_config -> pick_server probes every install with
                 // --version/--list-devices; doing that every 2s scaled
                 // with the archive count and dragged the whole machine.
                 // The pick only shifts when config or installs change —
@@ -697,7 +712,7 @@ impl App {
                                 let _ = tx2.send(Msg::Progress(match result {
                                     Ok(b) => format!(
                                         "[auto-build] b{b} built + archived — select it \
-                                         in Settings → llama-server binary when you \
+                                         in Settings -> llama-server binary when you \
                                          want to serve it"
                                     ),
                                     Err(e) => format!("[auto-build] failed: {e:#}"),
@@ -792,6 +807,14 @@ impl App {
     }
 
     fn action_stop(&mut self) {
+        if let Some(msg) = self.serving_disruption("Stopping the router") {
+            self.confirm_disrupt = Some((msg, Disrupt::Stop));
+            return;
+        }
+        self.action_stop_now();
+    }
+
+    fn action_stop_now(&mut self) {
         self.spawn("stopping router", |tx| {
             let _ = tx.send(
                 match router::stop(&router::state_dir(), &system::preset_path()) {
@@ -811,8 +834,8 @@ impl App {
     /// dead-end error. External servers are untouched: those actions keep
     /// their plain refusal.
     /// Persist a trial choice (winner, near-miss, or "baseline" to revert)
-    /// through every config layer: override → preset → router reload →
-    /// measurement → OpenCode limit. Keeps need no router prompt —
+    /// through every config layer: override -> preset -> router reload ->
+    /// measurement -> OpenCode limit. Keeps need no router prompt —
     /// keep_variant tolerates a down router (reload is best-effort).
     fn spawn_keep(&mut self, model: &str, menu: &str, label: &str) {
         let cfg = self.cfg.clone();
@@ -861,6 +884,21 @@ impl App {
     }
 
     fn dispatch(&mut self, action: AfterStart, start_first: bool) {
+        // start_first means the router was down — nothing to disturb.
+        if !start_first
+            && let Some(msg) = self.serving_disruption(&format!(
+                "Starting \"{}\" (campaigns unload models and swap configs to \
+                 measure honestly)",
+                action.describe()
+            ))
+        {
+            self.confirm_disrupt = Some((msg, Disrupt::Dispatch(action, start_first)));
+            return;
+        }
+        self.dispatch_now(action, start_first);
+    }
+
+    fn dispatch_now(&mut self, action: AfterStart, start_first: bool) {
         let cfg = self.cfg.clone();
         self.cancel_token = cancel::CancelToken::default();
         let cancel_token = self.cancel_token.clone();
@@ -993,8 +1031,8 @@ impl App {
         });
     }
 
-    /// The one-click flow: preset if missing → start if down → wait →
-    /// incremental calibrate → sync. Each step narrates.
+    /// The one-click flow: preset if missing -> start if down -> wait ->
+    /// incremental calibrate -> sync. Each step narrates.
     fn action_setup(&mut self) {
         let cfg = self.cfg.clone();
         self.spawn("setting up everything", move |tx| {
@@ -1002,7 +1040,80 @@ impl App {
         });
     }
 
+    /// Some(message) when interrupting live serving is a real risk:
+    /// our router, with a model loaded — strengthened when the activity
+    /// monitor sees a request in flight right now.
+    fn serving_disruption(&self, what: &str) -> Option<String> {
+        let Some(router::RouterState::Ours { models }) = &self.router_state else {
+            return None;
+        };
+        let loaded: Vec<&str> = models
+            .iter()
+            .filter(|m| matches!(m.status.as_str(), "loaded" | "loading"))
+            .map(|m| m.id.as_str())
+            .collect();
+        if loaded.is_empty() {
+            return None;
+        }
+        let activity = match &self.live_activity {
+            Some(a) => format!(", mid-request right now ({a})"),
+            None => String::new(),
+        };
+        Some(format!(
+            "{} is live on the router{activity}.\n\n{what} will interrupt it — \
+             an in-flight coding turn from OpenCode (or anything else connected) \
+             would fail or stall.",
+            loaded.join(", ")
+        ))
+    }
+
+    /// Which row actions actually disturb serving — and only when they
+    /// do: a Load into a FREE slot evicts nothing and passes silently.
+    fn disruption_for_row(&self, action: &RowAction) -> Option<String> {
+        let loaded: Vec<String> = match &self.router_state {
+            Some(router::RouterState::Ours { models }) => models
+                .iter()
+                .filter(|m| matches!(m.status.as_str(), "loaded" | "loading"))
+                .map(|m| m.id.clone())
+                .collect(),
+            _ => return None,
+        };
+        let evicting_load = |id: &String| {
+            !loaded.contains(id) && loaded.len() >= self.cfg.models_max as usize
+        };
+        match action {
+            RowAction::Unload(id) => {
+                self.serving_disruption(&format!("Unloading {id}"))
+            }
+            RowAction::Load(id) if evicting_load(id) => self.serving_disruption(&format!(
+                "Loading {id} (the router will evict a loaded model to make room)"
+            )),
+            RowAction::AddToOpenCode(id)
+                if evicting_load(id)
+                    && self
+                        .measurements
+                        .get(id)
+                        .and_then(|m| m.n_ctx)
+                        .is_none() =>
+            {
+                self.serving_disruption(&format!(
+                    "Adding {id} to OpenCode (it is unmeasured, so it loads once \
+                     to measure — evicting a loaded model)"
+                ))
+            }
+            _ => None,
+        }
+    }
+
     fn run_row_action(&mut self, action: RowAction) {
+        if let Some(msg) = self.disruption_for_row(&action) {
+            self.confirm_disrupt = Some((msg, Disrupt::Row(action)));
+            return;
+        }
+        self.run_row_action_now(action);
+    }
+
+    fn run_row_action_now(&mut self, action: RowAction) {
         let cfg = self.cfg.clone();
         match action {
             RowAction::Load(id) => {
@@ -1189,7 +1300,7 @@ impl App {
                         match crate::core::library::archive_to_shelf(&model, &shelf_root) {
                             Ok(dest) => {
                                 let _ = tx.send(Msg::Progress(format!(
-                                    "archived → {} (hardlinked when possible; yours now)",
+                                    "archived -> {} (hardlinked when possible; yours now)",
                                     dest.display()
                                 )));
                                 // Make it servable: regenerate preset, tell
@@ -1214,7 +1325,7 @@ impl App {
                                 }
                                 let report = system::scan_report(&cfg, &[]);
                                 // The measurement follows the file to its new
-                                // alias (fingerprints cleared → re-measures
+                                // alias (fingerprints cleared -> re-measures
                                 // next calibrate); the old cache-id row stops
                                 // claiming it.
                                 if let Some(old) = &old_id
@@ -1226,7 +1337,7 @@ impl App {
                                     router::migrate_measurement(&mut all, old, new);
                                     if router::write_measurements(&dir, &all).is_ok() {
                                         let _ = tx.send(Msg::Progress(format!(
-                                            "measurement carried over: {old} → {new}"
+                                            "measurement carried over: {old} -> {new}"
                                         )));
                                         let _ = tx.send(Msg::Measurements(all));
                                     }
@@ -1301,7 +1412,7 @@ impl App {
                         // ending), so restart, then measure + sync, then
                         // report what the rebuild actually changed.
                         let _ = tx.send(Msg::Progress(
-                            "rebuild complete ✓ — verifying what it changed…".into(),
+                            "rebuild complete ✔ — verifying what it changed…".into(),
                         ));
                         let dir = router::state_dir();
                         let before = router::read_measurements(&dir);
@@ -1435,14 +1546,14 @@ impl App {
                         && up > cur
                     {
                         self.log(format!(
-                            "llama.cpp upstream has b{up} (you run b{cur}) — Server → \
+                            "llama.cpp upstream has b{up} (you run b{cur}) — Server -> \
                              Check My llama.cpp for the guided update"
                         ));
                     }
                     self.upstream = Some(s);
                 }
                 Msg::PresetWritten(path, n) => {
-                    self.log(format!("preset written: {} models → {}", n, path.display()));
+                    self.log(format!("preset written: {} models -> {}", n, path.display()));
                     self.busy = None;
                 }
                 Msg::SyncDone(r) => {
@@ -1754,7 +1865,7 @@ impl App {
                     .join(", ")
             ));
             ui.label(
-                "Add a directory with GGUF files in Settings → Model scan \
+                "Add a directory with GGUF files in Settings -> Model scan \
                  directories, or pull a model with Ollama — it will appear here \
                  automatically.",
             );
@@ -1763,7 +1874,7 @@ impl App {
         if !self.measurements.values().any(|m| m.n_ctx.is_some()) {
             ui.colored_label(
                 ui.visuals().warn_fg_color,
-                "Nothing measured yet — File → Set Up Everything starts the router, \
+                "Nothing measured yet — File -> Set Up Everything starts the router, \
                  measures every model, and wires up OpenCode in one go.",
             );
             ui.add_space(4.0);
@@ -1772,7 +1883,7 @@ impl App {
         if !router_up {
             ui.horizontal(|ui| {
                 ui.label("Router is not running — Load and checkbox actions need it.");
-                if ui.button("▶ Start Router").clicked() {
+                if ui.button("⏵ Start Router").clicked() {
                     self.action_start();
                 }
             });
@@ -1842,7 +1953,7 @@ impl App {
                     .desired_width(220.0)
                     .hint_text("name contains…"),
             );
-            if !self.library_filter.is_empty() && ui.small_button("✕").clicked() {
+            if !self.library_filter.is_empty() && ui.small_button("✖").clicked() {
                 self.library_filter.clear();
             }
         });
@@ -1878,7 +1989,7 @@ impl App {
                         ui.strong(h).on_hover_text(match h {
                             "Measured ctx" => "The context window --fit actually settled on when this model was measured on THIS machine (hover a value for its history).",
                             "Speed" => "Measured baseline: prompt-processing / generation tokens per second (hover for history).",
-                            "OC" => "✓ = in opencode.json. Toggle in the detail panel below.",
+                            "OC" => "✔ = in opencode.json. Toggle in the detail panel below.",
                             _ => "Click a model to see its advice, actions, quality, and history below.",
                         });
                     }
@@ -1932,7 +2043,7 @@ impl App {
                             }
                         }
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
-                        ui.label(if r.in_opencode { "✓" } else { "—" });
+                        ui.label(if r.in_opencode { "✔" } else { "—" });
                         ui.end_row();
                     }
                 });
@@ -1957,7 +2068,7 @@ impl App {
             let mut badges: Vec<&str> = Vec::new();
             if r.vision { badges.push("👁 vision"); }
             if r.mtp { badges.push("⚡ MTP"); }
-            if r.embedding { badges.push("🧬 embedding"); }
+            if r.embedding { badges.push("⚛ embedding"); }
             if r.moe { badges.push("MoE"); }
             if !badges.is_empty() {
                 ui.weak(badges.join(" · "));
@@ -2277,7 +2388,7 @@ impl App {
                         "⚠ No MoE placement applied yet — bench, agent-turn trials \
                          (vision/cache/ckpt), and quality would all measure at the \
                          crushed default context. Run the MoE-offload trial FIRST and \
-                         Apply its winner, then the rest (Help → Tuning Guide).",
+                         Apply its winner, then the rest (Help -> Tuning Guide).",
                     );
                 }
                 let has_spec_kept =
@@ -2504,7 +2615,7 @@ impl App {
                     || self.lab_ckpt
                     || self.lab_slots;
                 if ui
-                    .add_enabled(any && idle, egui::Button::new("▶ Run selected campaigns"))
+                    .add_enabled(any && idle, egui::Button::new("⏵ Run selected campaigns"))
                     .on_disabled_hover_text("select at least one campaign — and nothing can start while another operation runs")
                     .on_hover_text(
                         "Runs in sequence, narrated in the activity log. Unloads models to \
@@ -2563,7 +2674,7 @@ impl App {
                         // The headline (user request 2026-08-28: nine
                         // verdict sentences made the reader do the
                         // summarizing): only ACTIONABLE winners — already-
-                        // applied ones collapse into the ✓ state.
+                        // applied ones collapse into the ✔ state.
                         let todo: Vec<String> = reports
                             .iter()
                             .filter_map(|(m, r)| {
@@ -2576,7 +2687,7 @@ impl App {
                         if todo.is_empty() && !applied_winners.is_empty() {
                             ui.colored_label(
                                 egui::Color32::from_rgb(0, 170, 0),
-                                "✓ current config matches every measured recommendation",
+                                "✔ current config matches every measured recommendation",
                             );
                         } else if !todo.is_empty() {
                             ui.colored_label(
@@ -2584,7 +2695,7 @@ impl App {
                                 format!("Recommended (not yet applied): {}", todo.join(" · ")),
                             );
                             ui.small(
-                                "★ green = winner awaiting your Apply · ✓ blue = winner \
+                                "★ green = winner awaiting your Apply · ✔ blue = winner \
                                  already applied. Different menus' winners stack — you \
                                  can want all of them at once.",
                             );
@@ -2876,7 +2987,7 @@ impl App {
                         ui.visuals().warn_fg_color,
                         format!(
                             "llama.cpp: b{up} available upstream (you run b{cur}{}) — \
-                             checked {age}. Server → Check My llama.cpp to update.",
+                             checked {age}. Server -> Check My llama.cpp to update.",
                             s.behind
                                 .map(|b| format!(", checkout {b} commits behind"))
                                 .unwrap_or_default()
@@ -2924,7 +3035,7 @@ impl App {
             Some(router::RouterState::Down) => {
                 ui.label("Router is down.");
                 ui.horizontal(|ui| {
-                    if ui.button("▶ Start Router").clicked() {
+                    if ui.button("⏵ Start Router").clicked() {
                         self.action_start();
                     }
                     if ui
@@ -3020,11 +3131,11 @@ impl App {
         ui.separator();
         // Always present, whatever the router state — the user couldn't
         // find the logs when this lived inside the Ours-only block
-        // (2026-08-30). Full file: Tools → Open Router Log.
+        // (2026-08-30). Full file: Tools -> Open Router Log.
         egui::CollapsingHeader::new("Router log (live tail)")
             .default_open(false)
             .show(ui, |ui| {
-                ui.weak("Last 16 KB, newest at the bottom. Tools → Open Router Log for the whole file.");
+                ui.weak("Last 16 KB, newest at the bottom. Tools -> Open Router Log for the whole file.");
                 egui::ScrollArea::vertical()
                     .max_height(280.0)
                     .stick_to_bottom(true)
@@ -3334,8 +3445,8 @@ impl App {
             ui.label(
                 "modelsteward drives llama.cpp's llama-server (b10216+). Either \
                  point the field above at an existing binary with Browse…, or let \
-                 the app build one for you: Server menu → Check My llama.cpp → \
-                 Managed llama.cpp → Set up (clone + build newest release).",
+                 the app build one for you: Server menu -> Check My llama.cpp -> \
+                 Managed llama.cpp -> Set up (clone + build newest release).",
             );
         }
         if let Some(scan) = &self.scan
@@ -3375,7 +3486,7 @@ impl App {
                             .find(|i| i.server_path == p)
                             .map(discover::install_alias)
                     })
-                    .map(|a| format!(" (currently → {a})"))
+                    .map(|a| format!(" (currently -> {a})"))
                     .unwrap_or_default();
                 let text = format!("Auto — newest of your own installs{auto_now}");
                 if self.cfg.server_bin.is_none() {
@@ -3503,7 +3614,7 @@ impl App {
                             Ok(()) => {
                                 self.log("settings saved");
                                 // Review G12: offer the follow-up, don't
-                                // instruct it (the hand-fix→feature rule,
+                                // instruct it (the hand-fix->feature rule,
                                 // applied to ourselves).
                                 if router_changed {
                                     self.settings_needs_apply = true;
@@ -3553,6 +3664,16 @@ impl App {
     /// change — stop, regen preset, start, sync. What the log used to
     /// tell the user to go do by hand.
     fn action_apply_settings(&mut self) {
+        if let Some(msg) =
+            self.serving_disruption("Applying settings (a full router restart)")
+        {
+            self.confirm_disrupt = Some((msg, Disrupt::ApplySettings));
+            return;
+        }
+        self.action_apply_settings_now();
+    }
+
+    fn action_apply_settings_now(&mut self) {
         let cfg = self.cfg.clone();
         let measurements = self.measurements.clone();
         self.spawn("applying settings: restarting router", move |tx| {
@@ -3640,7 +3761,7 @@ impl App {
     }
 
     /// The per-model override dialog: pin context, KV type, extra flags.
-    /// Saved to config.json → preset regenerated → router reloaded, so it
+    /// Saved to config.json -> preset regenerated -> router reloaded, so it
     /// takes effect on the model's next load. Changing flags makes the old
     /// measurement stale by fingerprint — the next measure catches it.
     fn override_dialog(&mut self, ctx: &egui::Context) {
@@ -3945,7 +4066,7 @@ impl App {
     /// archive the binaries. Deterministic end to end.
     fn action_managed_build(&mut self) {
         let Some(check) = self.build_check.clone() else {
-            self.log("run the build check first (Server → Check My llama.cpp)".to_string());
+            self.log("run the build check first (Server -> Check My llama.cpp)".to_string());
             return;
         };
         let sel = self
@@ -3961,7 +4082,7 @@ impl App {
             let _ = tx.send(match result {
                 Ok(b) => Msg::Finished(format!(
                     "managed llama.cpp built + archived b{b} — select it in Settings \
-                     → llama-server binary to serve it"
+                     -> llama-server binary to serve it"
                 )),
                 Err(e) => Msg::Error(format!("managed build: {e:#}")),
             });
@@ -4024,7 +4145,7 @@ impl App {
             })
             .collect();
         let port = self.cfg.port;
-        self.spawn(&format!("triaging b{cur}→b{up} against your models"), move |tx| {
+        self.spawn(&format!("triaging b{cur}->b{up} against your models"), move |tx| {
             let repo_s = repo.display().to_string();
             // Tags can lag the daily fetch (found live: b10630 running,
             // tag absent locally) — refresh them, then fall back to HEAD
@@ -4063,7 +4184,7 @@ impl App {
             use aiadvisor::Advisor as _;
             let _ = tx.send(match backend.ask(aiadvisor::SYSTEM, &prompt) {
                 Ok(text) => Msg::Advisory {
-                    subject: format!("update b{cur} → b{up}"),
+                    subject: format!("update b{cur} -> b{up}"),
                     model: backend.describe(),
                     text,
                 },
@@ -4112,7 +4233,7 @@ impl App {
     /// The advisor pane: every AI opinion from this session, newest first,
     /// each naming the model that wrote it. Opinions, not measurements —
     /// the label does the quarantining.
-    /// Help → the tuning sequence (user request 2026-08-28, after two
+    /// Help -> the tuning sequence (user request 2026-08-28, after two
     /// live lessons in one battery: measurements taken before a
     /// placement is applied reflect a config you'll never serve). The
     /// REAL guards are contextual (the Lab warns at the moment of
@@ -4123,6 +4244,44 @@ impl App {
         self.meter_report =
             system::meter_report_text(&self.cfg, self.meter_report_range, false)
                 .unwrap_or_else(|e| format!("meter: {e:#}"));
+    }
+
+    fn disrupt_window(&mut self, ctx: &egui::Context) {
+        let Some((msg, _)) = &self.confirm_disrupt else {
+            return;
+        };
+        let msg = msg.clone();
+        let mut verdict: Option<bool> = None;
+        egui::Window::new("Interrupt live serving?")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(440.0)
+            .show(ctx, |ui| {
+                ui.label(msg);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("⚠ Interrupt and continue").clicked() {
+                        verdict = Some(true);
+                    }
+                    if ui.button("Cancel — leave it serving").clicked() {
+                        verdict = Some(false);
+                    }
+                });
+            });
+        match verdict {
+            Some(true) => {
+                if let Some((_, action)) = self.confirm_disrupt.take() {
+                    match action {
+                        Disrupt::Row(a) => self.run_row_action_now(a),
+                        Disrupt::Dispatch(a, s) => self.dispatch_now(a, s),
+                        Disrupt::Stop => self.action_stop_now(),
+                        Disrupt::ApplySettings => self.action_apply_settings_now(),
+                    }
+                }
+            }
+            Some(false) => self.confirm_disrupt = None,
+            None => {}
+        }
     }
 
     fn meter_window(&mut self, ctx: &egui::Context) {
@@ -4189,7 +4348,7 @@ impl App {
                         ),
                         (
                             "1 · Measure + Bench",
-                            "Library → Load (or Lab → Measure/Bench). This gives every \
+                            "Library -> Load (or Lab -> Measure/Bench). This gives every \
                              later step its baseline: settled context, tool-call check, \
                              pp/tg speed — and the Lab's time estimates.",
                         ),
@@ -4610,7 +4769,7 @@ impl App {
                         && check.cmake
                         && check.dirty != Some(true);
                     if ui
-                        .add_enabled(can_rebuild, egui::Button::new("⬆ Update & Rebuild Now"))
+                        .add_enabled(can_rebuild, egui::Button::new("⏶ Update & Rebuild Now"))
                         .on_disabled_hover_text("needs a git checkout + cmake, a clean tree, and a branch (tag-pinned checkouts use the managed flow below)")
                         .on_hover_text(
                             "git pull --ff-only, then a full cmake build. Takes many minutes; \
@@ -4726,9 +4885,9 @@ impl App {
                             .add_enabled(
                                 self.busy.is_none() && check.cmake,
                                 egui::Button::new(if ms.present {
-                                    "⬇ Fetch + build newest release"
+                                    "⏷ Fetch + build newest release"
                                 } else {
-                                    "⬇ Set up (clone + build newest release)"
+                                    "⏷ Set up (clone + build newest release)"
                                 }),
                             )
                             .on_disabled_hover_text("needs cmake installed — and waits while another operation runs")
@@ -4754,7 +4913,7 @@ impl App {
                             ));
                             ui.small(
                                 "This window MAKES builds; choosing what serves \
-                                 happens in Settings → llama-server binary.",
+                                 happens in Settings -> llama-server binary.",
                             );
                         }
                     }
@@ -4829,7 +4988,7 @@ impl App {
                 Some(router::RouterState::Down) => (egui::Color32::GRAY, "router: down".into()),
                 None => (egui::Color32::GRAY, "checking…".into()),
             };
-            ui.colored_label(dot, "●");
+            ui.colored_label(dot, "⏺");
             ui.label(text);
             ui.separator();
             if let Some((free, total)) = self.live_vram {
@@ -5012,7 +5171,7 @@ fn trial_table_grid(
                 "J/tok" => "Marginal joules per generated token (GPU via NVML, CPU via RAPL when readable, idle draw subtracted) — the energy half of a token's cost.",
                 "fidelity" => "The quality gate: how much of a module the model was told to preserve came back verbatim. A drop means the config degrades output — no speed win survives that.",
                 "accepted" => "How many speculated tokens the model confirmed — higher acceptance = speculation is paying off.",
-                _ => "★ green = this menu's winner, waiting for your Apply. ✓ blue = a winner already applied and serving.",
+                _ => "★ green = this menu's winner, waiting for your Apply. ✔ blue = a winner already applied and serving.",
             });
         }
         ui.end_row();
@@ -5020,14 +5179,14 @@ fn trial_table_grid(
         for (label, r) in table {
             // Color = ACTION STATE, not ranking (user feedback
             // 2026-08-28: two same-green winners of different menus read
-            // as competing choices): green ★ needs your Apply; blue ✓ is
+            // as competing choices): green ★ needs your Apply; blue ✔ is
             // a winner already serving.
             if pending_winners.contains(label.as_str()) {
                 ui.colored_label(egui::Color32::from_rgb(0, 170, 0), format!("★ {label}"));
             } else if applied_winners.contains(label.as_str()) {
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 155, 255),
-                    format!("✓ {label}"),
+                    format!("✔ {label}"),
                 );
             } else {
                 ui.label(label);
@@ -5148,7 +5307,7 @@ fn start_router_and_wait(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
 }
 
 /// The setup sequence shared by Set Up Everything and the post-rebuild
-/// verification: start if down → wait healthy → incremental calibrate →
+/// verification: start if down -> wait healthy -> incremental calibrate ->
 /// sync. Narrates via tx; on failure it reports (Msg::Error) and returns
 /// false so callers stop there.
 fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
@@ -5371,7 +5530,7 @@ impl eframe::App for App {
                         egui::Color32::from_rgb(220, 60, 60),
                         format!("⚠ {msg}"),
                     );
-                    if ui.small_button("✕").clicked() {
+                    if ui.small_button("✖").clicked() {
                         self.last_error = None;
                     }
                 });
@@ -5420,6 +5579,7 @@ impl eframe::App for App {
         self.override_dialog(ui.ctx());
         self.diagnosis_window(ui.ctx());
         self.ai_advisor_window(ui.ctx());
+        self.disrupt_window(ui.ctx());
         self.meter_window(ui.ctx());
         self.guide_window(ui.ctx());
         self.advisor_window(ui.ctx());
@@ -5496,7 +5656,7 @@ impl eframe::App for App {
                     ui.label(format!("Start it, then {desc}?"));
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        if ui.button("▶ Start Router & Continue").clicked() {
+                        if ui.button("⏵ Start Router & Continue").clicked() {
                             go = true;
                         }
                         if ui.button("Cancel").clicked() {
@@ -5512,5 +5672,71 @@ impl eframe::App for App {
                 self.start_prompt = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tofu_tests {
+    /// Every non-ASCII character in a GUI-reachable string literal must
+    /// have a glyph in egui's DEFAULT fonts — anything else renders as
+    /// a tofu box (live complaint 2026-08-30; 🧪 and -> hit this in
+    /// 2026-08-25 already). Scans ui.rs + core (core strings surface in
+    /// the GUI via logs, advice, and the meter window); main.rs is
+    /// terminal-only and exempt.
+    #[test]
+    fn every_ui_glyph_renders_in_egui_default_fonts() {
+        let mut fonts = eframe::egui::epaint::text::Fonts::new(
+            Default::default(),
+            eframe::egui::FontDefinitions::default(),
+        );
+        let mut files: Vec<std::path::PathBuf> =
+            vec![concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui.rs").into()];
+        let core = concat!(env!("CARGO_MANIFEST_DIR"), "/src/core");
+        for e in std::fs::read_dir(core).unwrap() {
+            files.push(e.unwrap().path());
+        }
+        let mut tofu = std::collections::BTreeMap::new();
+        for f in files {
+            let src = std::fs::read_to_string(&f).unwrap();
+            for c in string_literal_chars(&src) {
+                if c.is_ascii() {
+                    continue;
+                }
+                let ok = fonts.has_glyph(&eframe::egui::FontId::proportional(16.0), c)
+                    || fonts.has_glyph(&eframe::egui::FontId::monospace(16.0), c);
+                if !ok {
+                    tofu.entry(c).or_insert_with(Vec::new).push(
+                        f.file_name().unwrap().to_string_lossy().to_string(),
+                    );
+                }
+            }
+        }
+        assert!(
+            tofu.is_empty(),
+            "tofu glyphs (no glyph in egui default fonts): {:?}",
+            tofu
+        );
+    }
+
+
+    /// Chars inside normal "…" string literals (escapes skipped; raw
+    /// strings and char literals are out of scope — none carry glyphs
+    /// in this repo).
+    fn string_literal_chars(src: &str) -> Vec<char> {
+        let mut out = Vec::new();
+        let mut chars = src.chars().peekable();
+        let mut in_str = false;
+        while let Some(c) = chars.next() {
+            match (in_str, c) {
+                (false, '"') => in_str = true,
+                (true, '"') => in_str = false,
+                (true, '\\') => {
+                    chars.next(); // the escaped char, never a glyph
+                }
+                (true, c) => out.push(c),
+                _ => {}
+            }
+        }
+        out
     }
 }

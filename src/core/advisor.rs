@@ -138,7 +138,7 @@ pub fn upstream_probe(server_bin: &Path, current_build: Option<u64>) -> Upstream
 
 /// What a rebuild actually changed, measured — the honest answer to "did
 /// that rebuild help?". Computed from before/after measurement snapshots
-/// (live case 2026-08-25: b10454→b10630 unlocked nothing, confirmed four
+/// (live case 2026-08-25: b10454->b10630 unlocked nothing, confirmed four
 /// Ollama-only conversions, and cost ~9% context across the board).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct VerifyReport {
@@ -205,7 +205,7 @@ mod verify_tests {
         assert_eq!(r.ctx_shifts, vec![("fine".to_string(), 120_064, 111_872)]);
         let text = verify_summary(&r).join("\n");
         assert!(text.contains("REGRESSION"), "{text}");
-        assert!(text.contains("unlocked ✓"), "{text}");
+        assert!(text.contains("unlocked ✔"), "{text}");
         assert!(text.contains("-7%") || text.contains("−7%"), "{text}");
     }
 }
@@ -223,7 +223,7 @@ pub fn verify_summary(r: &VerifyReport) -> Vec<String> {
     }
     if !r.unlocked.is_empty() {
         out.push(format!(
-            "{} model(s) unlocked ✓: {}",
+            "{} model(s) unlocked ✔: {}",
             r.unlocked.len(),
             r.unlocked.join(", ")
         ));
@@ -264,7 +264,7 @@ pub fn verify_summary(r: &VerifyReport) -> Vec<String> {
             <= -0.05;
     if !r.newly_locked.is_empty() || big_ctx_regression {
         out.push(
-            "this looks worth reporting upstream — Tools → Export Findings Report \
+            "this looks worth reporting upstream — Tools -> Export Findings Report \
              (or `--report`) writes a sanitized summary you can review and post"
                 .to_string(),
         );
@@ -296,7 +296,7 @@ fn run(cmd: &str, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
-/// "b10366" or "b10366-14-gabc" → 10366. Pure for testing.
+/// "b10366" or "b10366-14-gabc" -> 10366. Pure for testing.
 pub fn parse_build_tag(tag: &str) -> Option<u64> {
     tag.trim()
         .strip_prefix('b')?
@@ -306,7 +306,7 @@ pub fn parse_build_tag(tag: &str) -> Option<u64> {
         .ok()
 }
 
-/// nvidia-smi persistence_mode line → Some(enabled). Pure for testing.
+/// nvidia-smi persistence_mode line -> Some(enabled). Pure for testing.
 pub fn parse_persistence_mode(s: &str) -> Option<bool> {
     match s.lines().next()?.trim() {
         "Enabled" => Some(true),
@@ -315,7 +315,7 @@ pub fn parse_persistence_mode(s: &str) -> Option<bool> {
     }
 }
 
-/// nvidia-smi compute_cap "8.6" → cmake arch "86". Pure for testing.
+/// nvidia-smi compute_cap "8.6" -> cmake arch "86". Pure for testing.
 pub fn parse_compute_cap(s: &str) -> Option<String> {
     let first = s.lines().next()?.trim();
     let (major, minor) = first.split_once('.')?;
@@ -410,7 +410,7 @@ pub fn locked_models(measurements: &Measurements, log: Option<&str>) -> Vec<Stri
 }
 
 /// The full check. Network access: one `git fetch` against the checkout's
-/// origin (tolerated failure → upstream fields stay None). Run on a worker
+/// origin (tolerated failure -> upstream fields stay None). Run on a worker
 /// thread; this can take seconds.
 pub fn check(
     server_bin: Option<PathBuf>,
@@ -503,7 +503,7 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
     }
     match (&c.current_build, &c.upstream_build, &c.behind) {
         (Some(cur), Some(up), Some(behind)) if up > cur => out.push((
-            format!("Your llama.cpp binary is {} builds behind upstream (b{cur} → b{up})", up - cur),
+            format!("Your llama.cpp binary is {} builds behind upstream (b{cur} -> b{up})", up - cur),
             format!(
                 "The checkout itself is {behind} commit(s) behind the remote. Newer builds \
                  add model-format support and performance work."
@@ -733,7 +733,7 @@ pub fn clear_stale_build_cache(repo: &Path, progress: &mut dyn FnMut(String)) {
     let recorded_p = Path::new(recorded.trim());
     let same = match (recorded_p.canonicalize(), repo.canonicalize()) {
         (Ok(a), Ok(b)) => a == b,
-        // Old path gone (the snap case) → definitely stale.
+        // Old path gone (the snap case) -> definitely stale.
         _ => recorded_p == repo,
     };
     if !same {
@@ -963,7 +963,7 @@ mod tests {
         let log = std::cell::RefCell::new(Vec::new());
         let mut progress = |l: String| log.borrow_mut().push(l);
 
-        // Cache from a DIFFERENT (now nonexistent) source dir → wiped.
+        // Cache from a DIFFERENT (now nonexistent) source dir -> wiped.
         std::fs::write(
             build.join("CMakeCache.txt"),
             "CMAKE_HOME_DIRECTORY:INTERNAL=/home/u/snap/code/258/.local/share/modelsteward/llama.cpp\n",
@@ -981,7 +981,7 @@ mod tests {
         );
         assert!(log.borrow()[0].contains("checkout has moved"), "{:?}", log.borrow());
 
-        // Cache matching the real location → untouched.
+        // Cache matching the real location -> untouched.
         std::fs::create_dir_all(&build).unwrap();
         std::fs::write(
             build.join("CMakeCache.txt"),

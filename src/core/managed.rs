@@ -3,8 +3,8 @@
 //!
 //! Why it exists: a crates.io user has no `~/src/llama.cpp` — this
 //! module is what bootstraps llama.cpp for non-experts at all, and it
-//! closes the loop the scorecard opened: freshness → fetch → build a
-//! TAGGED candidate → archive its binaries → pin or roll back, no git
+//! closes the loop the scorecard opened: freshness -> fetch -> build a
+//! TAGGED candidate -> archive its binaries -> pin or roll back, no git
 //! knowledge required.
 //!
 //! Boundary rules (settled):
@@ -260,7 +260,7 @@ pub fn build_release(
     fetch_tags(progress)?;
     let build = newest_known_build()
         .ok_or_else(|| anyhow::anyhow!("no bNNNN release tags found"))?;
-    // Already built + archived WITH THE SAME BACKENDS → nothing to do.
+    // Already built + archived WITH THE SAME BACKENDS -> nothing to do.
     // (An earlier plain existence check silently discarded the caller's
     // backend selection — a CUDA rebuild of a CPU-only archive reported
     // success without ever building; review catch 2026-08-28.)

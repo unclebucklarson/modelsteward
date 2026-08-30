@@ -189,7 +189,7 @@ fn existing_model_ids(source: &str) -> Result<Vec<String>> {
         .unwrap_or_default())
 }
 
-/// Read → sync → backup → write (numbered backups, see write_backed_up).
+/// Read -> sync -> backup -> write (numbered backups, see write_backed_up).
 /// A MISSING file is a graceful skip, not an error — OpenCode is
 /// optional (usability review D7: Set Up Everything hard-failed for
 /// anyone without OpenCode installed, despite the app serving any
@@ -413,7 +413,7 @@ mod tests {
 
     #[test]
     fn vision_writes_image_modality_but_never_overwrites() {
-        // Fresh entry for a vision-served model → image input declared.
+        // Fresh entry for a vision-served model -> image input declared.
         let d = DesiredModel { vision: true, ..desired("looker", 90_000) };
         let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
         let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
@@ -424,7 +424,7 @@ mod tests {
             Some(&serde_json::json!(["text", "image"]))
         );
 
-        // Existing entry with NO modalities key → filled in on update.
+        // Existing entry with NO modalities key -> filled in on update.
         let d = DesiredModel { vision: true, ..desired("stale-model", 90_000) };
         let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
         let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
@@ -436,7 +436,7 @@ mod tests {
             "absent modalities gets the measured truth"
         );
 
-        // Non-vision model → no modalities key invented.
+        // Non-vision model -> no modalities key invented.
         let d = desired("plain", 90_000);
         let (out, _) = sync_source(SAMPLE, "http://127.0.0.1:8080/v1", &[d]).unwrap();
         let parsed = jsonc_parser::parse_to_serde_value(&out, &Default::default())
@@ -449,7 +449,7 @@ mod tests {
 
     #[test]
     fn measured_tool_call_fills_gaps_but_never_overwrites() {
-        // "stale-model" in SAMPLE has NO tool_call key → measured verdict
+        // "stale-model" in SAMPLE has NO tool_call key -> measured verdict
         // fills it in.
         let d = DesiredModel {
             tool_call: Some(false),

@@ -158,9 +158,9 @@ fn ask(port: u16, model: &str, prompt: &str) -> Result<String> {
         .to_string())
 }
 
-/// One agent-loop shot (M8→MoE reliability path, built 2026-08-28):
+/// One agent-loop shot (M8->MoE reliability path, built 2026-08-28):
 /// the harness plays tool executor over a tiny synthetic FS and lets
-/// the model drive — call → result → continue — until it answers,
+/// the model drive — call -> result -> continue — until it answers,
 /// stalls, or overruns the hop cap. Isolated protocol legs all passed
 /// on the 80B while a real session stalled; THIS measures the loop
 /// itself. Returns Ok(hops) on a correct finish, Err(shape) otherwise.
@@ -277,7 +277,7 @@ pub fn run_quality(
             "quality {model}: eval {}/{} {}",
             i + 1,
             total,
-            if ok { "✓" } else { "✗" }
+            if ok { "✔" } else { "✗" }
         ));
     }
     let mut tool_ok = 0u32;
@@ -290,7 +290,7 @@ pub fn run_quality(
         progress(format!(
             "quality {model}: tool probe {}/{tool_shots} {}",
             i + 1,
-            if ok { "✓" } else { "✗" }
+            if ok { "✔" } else { "✗" }
         ));
     }
     // The loop shots are the expensive, load-bearing half for agent
@@ -305,7 +305,7 @@ pub fn run_quality(
             Ok(hops) => {
                 loop_ok += 1;
                 progress(format!(
-                    "quality {model}: agent loop {}/{loop_shots} ✓ ({hops} hops)",
+                    "quality {model}: agent loop {}/{loop_shots} ✔ ({hops} hops)",
                     i + 1
                 ));
             }

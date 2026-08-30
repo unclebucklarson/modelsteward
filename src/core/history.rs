@@ -347,7 +347,7 @@ mod tests {
         assert!(line.contains("b10630 vs b10454"), "{line}");
         assert!(line.contains("context -9% avg (1 model)"), "{line}");
         assert!(line.contains("worst: a -9% context"), "{line}");
-        // One build only → no advisory (never extrapolate).
+        // One build only -> no advisory (never extrapolate).
         assert!(build_advisory(&all[6..]).is_none());
     }
 

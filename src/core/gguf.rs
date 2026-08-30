@@ -258,7 +258,7 @@ fn as_u64<R: Read>(r: &mut R, ty: u32) -> Result<Option<u64>> {
     })
 }
 
-/// `general.file_type` enum → the quant name users know. Partial by design:
+/// `general.file_type` enum -> the quant name users know. Partial by design:
 /// unknown values render as `type N` rather than guessing.
 fn file_type_name(n: u64) -> String {
     match n {

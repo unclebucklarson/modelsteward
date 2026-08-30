@@ -184,7 +184,7 @@ pub fn topology_advice(
 }
 
 /// Mine the whole log. Later instances of a port override earlier ones for
-/// the port→model mapping (ports get reused across restarts within one log).
+/// the port->model mapping (ports get reused across restarts within one log).
 pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
     #[derive(Default)]
     struct Task {
@@ -233,7 +233,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
         if t.model.is_none() {
             t.model = port_model.get(&port).cloned();
         }
-        // Two dialects (grammar drift found live 2026-08-28, b10630 →
+        // Two dialects (grammar drift found live 2026-08-28, b10630 ->
         // b10672: the n_gen / progress lines all but vanished; current
         // builds put per-turn truth in print_timing's "/ N tokens"):
         if body.contains("prompt eval time =") {
@@ -330,14 +330,14 @@ mod tests {
         let stats = cache_effectiveness(log);
         assert_eq!(stats.len(), 2);
         let coder = stats.iter().find(|s| s.model == "coder-q4").unwrap();
-        // total_prompt = 10500-500 = 10000; processed 3000 → reused 7000.
+        // total_prompt = 10500-500 = 10000; processed 3000 -> reused 7000.
         assert_eq!(coder.turns, 1);
         assert_eq!(coder.prompt_tokens, 10_000);
         assert_eq!(coder.reused_tokens, 7_000);
         assert!((coder.reuse_fraction() - 0.7).abs() < 1e-9);
         assert!(!coder.reuse_disabled);
         let vision = stats.iter().find(|s| s.model == "vision-q4").unwrap();
-        // 10000-1000 = 9000 prompt, processed 9000 → zero reuse, flagged.
+        // 10000-1000 = 9000 prompt, processed 9000 -> zero reuse, flagged.
         assert_eq!(vision.reused_tokens, 0);
         assert!(vision.reuse_disabled);
     }
@@ -412,19 +412,19 @@ mod tests {
             ("small-b".to_string(), 8u32, 6 * gib),
             ("rarely".to_string(), 1u32, 4 * gib),
         ];
-        // 11 GiB pair in 24 GiB VRAM (under 70%) → advised.
+        // 11 GiB pair in 24 GiB VRAM (under 70%) -> advised.
         let line = topology_advice(&used, 24_564, 1).unwrap();
         assert!(line.contains("small-a") && line.contains("small-b"), "{line}");
         assert!(line.contains("smaller fitted context"), "{line}");
-        // Already models_max=2 → quiet.
+        // Already models_max=2 -> quiet.
         assert!(topology_advice(&used, 24_564, 2).is_none());
-        // Pair too big for the 70% budget → quiet.
+        // Pair too big for the 70% budget -> quiet.
         let big = vec![
             ("a".to_string(), 9u32, 12 * gib),
             ("b".to_string(), 9u32, 11 * gib),
         ];
         assert!(topology_advice(&big, 24_564, 1).is_none());
-        // Only one model actually used → quiet.
+        // Only one model actually used -> quiet.
         assert!(topology_advice(&used[..1], 24_564, 1).is_none());
     }
 

@@ -234,7 +234,7 @@ pub struct Report {
     pub per_model: BTreeMap<String, Tally>,
     /// (hour epoch, prompt+generated tokens) with the most traffic.
     pub busiest_hour: Option<(u64, u64)>,
-    /// UTC-day epoch → tokens (prompt+generated), for the series view.
+    /// UTC-day epoch -> tokens (prompt+generated), for the series view.
     pub per_day: BTreeMap<u64, u64>,
 }
 
@@ -269,7 +269,7 @@ pub fn report(buckets: &[Bucket], since: Option<u64>, until: Option<u64>) -> Rep
 pub struct CostReport {
     pub fleet_kwh: f64,
     pub fleet_usd: f64,
-    /// model → (kWh, usd)
+    /// model -> (kWh, usd)
     pub per_model: BTreeMap<String, (f64, f64)>,
     pub covered_generated: u64,
     pub uncovered_generated: u64,
@@ -454,7 +454,7 @@ mod tests {
     fn deltas_credit_only_the_new_and_survive_truncation() {
         let mut totals = BTreeMap::new();
         totals.insert("m".to_string(), tal(5, 1000, 200, 300));
-        // Same instance, partially credited → only the growth.
+        // Same instance, partially credited -> only the growth.
         let cursor = Cursor {
             fingerprint: "fp1".into(),
             fingerprint_v2: None,
@@ -462,10 +462,10 @@ mod tests {
         };
         let d = deltas(&totals, &cursor, true);
         assert_eq!(d, vec![("m".to_string(), tal(2, 400, 80, 100))]);
-        // New instance (router restarted) → everything is new credit.
+        // New instance (router restarted) -> everything is new credit.
         let d = deltas(&totals, &cursor, false);
         assert_eq!(d, vec![("m".to_string(), tal(5, 1000, 200, 300))]);
-        // Fully credited, same instance → nothing.
+        // Fully credited, same instance -> nothing.
         let cursor = Cursor {
             fingerprint: "fp1".into(),
             fingerprint_v2: None,
@@ -545,8 +545,8 @@ mod tests {
 
     #[test]
     fn cost_report_bills_measured_tokens_and_excludes_the_rest() {
-        // Contract: generated tokens × the model's measured J/token →
-        // kWh → dollars at the user's price. Models WITHOUT an energy
+        // Contract: generated tokens × the model's measured J/token ->
+        // kWh -> dollars at the user's price. Models WITHOUT an energy
         // measurement contribute to `uncovered`, never to a dollar
         // figure — measured or absent, no estimates.
         let b = |model: &str, generated| Bucket {
@@ -562,14 +562,14 @@ mod tests {
         let mut j = BTreeMap::new();
         j.insert("fast".to_string(), 1.8); // J per generated token
         let c = cost_report(&r, &j, 0.20);
-        // 1M tokens × 1.8 J = 1.8 MJ = 0.5 kWh → $0.10 at $0.20/kWh.
+        // 1M tokens × 1.8 J = 1.8 MJ = 0.5 kWh -> $0.10 at $0.20/kWh.
         assert!((c.fleet_kwh - 0.5).abs() < 1e-9, "{c:?}");
         assert!((c.fleet_usd - 0.10).abs() < 1e-9, "{c:?}");
         assert_eq!(c.covered_generated, 1_000_000);
         assert_eq!(c.uncovered_generated, 500_000);
         assert!((c.per_model["fast"].1 - 0.10).abs() < 1e-9);
         assert!(!c.per_model.contains_key("mystery"));
-        // No energy data at all → a zeroed report, not a guess.
+        // No energy data at all -> a zeroed report, not a guess.
         let c = cost_report(&r, &BTreeMap::new(), 0.20);
         assert_eq!(c.fleet_usd, 0.0);
         assert_eq!(c.uncovered_generated, 1_500_000);

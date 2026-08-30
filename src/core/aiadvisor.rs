@@ -316,7 +316,7 @@ mod tests {
         m.insert("weak".to_string(), meas(Some(0.5), Some(0.8), None, Some(200.0)));
         m.insert("unknown".to_string(), meas(None, None, None, Some(300.0)));
 
-        // Rule 2: equal quality → faster answers.
+        // Rule 2: equal quality -> faster answers.
         assert_eq!(pick_advisor(&m, None, None).as_deref(), Some("fast"));
         // Rule 3: speedy-but-weaker never outranks the quality tier.
         assert_ne!(pick_advisor(&m, None, None).as_deref(), Some("weak"));
@@ -330,7 +330,7 @@ mod tests {
             pick_advisor(&m, None, Some("fast")).as_deref(),
             Some("giant")
         );
-        // Rule 5: nothing has quality data → fastest measured wins.
+        // Rule 5: nothing has quality data -> fastest measured wins.
         let mut bare = std::collections::BTreeMap::new();
         bare.insert("a".to_string(), meas(None, None, None, Some(50.0)));
         bare.insert("b".to_string(), meas(None, None, None, Some(150.0)));

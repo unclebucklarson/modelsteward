@@ -51,7 +51,7 @@ pub fn is_embedding(meta: Option<&GgufMeta>) -> bool {
         })
 }
 
-/// `…-00001-of-00002.gguf` → (set key, part number, total parts).
+/// `…-00001-of-00002.gguf` -> (set key, part number, total parts).
 pub fn split_part(path: &Path) -> Option<(PathBuf, u32, u32)> {
     let name = path.file_name()?.to_str()?;
     let stem = name.strip_suffix(".gguf")?;
@@ -113,7 +113,7 @@ impl ModelFile {
     }
 }
 
-/// The quant token a filename ends with ("...-UD-Q5_K_XL.gguf" → "Q5_K_XL").
+/// The quant token a filename ends with ("...-UD-Q5_K_XL.gguf" -> "Q5_K_XL").
 /// Filenames are often MORE truthful than the header's `general.file_type`:
 /// dynamic quants (Unsloth UD) mix per-layer types and stamp a misleading
 /// single enum — verified live: a UD-Q5_K_XL stamped Q4_K_S while its
@@ -359,7 +359,7 @@ fn ollama_model_from_manifest(
     })?;
     let blob = store.join("blobs").join(digest.replace(':', "-"));
 
-    // manifests/<host>/<namespace>/<name>/<tag> → "name:tag" (or
+    // manifests/<host>/<namespace>/<name>/<tag> -> "name:tag" (or
     // "namespace/name:tag" for non-library namespaces).
     let rel = manifest.strip_prefix(manifests_root).ok()?;
     let parts: Vec<_> = rel.iter().map(|c| c.to_string_lossy()).collect();
@@ -596,7 +596,7 @@ mod tests {
         m.mmproj = Some(psnap);
         let dest = archive_to_shelf(&m, shelf.path()).unwrap();
         assert!(dest.ends_with("Qwen3.8-27B-GGUF/Qwen3.8-27B-UD-Q4_K_XL.gguf"));
-        // Same tempfs → hardlink: same inode as the BLOB (symlink resolved).
+        // Same tempfs -> hardlink: same inode as the BLOB (symlink resolved).
         assert_eq!(
             std::fs::metadata(&dest).unwrap().ino(),
             std::fs::metadata(&blob).unwrap().ino()

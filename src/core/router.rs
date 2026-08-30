@@ -57,14 +57,14 @@ pub fn router_mode_supported(build: Option<u64>) -> Result<(), String> {
     match build {
         Some(b) if b < MIN_ROUTER_BUILD => Err(format!(
             "your llama-server is b{b}, which predates router mode — this app needs \
-             b{MIN_ROUTER_BUILD} or newer. The Build Advisor (Server → Check My \
+             b{MIN_ROUTER_BUILD} or newer. The Build Advisor (Server -> Check My \
              llama.cpp) can build a current one for you."
         )),
         _ => Ok(()),
     }
 }
 
-/// One extra-flags line → (key, value). Accepts what model cards teach
+/// One extra-flags line -> (key, value). Accepts what model cards teach
 /// (usability review G7): leading dashes stripped, space OR `=`
 /// separates, a bare flag means true.
 pub fn parse_extra_line(line: &str) -> anyhow::Result<(String, String)> {
@@ -607,7 +607,7 @@ pub fn read_measurements(dir: &Path) -> Measurements {
 /// identity (archiving a cache model gives it a preset alias). n_ctx and
 /// tool_call travel with fingerprints CLEARED — the serving args changed,
 /// so the next calibrate re-measures — while bench numbers keep their
-/// build stamp (same bytes, same build → still meaningful). The old key is
+/// build stamp (same bytes, same build -> still meaningful). The old key is
 /// removed so the leftover cache-id row stops claiming a measurement it no
 /// longer describes; an existing entry under the new id is never clobbered.
 pub fn migrate_measurement(all: &mut Measurements, old_id: &str, new_id: &str) {
@@ -652,9 +652,9 @@ pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
 }
 
 /// Settled context for one model, measured without any long-blocking
-/// request: explicit load → poll status until loaded/failed (cold-cache
+/// request: explicit load -> poll status until loaded/failed (cold-cache
 /// loads of 20GB files can take minutes; a hanging GET would trip HTTP
-/// timeouts and the router's request-scoped kill paths) → read `/props`
+/// timeouts and the router's request-scoped kill paths) -> read `/props`
 /// with autoload off.
 pub fn fetch_settled_ctx(port: u16, model: &str) -> Result<u64> {
     // A load request for a model that is already loaded/loading returns
@@ -755,7 +755,7 @@ fn urlencode(s: &str) -> String {
         .collect()
 }
 
-/// Measure preset models one at a time (load → read settled ctx → unload),
+/// Measure preset models one at a time (load -> read settled ctx -> unload),
 /// updating stored measurements as it goes. **Incremental by default**:
 /// models whose stored measurement is fresh (same effective args, same
 /// build/devices) are skipped — including remembered *failures*, so a model
@@ -1037,7 +1037,7 @@ mod tests_version_gate {
         assert!(e.contains("b10088") && e.contains("10216") && e.contains("Build Advisor"));
         assert!(router_mode_supported(Some(10_216)).is_ok());
         assert!(router_mode_supported(Some(10_675)).is_ok());
-        assert!(router_mode_supported(None).is_ok(), "unprobeable → let the timeout judge");
+        assert!(router_mode_supported(None).is_ok(), "unprobeable -> let the timeout judge");
     }
 }
 
@@ -1208,7 +1208,7 @@ mod tests {
             "finish_reason":"tool_calls"}]});
         assert!(parse_tool_call_probe(&good));
 
-        // Truncated arguments (the max_tokens pitfall) → not a pass.
+        // Truncated arguments (the max_tokens pitfall) -> not a pass.
         let truncated = serde_json::json!({"choices":[{"message":{"tool_calls":[
             {"function":{"name":"get_weather","arguments":"{"}}]},
             "finish_reason":"length"}]});
@@ -1246,7 +1246,7 @@ mod tests {
         let m = &all["repo-q5"];
         assert_eq!(m.n_ctx, Some(90_000));
         assert_eq!(m.tool_call, Some(true));
-        assert!(m.args_fp.is_none() && m.env_fp.is_none(), "stale → re-measures");
+        assert!(m.args_fp.is_none() && m.env_fp.is_none(), "stale -> re-measures");
         assert_eq!(m.tg_tps, Some(40.0), "bench travels (same bytes, same build)");
         assert_eq!(m.bench_build, Some(10454));
 
@@ -1270,9 +1270,9 @@ mod tests {
             ..Default::default()
         };
         assert!(m.is_fresh(Some("aaaa"), "eeee"));
-        assert!(!m.is_fresh(Some("bbbb"), "eeee"), "args changed → stale");
-        assert!(!m.is_fresh(Some("aaaa"), "ffff"), "env changed → stale");
-        assert!(!m.is_fresh(None, "eeee"), "unknown current args → stale");
+        assert!(!m.is_fresh(Some("bbbb"), "eeee"), "args changed -> stale");
+        assert!(!m.is_fresh(Some("aaaa"), "ffff"), "env changed -> stale");
+        assert!(!m.is_fresh(None, "eeee"), "unknown current args -> stale");
 
         let failed = Measurement {
             n_ctx: None,
@@ -1293,7 +1293,7 @@ mod tests {
         assert_eq!(m.n_ctx, Some(72960));
         assert!(
             !m.is_fresh(Some("anything"), "env"),
-            "no fingerprints → re-measure"
+            "no fingerprints -> re-measure"
         );
     }
 
@@ -1309,7 +1309,7 @@ mod tests {
         write_marker(dir.path(), &m).unwrap();
         let back = read_marker(dir.path()).unwrap();
         assert_eq!(back.pid, 1);
-        // init's cmdline doesn't mention llama-server or our preset →
+        // init's cmdline doesn't mention llama-server or our preset ->
         // a recycled pid is "not ours", never a kill target.
         assert!(!marker_is_live(&back));
     }

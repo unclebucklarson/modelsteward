@@ -279,7 +279,7 @@ pub fn campaign_eta_minutes(
 }
 
 /// CLI menu-argument resolution (usability review C3: a typo used to
-/// silently race the SPEC menu for 20 minutes). Absent → the
+/// silently race the SPEC menu for 20 minutes). Absent -> the
 /// documented default; anything else must be a real menu.
 pub fn resolve_menu_arg(arg: Option<&str>) -> Result<&str> {
     match arg {
@@ -412,7 +412,7 @@ pub struct TrialResult {
     pub build: Option<u64>,
 }
 
-/// trials.json: model id → variant label → result. "baseline" is a label.
+/// trials.json: model id -> variant label -> result. "baseline" is a label.
 pub type Trials =
     std::collections::BTreeMap<String, std::collections::BTreeMap<String, TrialResult>>;
 
@@ -451,9 +451,9 @@ pub struct Verdict {
 #[derive(Debug, Clone, PartialEq)]
 pub struct NearMiss {
     pub label: String,
-    /// The win, in plain language ("+50% prefill (3583 → 5377 t/s)").
+    /// The win, in plain language ("+50% prefill (3583 -> 5377 t/s)").
     pub gain: String,
-    /// What it costs, in plain language ("21% of context (255744 → 202752)").
+    /// What it costs, in plain language ("21% of context (255744 -> 202752)").
     pub cost: String,
 }
 
@@ -536,7 +536,7 @@ pub fn near_misses(
             && cf < bf - 0.05
         {
             costs.push(format!(
-                "{:.0} points of rewrite fidelity ({:.0}% → {:.0}% preserved) — a QUALITY \
+                "{:.0} points of rewrite fidelity ({:.0}% -> {:.0}% preserved) — a QUALITY \
                  loss, weigh it heavily",
                 (bf - cf) * 100.0,
                 bf * 100.0,
@@ -545,19 +545,19 @@ pub fn near_misses(
         }
         if novel < b_novel * speed_floor {
             costs.push(format!(
-                "{:.0}% of novel-code speed ({b_novel:.0} → {novel:.0} t/s)",
+                "{:.0}% of novel-code speed ({b_novel:.0} -> {novel:.0} t/s)",
                 (1.0 - novel / b_novel) * 100.0
             ));
         }
         if rewrite < b_rewrite * speed_floor {
             costs.push(format!(
-                "{:.0}% of rewrite speed ({b_rewrite:.0} → {rewrite:.0} t/s)",
+                "{:.0}% of rewrite speed ({b_rewrite:.0} -> {rewrite:.0} t/s)",
                 (1.0 - rewrite / b_rewrite) * 100.0
             ));
         }
         if !waived && (ctx as f64) < b_ctx as f64 * ctx_floor {
             costs.push(format!(
-                "{:.0}% of context ({b_ctx} → {ctx})",
+                "{:.0}% of context ({b_ctx} -> {ctx})",
                 (1.0 - ctx as f64 / b_ctx as f64) * 100.0
             ));
         }
@@ -567,7 +567,7 @@ pub fn near_misses(
         out.push(NearMiss {
             label: label.clone(),
             gain: format!(
-                "+{:.0}% {metric} ({b_primary:.0} → {p:.0})",
+                "+{:.0}% {metric} ({b_primary:.0} -> {p:.0})",
                 (improvement(goal, b_primary, p) - 1.0) * 100.0
             ),
             cost: costs.join(" and "),
@@ -974,15 +974,15 @@ pub fn explain(report: &TrialReport) -> Vec<String> {
         };
         out.push(format!(
             "{w} is recommended because the metric that matters most here — {metric} — \
-             improved {:+.0}% ({b_p:.0} → {p:.0} {unit}) while nothing was paid for it: \
-             novel-code speed stayed within noise ({b_novel:.1} → {:.1}), context {} and \
+             improved {:+.0}% ({b_p:.0} -> {p:.0} {unit}) while nothing was paid for it: \
+             novel-code speed stayed within noise ({b_novel:.1} -> {:.1}), context {} and \
              output quality held at the gate.",
             pct(p, b_p),
             r.tg_novel.unwrap_or(0.0),
             if report.goal == Goal::Context {
                 "IS the win".to_string()
             } else {
-                format!("is effectively unchanged ({b_ctx} → {})", r.settled_ctx.unwrap_or(0))
+                format!("is effectively unchanged ({b_ctx} -> {})", r.settled_ctx.unwrap_or(0))
             },
         ));
     } else {
@@ -1393,12 +1393,12 @@ fn slot_action(child_port: u16, action: &str, filename: &str) -> Result<serde_js
 /// later — which would make swapping BACK to a model mid-conversation
 /// cost a file read instead of a full reprocess. The user picks one
 /// "middle of the road" model today precisely because swaps are dear;
-/// this measures what a save→swap→restore workflow would buy on THIS
+/// this measures what a save->swap->restore workflow would buy on THIS
 /// hardware before any workflow gets designed around it.
 ///
 /// Two passes, same conversation, both across a full unload/reload:
-///   slot-cold:    reload → the conversation's turn (nothing to reuse).
-///   slot-restore: turn 1 → save → reload → restore → the SAME turn.
+///   slot-cold:    reload -> the conversation's turn (nothing to reuse).
+///   slot-restore: turn 1 -> save -> reload -> restore -> the SAME turn.
 /// The turn is UNEDITED — swap-back means "come back and continue",
 /// so the restored cache is an exact prefix. (First run used the edited
 /// turn and honestly measured 1.0x: an edit hits the SWA checkpoint
@@ -1760,7 +1760,7 @@ pub fn keep_variant(
     let _ = router::reload(new_cfg.port);
     // The kept config changes what --fit settles on, and the trial already
     // measured exactly that: carry its settled ctx into the measurement
-    // (fingerprints cleared → the normal loop re-verifies next calibrate)
+    // (fingerprints cleared -> the normal loop re-verifies next calibrate)
     // so synced limits stay honest without waiting for a re-measure.
     let dir = router::state_dir();
     if let Some(r) = read_trials(&dir)
@@ -1849,7 +1849,7 @@ mod tests {
         let mut ub = r(38.5, 39.0, 115_500);
         ub.pp_prefill = Some(1800.0);
         c.insert("ub-1024".to_string(), ub);
-        // Faster prefill but pays with generation speed → rejected.
+        // Faster prefill but pays with generation speed -> rejected.
         let mut bad = r(35.0, 39.0, 116_000);
         bad.pp_prefill = Some(2000.0);
         c.insert("ub-2048".to_string(), bad);
@@ -1865,9 +1865,9 @@ mod tests {
         // Spike 5's classic draft: faster rewrite is irrelevant when the
         // context collapses.
         c.insert("draft-4b".to_string(), r(38.0, 60.0, 4_096));
-        // Fast rewrite but slower novel code → rejected.
+        // Fast rewrite but slower novel code -> rejected.
         c.insert("slower-novel".to_string(), r(30.0, 80.0, 117_000));
-        // Barely faster rewrite → not worth a config change.
+        // Barely faster rewrite -> not worth a config change.
         c.insert("meh".to_string(), r(39.0, 41.0, 117_000));
         let v = verdict(Goal::RewriteTg, &base, &c);
         assert_eq!(v.winner, None, "{}", v.reason);
@@ -1997,12 +1997,12 @@ mod tests {
         // Whitespace variance doesn't count against it.
         let spaced = orig.replace("    ", "  ");
         assert_eq!(rewrite_fidelity(&orig, &spaced), 1.0);
-        // Half the functions dropped → score collapses.
+        // Half the functions dropped -> score collapses.
         let half: String = orig.lines().take(orig.lines().count() / 2)
             .collect::<Vec<_>>().join("\n");
         let s = rewrite_fidelity(&orig, &half);
         assert!(s > 0.4 && s < 0.6, "{s}");
-        // Garbage → ~0.
+        // Garbage -> ~0.
         assert!(rewrite_fidelity(&orig, "I cannot help with that.") < 0.05);
     }
 
@@ -2015,13 +2015,13 @@ mod tests {
             t
         };
         let base = mk(100_000, 0.98);
-        // Quality holds → the extra context wins.
+        // Quality holds -> the extra context wins.
         let mut c = std::collections::BTreeMap::new();
         c.insert("ctv-q4_0".to_string(), mk(130_000, 0.96));
         let v = verdict(Goal::Context, &base, &c);
         assert_eq!(v.winner.as_deref(), Some("ctv-q4_0"), "{}", v.reason);
         assert!(v.reason.contains("tokens"), "context wins report tokens: {}", v.reason);
-        // Quality collapses → disqualified no matter the context gain, and
+        // Quality collapses -> disqualified no matter the context gain, and
         // surfaced as a near-miss with the quality cost spelled out.
         let mut c2 = std::collections::BTreeMap::new();
         c2.insert("ctv-q4_0".to_string(), mk(130_000, 0.70));
@@ -2034,7 +2034,7 @@ mod tests {
 
     #[test]
     fn massive_wins_relax_speed_guards_but_never_fidelity() {
-        // The live 80B case: cpu-moe restored context 4096 → 262144 (64x)
+        // The live 80B case: cpu-moe restored context 4096 -> 262144 (64x)
         // while novel speed dipped ~4% — inside run-to-run noise. A fixed
         // 3% guard vetoed it; the scaled guard must crown it.
         let mk = |novel: f64, ctx: u64, fid: f64| {
@@ -2099,11 +2099,11 @@ mod tests {
             "t24 should be a listed tradeoff: {nm:?}"
         );
         // Slower usable configs are listed priced against the best
-        // usable option — "52 → 45", an honest tradeoff readout.
+        // usable option — "52 -> 45", an honest tradeoff readout.
         assert!(
             nm.iter()
                 .find(|n| n.label == "ncpu-moe-40")
-                .is_some_and(|n| n.cost.contains("52 → 45")),
+                .is_some_and(|n| n.cost.contains("52 -> 45")),
             "ncpu-40's cost reads against the usable best: {nm:?}"
         );
         // A USABLE baseline keeps its speed guards: same candidates
@@ -2318,7 +2318,7 @@ mod tests {
     #[test]
     fn scoped_baselines_end_the_cross_menu_overwrite() {
         // The live 2026-08-27 confusion: the cache campaign's baseline
-        // (ngram-simple still applied → fast rewrite) overwrote the spec
+        // (ngram-simple still applied -> fast rewrite) overwrote the spec
         // campaign's stripped baseline, so ngram-simple raced itself.
         let mut table = std::collections::BTreeMap::new();
         table.insert(BASELINE.to_string(), r(41.0, 88.0, 114_944)); // legacy: confounded
@@ -2362,7 +2362,7 @@ mod tests {
         // A failed restore reports itself instead of a ratio.
         table.get_mut(SLOT_RESTORE).unwrap().error = Some("500 from child".into());
         assert!(slot_summary(&table).unwrap().contains("failed: 500 from child"));
-        // No restore row → no line (cold alone proves nothing).
+        // No restore row -> no line (cold alone proves nothing).
         table.remove(SLOT_RESTORE);
         assert!(slot_summary(&table).is_none());
     }
@@ -2383,9 +2383,9 @@ mod tests {
         table.insert(baseline_label("spec"), with_j(2.0));
         table.insert(baseline_label("ub"), with_j(2.2));
         table.insert("ngram-simple".to_string(), with_j(1.5));
-        // Nothing applied → stock config → mean of scoped baselines.
+        // Nothing applied -> stock config -> mean of scoped baselines.
         assert_eq!(served_j_per_token(&cfg, "m", &table), Some(2.1));
-        // Winner applied → that row's measurement.
+        // Winner applied -> that row's measurement.
         cfg.overrides.insert(
             "m".into(),
             router::ModelOverrides {
@@ -2394,7 +2394,7 @@ mod tests {
             },
         );
         assert_eq!(served_j_per_token(&cfg, "m", &table), Some(1.5));
-        // Applied config with no matching energy-measured row → None.
+        // Applied config with no matching energy-measured row -> None.
         cfg.overrides.insert(
             "m".into(),
             router::ModelOverrides {
@@ -2410,7 +2410,7 @@ mod tests {
         // Usability review C3: `--trial m ubatch` silently raced the
         // SPEC menu for 20 minutes. Contract: a second positional that
         // is neither `keep` nor a valid menu is a hard error naming the
-        // menus; absent → the documented default (spec).
+        // menus; absent -> the documented default (spec).
         assert_eq!(resolve_menu_arg(None).unwrap(), "spec");
         assert_eq!(resolve_menu_arg(Some("ub")).unwrap(), "ub");
         let e = resolve_menu_arg(Some("ubatch")).unwrap_err().to_string();

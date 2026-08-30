@@ -197,7 +197,7 @@ pub fn render(i: &ReportInputs) -> String {
                 .iter()
                 .map(|(b, c)| format!("b{b}: {c}"))
                 .collect();
-            push(&mut out, format!("- {model} settled ctx — {}", line.join(" → ")));
+            push(&mut out, format!("- {model} settled ctx — {}", line.join(" -> ")));
         }
         if tg_by_build.len() > 1 {
             any = true;
@@ -205,7 +205,7 @@ pub fn render(i: &ReportInputs) -> String {
                 .iter()
                 .map(|(b, t)| format!("b{b}: {t:.0} t/s"))
                 .collect();
-            push(&mut out, format!("- {model} generation — {}", line.join(" → ")));
+            push(&mut out, format!("- {model} generation — {}", line.join(" -> ")));
         }
     }
     if !any {
@@ -370,7 +370,7 @@ mod tests {
         );
         assert!(!text.contains("48012"), "the phantom heap number must not appear");
         assert!(text.contains("| qwen3.8-27b-ud-q4_k_xl | 118016 |"));
-        assert!(text.contains("b10454: 120064 → b10630: 111872"), "{text}");
+        assert!(text.contains("b10454: 120064 -> b10630: 111872"), "{text}");
         assert!(text.contains("'~/models/x.gguf'"), "home sanitized: {text}");
         assert!(!text.contains("/home/buck"), "no raw home path anywhere");
         assert!(text.contains("2026-08-2"), "date renders: {text}");

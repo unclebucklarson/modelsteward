@@ -86,7 +86,7 @@ pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
 }
 
-/// One-time rename migration (llamacppcodeconf → modelsteward,
+/// One-time rename migration (llamacppcodeconf -> modelsteward,
 /// 2026-08-26): move the old config and state dirs to the new names so
 /// measurements, history, trials, and overrides survive the rename.
 /// Never merges — if both old and new exist, the new wins and the old is
@@ -116,7 +116,7 @@ pub fn migrate_rename() -> Vec<String> {
     ] {
         if old.is_dir() && !new.exists() {
             match std::fs::rename(&old, &new) {
-                Ok(()) => notes.push(format!("migrated {} → {}", old.display(), new.display())),
+                Ok(()) => notes.push(format!("migrated {} -> {}", old.display(), new.display())),
                 Err(e) => notes.push(format!("could NOT migrate {}: {e}", old.display())),
             }
         }
@@ -161,7 +161,7 @@ pub fn migrate_snap_strays() -> Vec<String> {
                 if old.is_dir() && !new.exists() {
                     notes.push(match std::fs::rename(&old, new) {
                         Ok(()) => format!(
-                            "rescued snap-stranded data: {} → {}",
+                            "rescued snap-stranded data: {} -> {}",
                             old.display(),
                             new.display()
                         ),
@@ -224,7 +224,7 @@ pub fn pick_server(cfg: &settings::AppConfig) -> Result<PathBuf> {
         .map(|i| i.server_path.clone())
         .ok_or_else(|| anyhow::anyhow!(
             "no llama-server found — pick one in the GUI (Settings tab), set \
-             \"server_bin\" in {}, or build one (GUI: Server → Build Advisor; \
+             \"server_bin\" in {}, or build one (GUI: Server -> Build Advisor; \
              CLI: --advise)",
             config_file().display()
         ))

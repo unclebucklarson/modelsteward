@@ -474,7 +474,7 @@ fn extract_root_object<'a, 'b>(ast: &'b ParsedAst<'a>) -> Result<&'b Object<'a>,
     ast.value.as_object().ok_or(EditError::RootNotObject)
 }
 
-/// Navigate `root → provider → <provider_id> → models`. Returns the models
+/// Navigate `root -> provider -> <provider_id> -> models`. Returns the models
 /// object; returns `MissingContainer` if any hop is absent.
 fn navigate_to_models<'a, 'b>(
     root: &'b Object<'a>,

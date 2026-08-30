@@ -279,7 +279,7 @@ mod tests {
         cfg2.save(&path).unwrap();
         assert_eq!(AppConfig::load(&path), cfg2);
 
-        // Garbage file → defaults, not a crash.
+        // Garbage file -> defaults, not a crash.
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(AppConfig::load(&path), AppConfig::default());
     }

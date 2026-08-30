@@ -59,7 +59,7 @@ pub fn parse_output(body: &serde_json::Value) -> Baseline {
 pub fn run(bench: &Path, model: &Path, extra_args: &[String]) -> Result<Baseline> {
     anyhow::ensure!(
         bench.is_file(),
-        "llama-bench not found at {} — it builds alongside llama-server (Build Advisor → rebuild)",
+        "llama-bench not found at {} — it builds alongside llama-server (Build Advisor -> rebuild)",
         bench.display()
     );
     let output = std::process::Command::new(bench)
@@ -90,7 +90,7 @@ pub fn run(bench: &Path, model: &Path, extra_args: &[String]) -> Result<Baseline
 }
 
 /// The full baseline sweep, shared by the CLI (`--bench`) and the GUI
-/// (Server → Bench). Unloads OUR router's models to free the GPU (a server
+/// (Server -> Bench). Unloads OUR router's models to free the GPU (a server
 /// we didn't start is never touched — it errors instead), then benches
 /// `target` if given, else every measured, non-embedding model whose
 /// baseline is missing or from another build. Returns (benched, failed);
@@ -110,7 +110,7 @@ pub fn run_baselines(
     let current_build = discover::build_of(&server);
     let dir = router::state_dir();
 
-    // The same id → file mapping the Library rows use.
+    // The same id -> file mapping the Library rows use.
     let models = system::scan_models(cfg, &[]);
     let ids_by_path = rows::router_ids_by_path(&models);
     let mut by_id: std::collections::BTreeMap<String, &library::ModelFile> =
@@ -173,7 +173,7 @@ pub fn run_baselines(
             }
         }
         other => anyhow::bail!(
-            "port {} is running a server this app doesn't own ({other:?}); \
+            "port {} is running a server this app doesn't own ({other}); \
              benching needs the GPU free, and that server is not ours to unload",
             cfg.port
         ),
@@ -193,7 +193,7 @@ pub fn run_baselines(
         let mut extra = vec!["-ctk".to_string(), kv.clone(), "-ctv".to_string(), kv];
         // An over-VRAM MoE can't load raw — llama-bench has no --fit —
         // but it DOES take --n-cpu-moe, so the bench mirrors the model's
-        // applied placement (cpu-moe → all layers; n-cpu-moe → as set).
+        // applied placement (cpu-moe -> all layers; n-cpu-moe -> as set).
         // Without an applied placement the failure was guaranteed (found
         // live 2026-08-28: GLM + the 80B errored while gpt-oss benched).
         if let Some(o) = ov {

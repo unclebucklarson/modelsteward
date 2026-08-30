@@ -212,7 +212,7 @@ fn advice_for(
 /// generator uses — including duplicate-alias suffixing ("-2"). Predicting
 /// aliases independently glued two same-named files onto one router entry
 /// while the real "-2" entry showed as a phantom row (user-found). Public
-/// because the bench CLI needs the same id → file mapping.
+/// because the bench CLI needs the same id -> file mapping.
 pub fn router_ids_by_path(
     models: &[ModelFile],
 ) -> std::collections::HashMap<std::path::PathBuf, String> {
@@ -660,7 +660,7 @@ mod tests {
         let (lvl, msg) = advice_for(Some(&GgufMeta::default()), "model", 120 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Bad);
         assert!(msg.contains("too large"), "{msg}");
-        // Bigger than VRAM → CPU spill warning.
+        // Bigger than VRAM -> CPU spill warning.
         let (lvl, msg) = advice_for(Some(&GgufMeta::default()), "model", 30 * 1024 * 1024 * 1024, None, None, None, HW);
         assert_eq!(lvl, AdviceLevel::Warn);
         assert!(msg.contains("partly on CPU"), "{msg}");
@@ -713,7 +713,7 @@ mod tests {
 
     #[test]
     fn unique_repo_match_rescues_unpredictable_cache_tags() {
-        // No quant token in the filename → tag not derivable → fallback OK.
+        // No quant token in the filename -> tag not derivable -> fallback OK.
         let models = vec![file(
             "gemma-4-31B-instruct.gguf",
             Source::HfHub {
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn two_quants_of_one_repo_never_share_an_identity() {
         // The user's real bug: Q4 and Q5 files of the same repo, router
-        // offers only the Q5 → the Q4 must NOT glue itself onto it.
+        // offers only the Q5 -> the Q4 must NOT glue itself onto it.
         let models = vec![
             file(
                 "Qwen3.8-27B-UD-Q4_K_XL.gguf",
@@ -816,7 +816,7 @@ mod tests {
         assert_eq!(rows[0].quant, "Q5_K_XL");
         assert_eq!(rows[0].quant_header_disagrees.as_deref(), Some("Q4_K_S"));
 
-        // Agreement (or no filename token) → header value, no note.
+        // Agreement (or no filename token) -> header value, no note.
         let mut m2 = file("model-Q4_K_M.gguf", Source::Shelf, 10, true);
         m2.meta.as_mut().unwrap().quantization = Some("Q4_K_M".into());
         let rows = assemble(&[m2], &[], &Measurements::new(), &[], HW);
@@ -830,7 +830,7 @@ mod tests {
         assert!(looks_moe(None, "qwen_qwen3.6-35b-a3b-q4_k_s"));
         assert!(!looks_moe(None, "Qwen3.8-27B-UD-Q4_K_XL"), "dense stays dense");
         // The incoming 43GiB download's exact shape: MoE, way over 24GB VRAM,
-        // fits VRAM+RAM → the advice points at the moe trial, not generic
+        // fits VRAM+RAM -> the advice points at the moe trial, not generic
         // CPU-spill.
         let m = file("Qwen3-Next-80B-A3B-Instruct-UD-Q4_K_XL.gguf", Source::Shelf, 43, true);
         let rows = assemble(&[m], &[], &Measurements::new(), &[], HW);
