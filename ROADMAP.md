@@ -544,6 +544,17 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
+- **Showcase program (user idea 2026-08-30, scaffolded same day):**
+  docs/showcase/ holds measured case studies of real projects built on
+  modelsteward-served models — aggregates only (meter/trials/quality),
+  never transcripts; artifacts live in their own linked repos; case-
+  study framing with caveats stated. First entry: the Minecraft clone
+  (Qwen3.8-27B, trial-crowned ngram-simple n8/m64, day-one receipts
+  captured: 257 turns, 856k prompt/116k generated, ~30% cache, $0.03
+  measured vs ~$0.35 cloud). AWAITING from Scott: project completion,
+  the clone's own repo link, a screenshot. Consider a README link to
+  the showcase once entry #1 is finished.
+
 - **Thinking as a first-class knob (user question 2026-08-30):** llama-
   server exposes reasoning at the server level — `--reasoning
   on|off|auto`, `--reasoning-effort minimal…xhigh`, `--chat-template-
