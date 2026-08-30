@@ -544,6 +544,23 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
+- **Thinking as a first-class knob (user question 2026-08-30):** llama-
+  server exposes reasoning at the server level — `--reasoning
+  on|off|auto`, `--reasoning-effort minimal…xhigh`, `--chat-template-
+  kwargs` (verified in the b10672 help) — so it is per-model preset
+  territory, already settable TODAY via ⚙ Tune extra flags (e.g.
+  `--reasoning off` or `--reasoning-effort low`). Promotion candidates,
+  in the spirit of the spec-type/ubatch ⚙ promotions: (a) a first-class
+  ⚙ "reasoning" field with the measured hint; (b) a `think` trial menu
+  racing on/off/low for agent work — tg + 2nd-turn ms + the quality
+  probe deciding whether thinking EARNS its latency on this model
+  (measured, not guessed, on the most-debated knob in local LLMs);
+  (c) folds into the gpt-oss advisor fix (top of work queue), which
+  needs reasoning_effort plumbing anyway. Scope note: request-level
+  chat_template_kwargs from the client (OpenCode, our advisor) override
+  the server default — three scopes: template default < per-model
+  preset (OURS) < per-request (the harness's).
+
 - **Pre-flight check (user idea 2026-08-30, design settled, build AFTER
   Scott's GUIDE.md QA walk):** a deterministic checklist engine in core
   — `preflight::check(scan, measurements, trials, cfg) →
