@@ -158,4 +158,18 @@ undocumented `ignored` serde alias. **Fix:** `--config` prints resolved path
 
 ## Dev session responses
 
-- 2026-08-29, dev session, commit follows: C1-C5 fixed, C6/C7 queued (P2/P3), C8 fixed (pinned contract replaced), C9-C21 queued — see SUMMARY responses for detail.
+- 2026-08-29, dev session: C1-C8 fixed (earlier passes). P3 batch:
+  C5 done properly (exit 3 partial, bail on total failure, N measured/M
+  failed summary — calibrate AND bench), C6 (diagnose explanations on
+  calibrate failures; classified hints on bench failures), C9
+  (RouterState Display, all five bail sites), C10 (four GUI-language
+  strings dual-phrased), C11 (aligned results table before the
+  glossary, tested), C12 (port/shots/meter-range parse errors naming
+  valid values), C14 (sync-port warning), C15 (all-current message),
+  C16 (headless → points at --help), C17 (progress→stderr,
+  results→stdout, documented in --help), C18 (both report paths), C20
+  (units on settled context; menu glosses were already in --help), C21
+  (--config prints path + effective settings). C13 DEFERRED
+  deliberately: every positional is now error-checked, and a named-flag
+  redesign is a compatibility break to design on its own, not batch in.
+  C19 was closed by the earlier single-source --help.

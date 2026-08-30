@@ -45,6 +45,9 @@ enum Msg {
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
     Progress(String),
+    /// Updates the busy label mid-operation (e.g. "campaign 3/7") —
+    /// usability review G11: long runs had no progress indicator.
+    Phase(String),
     /// Terminates the busy state with a final line.
     Finished(String),
     Error(String),
@@ -134,6 +137,7 @@ struct App {
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
     tuning_question: String,
+    settings_needs_apply: bool,
     library_filter: String,
     library_selected: Option<String>,
     show_guide: bool,
@@ -324,6 +328,7 @@ impl App {
             advisories: Vec::new(),
             advisor_open: false,
             tuning_question: String::new(),
+            settings_needs_apply: false,
             library_filter: String::new(),
             library_selected: None,
             show_guide: false,
@@ -872,10 +877,30 @@ impl App {
                     // (it's what puts a model into OpenCode at all), bench
                     // frees the GPU itself, each trial restores the preset.
                     let cancelled = || cancel_token.is_cancelled();
-                    if measure && !measure_and_sync(&cfg, &id, false, false, tx) {
-                        return; // reported; don't pile campaigns on a broken load
+                    let total = [
+                        measure, bench, spec, ub, kv, load, dials, moe, vision,
+                        cache, ckpt, slots, quality,
+                    ]
+                    .iter()
+                    .filter(|b| **b)
+                    .count();
+                    let mut step = 0usize;
+                    let txp = tx.clone();
+                    let idp = id.clone();
+                    let mut phase = move |name: &str| {
+                        step += 1;
+                        let _ = txp.send(Msg::Phase(format!(
+                            "Lab {idp}: {name} ({step}/{total})"
+                        )));
+                    };
+                    if measure {
+                        phase("measure");
+                        if !measure_and_sync(&cfg, &id, false, false, tx) {
+                            return; // reported; don't pile campaigns on a broken load
+                        }
                     }
                     if bench {
+                        phase("bench");
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
@@ -894,34 +919,18 @@ impl App {
                             }
                         }
                     }
-                    if spec {
-                        trial_worker(&cfg, &id, "spec", &cancel_token, tx);
-                    }
-                    if ub {
-                        trial_worker(&cfg, &id, "ub", &cancel_token, tx);
-                    }
-                    if kv {
-                        trial_worker(&cfg, &id, "kv", &cancel_token, tx);
-                    }
-                    if load {
-                        trial_worker(&cfg, &id, "load", &cancel_token, tx);
-                    }
-                    if dials {
-                        trial_worker(&cfg, &id, "dials", &cancel_token, tx);
-                    }
-                    if moe {
-                        trial_worker(&cfg, &id, "moe", &cancel_token, tx);
-                    }
-                    if vision {
-                        trial_worker(&cfg, &id, "vision", &cancel_token, tx);
-                    }
-                    if cache {
-                        trial_worker(&cfg, &id, "cache", &cancel_token, tx);
-                    }
-                    if ckpt {
-                        trial_worker(&cfg, &id, "ckpt", &cancel_token, tx);
+                    for (on, menu) in [
+                        (spec, "spec"), (ub, "ub"), (kv, "kv"), (load, "load"),
+                        (dials, "dials"), (moe, "moe"), (vision, "vision"),
+                        (cache, "cache"), (ckpt, "ckpt"),
+                    ] {
+                        if on {
+                            phase(&format!("{menu} trial"));
+                            trial_worker(&cfg, &id, menu, &cancel_token, tx);
+                        }
                     }
                     if slots {
+                        phase("slots trial");
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
@@ -933,6 +942,7 @@ impl App {
                         }
                     }
                     if quality {
+                        phase("quality probe");
                         let tx2 = tx.clone();
                         let mut progress = move |line: String| {
                             let _ = tx2.send(Msg::Progress(line));
@@ -1454,6 +1464,12 @@ impl App {
                     self.busy = None;
                 }
                 Msg::Progress(p) => self.log(p),
+                Msg::Phase(p) => {
+                    self.log(p.clone());
+                    if self.busy.is_some() {
+                        self.busy = Some(p);
+                    }
+                }
                 Msg::Finished(p) => {
                     self.log(p);
                     self.busy = None;
@@ -2470,6 +2486,22 @@ impl App {
                 {
                     run_clicked = true;
                 }
+                // A cancel affordance next to the thing that started the
+                // run, not only the tiny status-bar button (review G11).
+                if self.busy.is_some() {
+                    if self.cancel_token.is_cancelled() {
+                        ui.weak("cancelling…");
+                    } else if ui
+                        .button("✖ Cancel run")
+                        .on_hover_text(
+                            "Stops at the next safe boundary; partial results are \
+                             kept and your config is restored.",
+                        )
+                        .clicked()
+                    {
+                        self.cancel_token.cancel();
+                    }
+                }
                 ui.add_space(8.0);
                 ui.separator();
                 ui.strong("Trial results");
@@ -3438,15 +3470,11 @@ impl App {
                         match self.cfg.save(&system::config_file()) {
                             Ok(()) => {
                                 self.log("settings saved");
-                                if port_changed {
-                                    self.log(
-                                        "port changed — regenerate preset + sync so opencode.json's baseURL follows",
-                                    );
-                                }
+                                // Review G12: offer the follow-up, don't
+                                // instruct it (the hand-fix→feature rule,
+                                // applied to ourselves).
                                 if router_changed {
-                                    self.log(
-                                        "router settings changed — Stop + Start the router to apply",
-                                    );
+                                    self.settings_needs_apply = true;
                                 }
                                 self.spawn_scan();
                             }
@@ -3458,6 +3486,72 @@ impl App {
             }
             if ui.button("Revert").clicked() {
                 self.reset_edit_buffers();
+            }
+        });
+        if self.settings_needs_apply {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "saved — but the running router still uses the old settings",
+                );
+                if ui
+                    .add_enabled(
+                        self.busy.is_none(),
+                        egui::Button::new("Apply now: restart router + regen preset + sync"),
+                    )
+                    .on_disabled_hover_text("another operation is running — apply when it finishes")
+                    .on_hover_text(
+                        "Stops the router, rewrites the preset with the new settings, \
+                         starts it again, and re-syncs opencode.json's baseURL. \
+                         Loaded models will reload on next use.",
+                    )
+                    .clicked()
+                {
+                    self.settings_needs_apply = false;
+                    self.action_apply_settings();
+                }
+                if ui.small_button("later").on_hover_text("Dismiss — apply by hand with Stop + Start on the Server tab").clicked() {
+                    self.settings_needs_apply = false;
+                }
+            });
+        }
+    }
+
+    /// Review G12: the one-click follow-through after router settings
+    /// change — stop, regen preset, start, sync. What the log used to
+    /// tell the user to go do by hand.
+    fn action_apply_settings(&mut self) {
+        let cfg = self.cfg.clone();
+        let measurements = self.measurements.clone();
+        self.spawn("applying settings: restarting router", move |tx| {
+            // Stop errors are non-fatal: a router that isn't running is
+            // already stopped for our purposes.
+            if let Err(e) = router::stop(&router::state_dir(), &system::preset_path()) {
+                let _ = tx.send(Msg::Progress(format!("stop: {e:#} — continuing")));
+            }
+            match system::write_preset(&cfg, &[]) {
+                Ok((path, n)) => {
+                    let _ = tx.send(Msg::PresetWritten(path, n));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("preset: {e:#}")));
+                    return;
+                }
+            }
+            if !start_router_and_wait(&cfg, tx) {
+                return;
+            }
+            match run_sync(&cfg, &measurements) {
+                Ok(report) => {
+                    let _ = tx.send(Msg::SyncDone(report));
+                    send_configured(tx);
+                    let _ = tx.send(Msg::Finished(
+                        "settings applied: router restarted, preset regenerated, opencode.json synced".into(),
+                    ));
+                }
+                Err(e) => {
+                    let _ = tx.send(Msg::Error(format!("sync: {e:#}")));
+                }
             }
         });
     }
@@ -4047,6 +4141,14 @@ impl App {
                              gets the limits of what you actually serve. Re-run \
                              affected menus after a llama.cpp rebuild — the Rebuild \
                              scorecard tells you when numbers went stale.",
+                        ),
+                        (
+                            "Same thing, different names",
+                            "Measure (GUI) = --calibrate (CLI): finding a model's real \
+                             context and tool support. A trial races config variants \
+                             for one model; each trial type is a menu (spec, kv, moe…); \
+                             the Lab calls one queued batch of work a campaign. The \
+                             preset is the router.ini file the router reads.",
                         ),
                     ] {
                         ui.strong(head);
@@ -4815,7 +4917,20 @@ fn trial_table_grid(
             "", "novel t/s", "rewrite t/s", "prefill t/s", "context", "load s",
             "2nd-turn ms", "J/tok", "fidelity", "accepted",
         ] {
-            ui.strong(h);
+            // Review G10: the one grid where a novice most needs
+            // definitions had none. Same vocabulary as the CLI glossary.
+            ui.strong(h).on_hover_text(match h {
+                "novel t/s" => "Generation speed writing brand-new code, tokens/second — speculation's worst case (the did-anything-get-hurt check).",
+                "rewrite t/s" => "Generation speed regenerating code the model was given — edits, refactors, diffs: most of what a coding agent does.",
+                "prefill t/s" => "How fast it reads your prompt before the first token, tokens/second.",
+                "context" => "The context window memory-fitting settled on under this config, in tokens.",
+                "load s" => "Wall seconds from load request to ready — the hot-swap cost when the router switches models.",
+                "2nd-turn ms" => "The agent-turn probe: a big prompt sent, then re-sent with a middle edit; this is the second turn's prefill time.",
+                "J/tok" => "Marginal joules per generated token (GPU via NVML, CPU via RAPL when readable, idle draw subtracted) — the energy half of a token's cost.",
+                "fidelity" => "The quality gate: how much of a module the model was told to preserve came back verbatim. A drop means the config degrades output — no speed win survives that.",
+                "accepted" => "How many speculated tokens the model confirmed — higher acceptance = speculation is paying off.",
+                _ => "★ green = this menu's winner, waiting for your Apply. ✓ blue = a winner already applied and serving.",
+            });
         }
         ui.end_row();
         let fmt = |v: Option<f64>| v.map(|x| format!("{x:.1}")).unwrap_or_else(|| "—".into());
@@ -4891,7 +5006,7 @@ fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
             let failed = m.values().filter(|x| x.error.is_some()).count();
             let _ = tx.send(Msg::Measurements(m));
             let _ = tx.send(Msg::Finished(format!(
-                "calibration finished: {measured} measured, {failed} known failures"
+                "measuring finished: {measured} measured, {failed} known failures"
             )));
         }
         Err(e) => {

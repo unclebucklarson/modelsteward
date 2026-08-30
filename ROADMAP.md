@@ -273,7 +273,11 @@ recommendations became the Lab's standing recommendation blocks.
    selection detail panel with full advice, quality scores, every
    action, and visible history (G25 resolved). Tab-semantics question
    (OpenCode mirror inside Connections) still awaits Scott's yes/no.
-3. Usability P3 batch: CLI diagnose + exit codes, vocabulary
+3. ✔ Usability P3 batch DONE 2026-08-29 (two commits): CLI exit codes
+   + diagnosis + parse errors + --config; Lab (k/n) progress + inline
+   Cancel; trial-header hovers; Settings "Apply now" button; vocabulary
+   note in the Tuning Guide. C13 (named flags) deliberately deferred.
+   Was: Usability P3 batch: CLI diagnose + exit codes, vocabulary
    unification, trial-header hovers, Settings offers actions not
    instructions, G11 progress/cancel placement.
 4. Then: QA / user-guide / remaining-work discussion (user-requested).

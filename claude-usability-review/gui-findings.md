@@ -219,3 +219,16 @@ last Lab selection set in config.json (they're already config-shaped).
   History section (also resolves G25's discoverability). G10 partially
   addressed (grid header hovers); trial-table headers still pending in
   P3. Tab-semantics question still open for Scott.
+- 2026-08-29, dev session (P3 GUI batch): G9 addressed — worker says
+  "measuring finished" to match the GUI's Measure; CLI errors say
+  "measuring needs…"; the Tuning Guide gains a "Same thing, different
+  names" entry mapping Measure/--calibrate, trial/menu/campaign, and
+  preset/router.ini (flag names kept as compatible aliases). G10 fixed:
+  every trial-table header has a one-sentence hover, plus the ★/✓
+  legend on the blank corner. G11 fixed: the Lab worker now reports
+  "Lab <id>: <campaign> (k/n)" into the busy label AND the log, and a
+  Cancel button sits next to Run while a run is live. G12 fixed:
+  Settings no longer instructs — after a router-affecting save it
+  offers "Apply now: restart router + regen preset + sync" (one worker
+  does all three) with a "later" dismiss. G13 fixed via the new
+  RouterState Display (CLI batch). 167 tests green.
