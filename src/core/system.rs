@@ -35,6 +35,53 @@ pub fn build_id() -> String {
     )
 }
 
+/// The full meter report as text — one implementation for the CLI
+/// (`--meter`) and the GUI's Token Meter window. `harvest_first` pulls
+/// the live router.log into the ledger before reporting (the GUI skips
+/// it: its poller harvests continuously).
+pub fn meter_report_text(
+    cfg: &settings::AppConfig,
+    range: Option<&str>,
+    harvest_first: bool,
+) -> anyhow::Result<String> {
+    use crate::core::{advisor, meter, router, trial};
+    let dir = router::state_dir();
+    let now = advisor::now_epoch();
+    if harvest_first
+        && let Ok(text) = std::fs::read_to_string(dir.join("router.log"))
+    {
+        let _ = meter::harvest(&dir, &text, now);
+    }
+    let (label, since) = match range {
+        Some("today") => ("today (UTC)", Some(now - now % 86_400)),
+        Some("24h") => ("last 24h", Some(now.saturating_sub(86_400))),
+        Some("7d") => ("last 7 days", Some(now.saturating_sub(7 * 86_400))),
+        None => ("all time", None),
+        Some(other) => anyhow::bail!(
+            "unknown range {other:?} — valid: today, 24h, 7d (no range = all time)"
+        ),
+    };
+    let r = meter::report(&meter::read_all(&dir), since, None);
+    let trials = trial::read_trials(&dir);
+    let j: std::collections::BTreeMap<String, f64> = r
+        .per_model
+        .keys()
+        .filter_map(|m| {
+            trials
+                .get(m)
+                .and_then(|t| trial::served_j_per_token(cfg, m, t))
+                .map(|jt| (m.clone(), jt))
+        })
+        .collect();
+    let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
+    Ok(meter::fmt_report(
+        &r,
+        label,
+        cfg.cloud_price_per_mtok,
+        Some((&cost, cfg.kwh_price_usd)),
+    ))
+}
+
 pub fn config_file() -> PathBuf {
     config_dir().join("config.json")
 }

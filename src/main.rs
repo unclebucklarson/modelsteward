@@ -244,44 +244,10 @@ fn main() {
     }
 }
 
-/// The token-ledger report. Split out of main so a bad range can be a
-/// real error (usability review C12: `--meter 30d` silently printed
-/// all-time).
+/// The token-ledger report — the shared core::system implementation,
+/// harvesting the live log first so the numbers are current.
 fn meter_cmd(cfg: &settings::AppConfig, range: Option<&str>) -> anyhow::Result<()> {
-    use modelsteward::core::meter;
-    let dir = router::state_dir();
-    let now = advisor::now_epoch();
-    // Harvest the live log first so the report is current, then print
-    // the requested range (UTC hour buckets).
-    if let Ok(text) = std::fs::read_to_string(dir.join("router.log")) {
-        let _ = meter::harvest(&dir, &text, now);
-    }
-    let (label, since) = match range {
-        Some("today") => ("today (UTC)", Some(now - now % 86_400)),
-        Some("24h") => ("last 24h", Some(now.saturating_sub(86_400))),
-        Some("7d") => ("last 7 days", Some(now.saturating_sub(7 * 86_400))),
-        None => ("all time", None),
-        Some(other) => anyhow::bail!(
-            "unknown range {other:?} — valid: today, 24h, 7d (no range = all time)"
-        ),
-    };
-    let r = meter::report(&meter::read_all(&dir), since, None);
-    let trials = trial::read_trials(&dir);
-    let j: std::collections::BTreeMap<String, f64> = r
-        .per_model
-        .keys()
-        .filter_map(|m| {
-            trials
-                .get(m)
-                .and_then(|t| trial::served_j_per_token(cfg, m, t))
-                .map(|jt| (m.clone(), jt))
-        })
-        .collect();
-    let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
-    print!(
-        "{}",
-        meter::fmt_report(&r, label, cfg.cloud_price_per_mtok, Some((&cost, cfg.kwh_price_usd)))
-    );
+    print!("{}", system::meter_report_text(cfg, range, true)?);
     Ok(())
 }
 

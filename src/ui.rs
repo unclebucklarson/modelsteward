@@ -138,6 +138,9 @@ struct App {
     advisor_open: bool,
     tuning_question: String,
     settings_needs_apply: bool,
+    show_meter: bool,
+    meter_report: String,
+    meter_report_range: Option<&'static str>,
     library_filter: String,
     library_selected: Option<String>,
     show_guide: bool,
@@ -329,6 +332,9 @@ impl App {
             advisor_open: false,
             tuning_question: String::new(),
             settings_needs_apply: false,
+            show_meter: false,
+            meter_report: String::new(),
+            meter_report_range: None,
             library_filter: String::new(),
             library_selected: None,
             show_guide: false,
@@ -1626,6 +1632,11 @@ impl App {
             }
             if ui.button("Advisor — opinions + Ask about tuning").clicked() {
                 self.advisor_open = true;
+                ui.close();
+            }
+            if ui.button("Token Meter — usage & measured cost").clicked() {
+                self.refresh_meter_report();
+                self.show_meter = true;
                 ui.close();
             }
             if ui
@@ -3004,19 +3015,23 @@ impl App {
                         self.run_row_action(RowAction::Unload(id));
                     }
                 }
-                ui.separator();
-                egui::CollapsingHeader::new("Router log (tail)")
-                    .default_open(false)
-                    .show(ui, |ui| {
-                        egui::ScrollArea::vertical()
-                            .max_height(200.0)
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
-                                ui.monospace(tail_of_log());
-                            });
-                    });
             }
         }
+        ui.separator();
+        // Always present, whatever the router state — the user couldn't
+        // find the logs when this lived inside the Ours-only block
+        // (2026-08-30). Full file: Tools → Open Router Log.
+        egui::CollapsingHeader::new("Router log (live tail)")
+            .default_open(false)
+            .show(ui, |ui| {
+                ui.weak("Last 16 KB, newest at the bottom. Tools → Open Router Log for the whole file.");
+                egui::ScrollArea::vertical()
+                    .max_height(280.0)
+                    .stick_to_bottom(true)
+                    .show(ui, |ui| {
+                        ui.monospace(tail_of_log());
+                    });
+            });
         ui.separator();
         ui.strong("Ollama (peer — observed, never managed)");
         if !self.ollama.reachable {
@@ -4102,6 +4117,57 @@ impl App {
     /// placement is applied reflect a config you'll never serve). The
     /// REAL guards are contextual (the Lab warns at the moment of
     /// mistake); this is the readable map.
+    fn refresh_meter_report(&mut self) {
+        // The poller harvests continuously — the window just reads the
+        // ledger (harvest_first=false keeps this cheap and lock-free).
+        self.meter_report =
+            system::meter_report_text(&self.cfg, self.meter_report_range, false)
+                .unwrap_or_else(|e| format!("meter: {e:#}"));
+    }
+
+    fn meter_window(&mut self, ctx: &egui::Context) {
+        if !self.show_meter {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("Token Meter — usage & measured cost")
+            .collapsible(false)
+            .default_width(620.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let mut pick = None;
+                    for (label, range) in [
+                        ("Today", Some("today")),
+                        ("24h", Some("24h")),
+                        ("7 days", Some("7d")),
+                        ("All time", None),
+                    ] {
+                        if ui
+                            .selectable_label(self.meter_report_range == range, label)
+                            .clicked()
+                        {
+                            pick = Some(range);
+                        }
+                    }
+                    if let Some(range) = pick {
+                        self.meter_report_range = range;
+                        self.refresh_meter_report();
+                    }
+                    if ui.button("⟳ Refresh").on_hover_text("Re-read the ledger (it grows every ~2s while the router serves)").clicked() {
+                        self.refresh_meter_report();
+                    }
+                });
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(440.0).show(ui, |ui| {
+                    ui.monospace(&self.meter_report);
+                });
+            });
+        if !open {
+            self.show_meter = false;
+        }
+    }
+
     fn guide_window(&mut self, ctx: &egui::Context) {
         if !self.show_guide {
             return;
@@ -5279,7 +5345,7 @@ fn tail_of_log() -> String {
     let Ok(mut f) = std::fs::File::open(&path) else {
         return "(log unreadable)".into();
     };
-    let start = meta.len().saturating_sub(4096);
+    let start = meta.len().saturating_sub(16 * 1024);
     let _ = f.seek(SeekFrom::Start(start));
     let mut s = String::new();
     let _ = f.read_to_string(&mut s);
@@ -5354,6 +5420,7 @@ impl eframe::App for App {
         self.override_dialog(ui.ctx());
         self.diagnosis_window(ui.ctx());
         self.ai_advisor_window(ui.ctx());
+        self.meter_window(ui.ctx());
         self.guide_window(ui.ctx());
         self.advisor_window(ui.ctx());
 
