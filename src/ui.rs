@@ -141,6 +141,9 @@ struct App {
     settings_needs_apply: bool,
     show_meter: bool,
     confirm_disrupt: Option<(String, Disrupt)>,
+    /// Mirrors self.busy for the poller thread (auto-build must never
+    /// compile beside a measurement/trial/bench).
+    busy_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     meter_report: String,
     meter_report_range: Option<&'static str>,
     library_filter: String,
@@ -348,6 +351,7 @@ impl App {
             settings_needs_apply: false,
             show_meter: false,
             confirm_disrupt: None,
+            busy_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             meter_report: String::new(),
             meter_report_range: None,
             library_filter: String::new(),
@@ -489,6 +493,7 @@ impl App {
     /// file each round so a saved port change takes effect live.
     fn spawn_status_poller(&self, ctx: egui::Context) {
         let tx = self.tx.clone();
+        let app_busy = self.busy_flag.clone();
         std::thread::spawn(move || {
             let meas_path = router::state_dir().join("measurements.json");
             let trials_path = router::state_dir().join("trials.json");
@@ -507,6 +512,9 @@ impl App {
             // A release the auto-build wants but couldn't start because the
             // machine was busy — retried each tick until quiet.
             let mut pending_autobuild: Option<u64> = None;
+            // When the router last showed generation activity. Starts at
+            // \"now\": a fresh app assumes recent activity until proven quiet.
+            let mut last_activity_epoch: u64 = advisor::now_epoch();
             loop {
                 let cfg = system::load_config();
                 // router_config -> pick_server probes every install with
@@ -568,6 +576,11 @@ impl App {
                         f.read_to_string(&mut tail).ok()?;
                         evidence::activity_hint(&tail)
                     });
+                    if hint.is_some() {
+                        // Any classified activity — including a turn
+                        // FINISHING — counts as \"recently active\".
+                        last_activity_epoch = advisor::now_epoch();
+                    }
                     let text = hint.and_then(|h| match h {
                         evidence::Activity::TurnStarted => Some("working…".to_string()),
                         evidence::Activity::Prefilling(pct) => {
@@ -671,23 +684,40 @@ impl App {
                     {
                         pending_autobuild = None;
                     } else {
-                        let busy_status =
-                            |m: &router::RouterModel| matches!(m.status.as_str(), "loaded" | "loading" | "downloading" | "downloaded");
-                        let idle = match &state {
-                            router::RouterState::Down => true,
-                            router::RouterState::Ours { models } => {
-                                !models.iter().any(busy_status)
-                            }
-                            // External/Trouble: someone else's server — be
-                            // polite, and say why nothing is happening.
-                            _ => false,
+                        // Design session 2026-08-30 (Scott's pick):
+                        // \"quiet for 10 min\". A LOADED model no longer
+                        // blocks — the daily-driver machine is never
+                        // model-free, and the old gate starved auto-build
+                        // for days (b10697 sat queued behind a 24h
+                        // Minecraft session). Still deferred: any app
+                        // operation (measure/trial/bench via busy_flag),
+                        // a trial from ANY process (marker), models
+                        // mid-load/download, and recent generation.
+                        let quiet_secs =
+                            advisor::now_epoch().saturating_sub(last_activity_epoch);
+                        let transitioning = |m: &router::RouterModel| {
+                            matches!(m.status.as_str(), "loading" | "downloading" | "downloaded")
                         };
+                        let idle = !app_busy.load(std::sync::atomic::Ordering::Relaxed)
+                            && !trial::trial_marker_present(&router::state_dir())
+                            && quiet_secs >= 600
+                            && match &state {
+                                router::RouterState::Down => true,
+                                router::RouterState::Ours { models } => {
+                                    !models.iter().any(transitioning)
+                                }
+                                // External/Trouble: someone else's server —
+                                // be polite, and say why nothing happens.
+                                _ => false,
+                            };
                         if idle
                             && let Some(server) = rcfg
                                 .as_ref()
                                 .map(|r| r.server_bin.clone())
                                 .filter(|p| p.is_file())
                         {
+                            let keep = cfg.archives_keep;
+                            let serving = server.clone();
                             pending_autobuild = None;
                             let tx2 = tx.clone();
                             std::thread::spawn(move || {
@@ -708,6 +738,17 @@ impl App {
                                 let sel = advisor::default_backends(&check);
                                 let result =
                                     managed::build_release(&check, sel, &mut progress);
+                                if result.is_ok() {
+                                    for l in managed::prune_archives(
+                                        keep as usize,
+                                        Some(&serving),
+                                    ) {
+                                        let _ = tx2.send(Msg::Progress(format!(
+                                            "[auto-build] pruned old archive {l} \
+                                             (retention: keep {keep})"
+                                        )));
+                                    }
+                                }
                                 let _ = tx2.send(Msg::Managed(managed::status()));
                                 let _ = tx2.send(Msg::Progress(match result {
                                     Ok(b) => format!(
@@ -734,6 +775,8 @@ impl App {
             return;
         }
         self.busy = Some(label.to_string());
+        self.busy_flag
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.log(format!("{label}…"));
         let tx = self.tx.clone();
         std::thread::spawn(move || job(&tx));
@@ -3498,6 +3541,10 @@ impl App {
                     ui.label(text);
                 }
             });
+            // The list grows one row per archived build — scroll it
+            // (design session 2026-08-30, #4) instead of letting it
+            // push the rest of Settings off-screen.
+            egui::ScrollArea::vertical().id_salt("server-binaries").max_height(220.0).show(ui, |ui| {
             for inst in &installs {
                 ui.horizontal(|ui| {
                     if ui.button("Use").clicked() {
@@ -3525,6 +3572,7 @@ impl App {
                     }
                 });
             }
+            });
         }
         ui.add_space(4.0);
             ui.horizontal(|ui| {
@@ -3756,6 +3804,7 @@ impl App {
             cloud_price_per_mtok: self.cfg.cloud_price_per_mtok,
             disabled: self.cfg.disabled.clone(),
             managed_auto_build: self.managed_auto_edit,
+            archives_keep: self.cfg.archives_keep,
             overrides: self.cfg.overrides.clone(),
         })
     }
@@ -4072,12 +4121,21 @@ impl App {
         let sel = self
             .backend_sel
             .unwrap_or_else(|| advisor::default_backends(&check));
+        let keep = self.cfg.archives_keep as usize;
+        let serving = self.picked_server();
         self.spawn("managed llama.cpp: fetch + build newest release", move |tx| {
             let tx2 = tx.clone();
             let mut progress = move |line: String| {
                 let _ = tx2.send(Msg::Progress(line));
             };
             let result = managed::build_release(&check, sel, &mut progress);
+            if result.is_ok() {
+                for l in managed::prune_archives(keep, serving.as_deref()) {
+                    let _ = tx.send(Msg::Progress(format!(
+                        "pruned old archive {l} (retention: keep {keep})"
+                    )));
+                }
+            }
             let _ = tx.send(Msg::Managed(managed::status()));
             let _ = tx.send(match result {
                 Ok(b) => Msg::Finished(format!(
@@ -4652,8 +4710,23 @@ impl App {
                     if self.managed_status.as_ref().is_some_and(|m| m.present) {
                         choices.push(Some(managed::checkout_dir()));
                     }
+                    // Every DISCOVERED install's checkout too (design
+                    // session 2026-08-30: rebuilding your own
+                    // ~/src/llama.cpp shouldn't require adding it by
+                    // hand when the scan already knows it).
+                    if let Some(scan) = &self.scan {
+                        for i in &scan.installs {
+                            if let Some(repo) = advisor::repo_of(&i.server_path)
+                                && !choices.iter().any(|c| c.as_deref() == Some(&*repo))
+                            {
+                                choices.push(Some(repo));
+                            }
+                        }
+                    }
                     for c in &self.cfg.checkouts {
-                        choices.push(Some(c.clone()));
+                        if !choices.iter().any(|x| x.as_ref() == Some(c)) {
+                            choices.push(Some(c.clone()));
+                        }
                     }
                     egui::ComboBox::from_id_salt("advisor-checkout")
                         .selected_text(current)
@@ -4693,6 +4766,15 @@ impl App {
                         }
                     }
                 });
+                if let Some(repo) = self.build_check.as_ref().and_then(|c| c.repo.as_ref()) {
+                    // The confusion this answers (2026-08-30): the active
+                    // binary can be an ARCHIVE whose analysis resolves to
+                    // the managed checkout — say where a rebuild would run.
+                    ui.small(format!(
+                        "checkout under analysis: {} — Update & Rebuild builds there",
+                        repo.display()
+                    ));
+                }
                 ui.separator();
                 let Some(check) = &self.build_check else {
                     ui.horizontal(|ui| {
@@ -4903,14 +4985,60 @@ impl App {
                         }
                         if !ms.archives.is_empty() {
                             ui.add_space(4.0);
-                            ui.label(format!(
-                                "Archived builds: {}",
-                                ms.archives
-                                    .iter()
-                                    .map(|a| a.label.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join(", ")
-                            ));
+                            ui.horizontal(|ui| {
+                                ui.label("Archived builds — keep newest");
+                                let mut keep = self.cfg.archives_keep;
+                                if ui
+                                    .add(egui::DragValue::new(&mut keep).range(0..=99))
+                                    .on_hover_text(
+                                        "Older release archives are pruned after each \
+                                         successful build. 0 = keep everything. The \
+                                         serving archive and custom-named archives are \
+                                         never pruned.",
+                                    )
+                                    .changed()
+                                {
+                                    self.cfg.archives_keep = keep;
+                                    let _ = self.cfg.save(&system::config_file());
+                                }
+                                ui.label("(0 = all)");
+                            });
+                            let serving = self.picked_server();
+                            let mut doomed: Option<String> = None;
+                            egui::ScrollArea::vertical()
+                                .id_salt("archives")
+                                .max_height(140.0)
+                                .show(ui, |ui| {
+                                    for a in &ms.archives {
+                                        ui.horizontal(|ui| {
+                                            let is_serving =
+                                                serving.as_deref() == Some(a.server.as_path());
+                                            ui.monospace(&a.label);
+                                            if is_serving {
+                                                ui.weak("(serving — protected)");
+                                            } else if ui
+                                                .small_button("✖")
+                                                .on_hover_text(
+                                                    "Delete this archived build permanently \
+                                                     (frees its disk; rebuilding it later \
+                                                     means a full compile)",
+                                                )
+                                                .clicked()
+                                            {
+                                                doomed = Some(a.label.clone());
+                                            }
+                                        });
+                                    }
+                                });
+                            if let Some(label) = doomed {
+                                match managed::delete_archive(&label) {
+                                    Ok(()) => {
+                                        self.log(format!("archive {label} deleted"));
+                                        self.managed_status = Some(managed::status());
+                                    }
+                                    Err(e) => self.log(format!("ERROR deleting {label}: {e:#}")),
+                                }
+                            }
                             ui.small(
                                 "This window MAKES builds; choosing what serves \
                                  happens in Settings -> llama-server binary.",
@@ -5578,6 +5706,11 @@ impl eframe::App for App {
 
         self.override_dialog(ui.ctx());
         self.diagnosis_window(ui.ctx());
+        // One sync point for the poller's view of app business.
+        self.busy_flag.store(
+            self.busy.is_some(),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         self.ai_advisor_window(ui.ctx());
         self.disrupt_window(ui.ctx());
         self.meter_window(ui.ctx());

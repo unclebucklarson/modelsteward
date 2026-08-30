@@ -544,6 +544,23 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
+- **✔ Build-corner design session (2026-08-30, all four BUILT same
+  day):** Scott's nitpicks, decided via mocked options. (1) Analyzing
+  selector now offers every DISCOVERED install's checkout (not just
+  active+managed+added) and a line names the resolved checkout —
+  "Update & Rebuild builds there" (the active-binary-is-an-archive →
+  managed-checkout resolution was silently confusing). (2) THE STARVED
+  AUTO-BUILD, root-caused: the idle gate counted a LOADED model as
+  busy, and a daily-driver machine is never model-free — b10697 sat
+  queued behind the 24h Minecraft session. New gate (Scott: "quiet for
+  10 min"): no generation activity for 600s + no app operation
+  (busy_flag) + no trial marker (any process) + no model mid-
+  load/download; loaded-but-quiet builds. (3) Retention (Scott: keep
+  5, configurable): archives_keep config (0=all), auto-prune after
+  each successful build (serving + custom-labeled archives never
+  pruned, tested), per-archive ✖ delete button. (4) Settings binary
+  list and the archive list scroll.
+
 - **Showcase program (user idea 2026-08-30, scaffolded same day):**
   docs/showcase/ holds measured case studies of real projects built on
   modelsteward-served models — aggregates only (meter/trials/quality),

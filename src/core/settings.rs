@@ -97,6 +97,16 @@ pub struct AppConfig {
     /// serves changes only by explicit choice (the b10630 −9%-context
     /// lesson, institutionalized). Default off.
     pub managed_auto_build: bool,
+    /// Retention for archived managed builds: keep the newest N
+    /// release archives, pruned after each successful build (0 = keep
+    /// everything). The serving archive and custom-labeled archives
+    /// are never pruned. Design session 2026-08-30.
+    #[serde(default = "default_archives_keep")]
+    pub archives_keep: u32,
+}
+
+fn default_archives_keep() -> u32 {
+    5
 }
 
 impl Default for AppConfig {
@@ -117,6 +127,7 @@ impl Default for AppConfig {
             cloud_price_per_mtok: 3.0,
             disabled: Vec::new(),
             managed_auto_build: false,
+            archives_keep: default_archives_keep(),
         }
     }
 }

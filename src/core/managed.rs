@@ -185,6 +185,52 @@ pub struct Archive {
     pub server: PathBuf,
 }
 
+/// Which archives auto-prune may delete (design session 2026-08-30,
+/// Scott chose keep-5-configurable): among BUILD-NUMBERED archives,
+/// newest-first, everything past `keep` — except the one currently
+/// serving. Custom-labeled archives (no parseable build number) are a
+/// deliberate act and never pruned. keep == 0 means unlimited.
+/// Pure over the list; deletion is the thin part.
+pub fn prune_candidates(
+    archives: &[Archive],
+    keep: usize,
+    serving: Option<&Path>,
+) -> Vec<String> {
+    if keep == 0 {
+        return Vec::new();
+    }
+    archives
+        .iter()
+        .filter(|a| a.build.is_some())
+        .skip(keep)
+        .filter(|a| serving != Some(a.server.as_path()))
+        .map(|a| a.label.clone())
+        .collect()
+}
+
+/// Permanently delete one archived build. Refuses anything that isn't
+/// a real archive directory (path-traversal labels never reach the fs).
+pub fn delete_archive(label: &str) -> Result<()> {
+    anyhow::ensure!(
+        !label.is_empty() && !label.contains('/') && !label.contains("..") && !label.starts_with('.'),
+        "not a valid archive label: {label:?}"
+    );
+    let dir = archive_dir().join(label);
+    anyhow::ensure!(
+        dir.join("llama-server").is_file(),
+        "no archived build named {label:?}"
+    );
+    std::fs::remove_dir_all(&dir).map_err(Into::into)
+}
+
+/// Apply the retention policy; returns the labels actually deleted.
+pub fn prune_archives(keep: usize, serving: Option<&Path>) -> Vec<String> {
+    prune_candidates(&list_archives(), keep, serving)
+        .into_iter()
+        .filter(|l| delete_archive(l).is_ok())
+        .collect()
+}
+
 /// Archived builds: release tags newest first, then labeled variants.
 pub fn list_archives() -> Vec<Archive> {
     list_archives_in(&archive_dir())
@@ -328,6 +374,34 @@ pub fn status() -> ManagedStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prune_keeps_newest_serving_and_custom_labels() {
+        let a = |label: &str, build: Option<u64>| Archive {
+            label: label.into(),
+            build,
+            server: std::path::PathBuf::from(format!("/x/{label}/llama-server")),
+        };
+        // Newest-first numbered, then a custom label — list_archives order.
+        let archives = vec![
+            a("b10697", Some(10697)),
+            a("b10687", Some(10687)),
+            a("b10680", Some(10680)),
+            a("b10679", Some(10679)),
+            a("b10675", Some(10675)),
+            a("fast-mmq", None),
+        ];
+        let serving = std::path::PathBuf::from("/x/b10679/llama-server");
+        // keep 2: b10680 and b10675 are past the line; b10679 survives
+        // because it is serving; fast-mmq survives because it is custom.
+        assert_eq!(
+            prune_candidates(&archives, 2, Some(&serving)),
+            vec!["b10680".to_string(), "b10675".to_string()]
+        );
+        // keep 0 = unlimited: nothing is ever deleted.
+        assert!(prune_candidates(&archives, 0, Some(&serving)).is_empty());
+        assert!(prune_candidates(&archives, 99, None).is_empty());
+    }
 
     #[test]
     fn newest_tag_parses_build_tags_only() {
