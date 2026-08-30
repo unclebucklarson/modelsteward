@@ -1849,7 +1849,13 @@ impl App {
             } + if is_disabled(r) { 10 } else { 0 };
             (rank, r.display.to_lowercase())
         });
-        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+        // Resizable split (user request 2026-08-29): drag the border
+        // between grid and detail, same as the activity log panel.
+        egui::Panel::top("library_grid")
+            .resizable(true)
+            .default_size(300.0)
+            .show(ui, |ui| {
+        egui::ScrollArea::vertical().show(ui, |ui| {
             egui::Grid::new("library")
                 .striped(true)
                 .min_col_width(48.0)
@@ -1920,7 +1926,7 @@ impl App {
                     }
                 });
         });
-        ui.separator();
+            });
         // ── the detail panel for the selected model ──
         let sel = self
             .library_selected
@@ -1934,6 +1940,7 @@ impl App {
             return;
         };
         let disabled = is_disabled(&r);
+        egui::ScrollArea::vertical().id_salt("library_detail").show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.strong(&r.display);
             let mut badges: Vec<&str> = Vec::new();
@@ -2117,6 +2124,7 @@ impl App {
                 });
             }
         }
+        });
         if let Some(v) = why {
             self.diagnosis = Some(v);
         }
