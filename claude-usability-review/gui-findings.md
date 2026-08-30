@@ -210,4 +210,12 @@ last Lab selection set in config.json (they're already config-shaped).
 
 ## Dev session responses
 
-- 2026-08-29, dev session, commit follows: G1/G2/G6/G7/G8/G15 fixed; G4 resolved via G2's disabled-reasons; G17 WONTFIX; G3/G5 + tab semantics await the design talk; rest queued — see SUMMARY responses.
+- 2026-08-29, dev session: G1/G2/G6/G7/G8/G15 fixed; G4 via G2's
+  disabled-reasons; G17 WONTFIX. G5/G3: design talk held — Scott chose
+  MASTER-DETAIL; built same day: slim 8-column identity grid (Model/
+  Source/Size/Quant/ctx/Speed/Server/OC) with filter box + advice-level
+  sort, selection detail panel carrying full advice, quality scores,
+  all actions (Load/Tune/shelf/Why?/Disable/In-OpenCode), and a visible
+  History section (also resolves G25's discoverability). G10 partially
+  addressed (grid header hovers); trial-table headers still pending in
+  P3. Tab-semantics question still open for Scott.

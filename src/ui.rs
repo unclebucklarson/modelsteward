@@ -134,6 +134,8 @@ struct App {
     advisories: Vec<(String, String, String)>,
     advisor_open: bool,
     tuning_question: String,
+    library_filter: String,
+    library_selected: Option<String>,
     show_guide: bool,
     /// Cached managed-checkout status (fs + git probes are too heavy to
     /// run per frame); refreshed on build-check and after managed workers.
@@ -322,6 +324,8 @@ impl App {
             advisories: Vec::new(),
             advisor_open: false,
             tuning_question: String::new(),
+            library_filter: String::new(),
+            library_selected: None,
             show_guide: false,
             managed_status: None,
             sel_checkout: None,
@@ -1794,83 +1798,75 @@ impl App {
                 }
             }
         }
-        egui::ScrollArea::both().show(ui, |ui| {
+        // Master-detail (usability review G5/G3, user decision
+        // 2026-08-29): a slim identity grid with search + sort, and a
+        // detail panel carrying the advice, actions, quality, and
+        // history for the selected model — the value proposition never
+        // scrolls off-screen again.
+        ui.horizontal(|ui| {
+            ui.label("Filter:");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.library_filter)
+                    .desired_width(220.0)
+                    .hint_text("name contains…"),
+            );
+            if !self.library_filter.is_empty() && ui.small_button("✕").clicked() {
+                self.library_filter.clear();
+            }
+        });
+        let needle = self.library_filter.to_lowercase();
+        let mut view: Vec<&rows::Row> = rows
+            .iter()
+            .filter(|r| needle.is_empty() || r.display.to_lowercase().contains(&needle))
+            .collect();
+        view.sort_by_key(|r| {
+            let rank = match r.advice_level {
+                rows::AdviceLevel::Good => 0u8,
+                rows::AdviceLevel::Warn => 1,
+                rows::AdviceLevel::Unknown => 2,
+                rows::AdviceLevel::Bad => 3,
+            } + if is_disabled(r) { 10 } else { 0 };
+            (rank, r.display.to_lowercase())
+        });
+        egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
             egui::Grid::new("library")
                 .striped(true)
                 .min_col_width(48.0)
                 .show(ui, |ui| {
                     for h in [
-                        "Model", "Source", "Size", "Feat", "Quant", "Measured ctx", "Speed",
-                        "Server", "OpenCode", "Load", "Tune", "Archive", "Advice", "Why",
-                        "",
+                        "Model", "Source", "Size", "Quant", "Measured ctx", "Speed",
+                        "Server", "OC",
                     ] {
-                        ui.strong(h);
+                        ui.strong(h).on_hover_text(match h {
+                            "Measured ctx" => "The context window --fit actually settled on when this model was measured on THIS machine (hover a value for its history).",
+                            "Speed" => "Measured baseline: prompt-processing / generation tokens per second (hover for history).",
+                            "OC" => "✓ = in opencode.json. Toggle in the detail panel below.",
+                            _ => "Click a model to see its advice, actions, quality, and history below.",
+                        });
                     }
                     ui.end_row();
-                    for r in &rows {
+                    for r in &view {
                         let disabled = is_disabled(r);
-                        if disabled {
-                            ui.weak(&r.display).on_hover_text(
-                                "Disabled by you — visible but not measured, benched, \
-                                 offered by the router, or raced in the Lab.",
-                            );
+                        let selected = self.library_selected.as_deref() == Some(r.display.as_str());
+                        let label = if disabled {
+                            egui::RichText::new(&r.display).weak()
                         } else {
-                            ui.label(&r.display).on_hover_text(
-                                r.router_id
-                                    .as_deref()
-                                    .map(|id| format!("served as: {id}"))
-                                    .unwrap_or_else(|| "no servable identity".into()),
-                            );
+                            match r.advice_level {
+                                rows::AdviceLevel::Bad => egui::RichText::new(&r.display)
+                                    .color(ui.visuals().error_fg_color),
+                                _ => egui::RichText::new(&r.display),
+                            }
+                        };
+                        if ui.selectable_label(selected, label).clicked() {
+                            self.library_selected = Some(r.display.clone());
                         }
-                        ui.label(&r.source).on_hover_text(match r.source.as_str() {
-                            "shelf" => {
-                                "Your shelf: locally stored, manually managed models — the \
-                                 directories from Settings → scan dirs. No other tool touches \
-                                 or expires these; '→ shelf' archives a copy here."
-                            }
-                            "ollama" => {
-                                "Inside Ollama's blob store — managed by Ollama; `ollama rm` \
-                                 deletes it. llama.cpp serves it directly, no copy."
-                            }
-                            "hf cache" => {
-                                "HuggingFace download cache — managed by whichever tool \
-                                 downloaded it; revisions shift and caches get pruned. \
-                                 Archive to shelf to own it."
-                            }
-                            _ => "Offered by the running router (no scanned file matched).",
-                        });
+                        ui.label(&r.source);
                         ui.label(if r.size_bytes > 0 {
                             format!("{:.1} GB", r.size_bytes as f64 / 1e9)
                         } else {
                             "—".into()
                         });
-                        {
-                            let mut badges = String::new();
-                            if r.vision { badges.push('👁'); }
-                            if r.mtp { badges.push('⚡'); }
-                            if r.embedding { badges.push('🧬'); }
-                            if badges.is_empty() {
-                                ui.label("");
-                            } else {
-                                let mut notes: Vec<&str> = Vec::new();
-                                if r.vision { notes.push("👁 vision: mmproj paired — served with image support"); }
-                                if r.mtp { notes.push("⚡ MTP: multi-token-prediction layers present in the file (llama.cpp support pending upstream)"); }
-                                if r.embedding { notes.push("🧬 embedding model: serves /v1/embeddings, excluded from the chat config"); }
-                                ui.label(badges).on_hover_text(notes.join("\n"));
-                            }
-                        }
-                        {
-                            let resp = ui.label(&r.quant);
-                            if let Some(h) = &r.quant_header_disagrees {
-                                resp.on_hover_text(format!(
-                                    "File name says {} but the file's own header stamps {h}. \
-                                     For dynamic quants (e.g. Unsloth UD) the filename is the \
-                                     truthful one — the header field can't express mixed \
-                                     per-layer types.",
-                                    r.quant
-                                ));
-                            }
-                        }
+                        ui.label(&r.quant);
                         {
                             let resp = ui.label(
                                 r.measured_ctx
@@ -1885,228 +1881,221 @@ impl App {
                         }
                         {
                             let trail = r.router_id.as_ref().and_then(|id| speed_trails.get(id));
-                            match (r.pp_tps, r.tg_tps) {
-                                (None, None) => {
-                                    ui.label("—").on_hover_text(trail.cloned().unwrap_or_else(
-                                        || {
-                                            "No throughput baseline yet — Server → Bench \
-                                             New/Stale Models (GPU idle) to measure it."
-                                                .into()
-                                        },
-                                    ));
-                                }
-                                (pp, tg) => {
-                                    let fmt = |v: Option<f64>| {
-                                        v.map(|t| format!("{t:.0}"))
-                                            .unwrap_or_else(|| "?".into())
-                                    };
-                                    let base = "Measured baseline, tokens per second: prompt \
-                                                processing (pp512) / generation (tg128), at \
-                                                the serving KV cache types."
-                                        .to_string();
-                                    ui.label(format!("{}/{}", fmt(pp), fmt(tg))).on_hover_text(
-                                        match trail {
-                                            Some(t) => format!("{base}\n\n{t}"),
-                                            None => base,
-                                        },
-                                    );
-                                }
+                            let fmt = |v: Option<f64>| {
+                                v.map(|t| format!("{t:.0}")).unwrap_or_else(|| "?".into())
+                            };
+                            let text = match (r.pp_tps, r.tg_tps) {
+                                (None, None) => "—".to_string(),
+                                (pp, tg) => format!("{}/{}", fmt(pp), fmt(tg)),
+                            };
+                            let resp = ui.label(text);
+                            if let Some(t) = trail {
+                                resp.on_hover_text(t);
                             }
                         }
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
-
-                        // "In OpenCode" checkbox — the whole make-it-usable flow.
-                        // Adding needs the router to actually offer this id;
-                        // removing only needs the config file.
-                        let mut checked = r.in_opencode;
-                        let can_act = if r.in_opencode {
-                            r.router_id.is_some()
-                        } else {
-                            router_up && r.router_id.is_some() && r.server_status.is_some()
-                        };
-                        let cb = ui
-                            .add_enabled(can_act, egui::Checkbox::without_text(&mut checked))
-                            .on_disabled_hover_text(
-                                "needs the router up and this model servable — start \
-                                 the router / check the Server column",
-                            );
-                        let cb = cb.on_hover_text(
-                            "Checked = in opencode.json. Checking an unmeasured model loads it \
-                             briefly to measure the real context first.",
-                        );
-                        if cb.changed()
-                            && let Some(id) = &r.router_id
-                        {
-                            pending = Some(if checked {
-                                RowAction::AddToOpenCode(id.clone())
-                            } else {
-                                RowAction::RemoveFromOpenCode(id.clone())
-                            });
-                        }
-
-                        // Load / Unload.
-                        match (&r.router_id, r.server_status.as_deref()) {
-                            (Some(id), Some("loaded")) => {
-                                if ui.button("Unload").clicked() {
-                                    pending = Some(RowAction::Unload(id.clone()));
-                                }
-                            }
-                            (Some(id), Some("unloaded")) => {
-                                if ui
-                                    .add_enabled(router_up, egui::Button::new("Load"))
-                                    .on_disabled_hover_text("router is down — Start Router first (top of the tab)")
-                                    .on_hover_text(
-                                        "Loads now, measures the real context, and adds it to \
-                                         OpenCode automatically.",
-                                    )
-                                    .clicked()
-                                {
-                                    pending = Some(RowAction::Load(id.clone()));
-                                }
-                            }
-                            (Some(_), Some(_)) => {
-                                ui.label("…");
-                            }
-                            _ => {
-                                ui.label("—");
-                            }
-                        }
-
-                        if let Some(id) = &r.router_id {
-                            if ui
-                                .button("⚙")
-                                .on_hover_text(
-                                    "Per-model overrides: pin context, KV cache type, extra \
-                                     llama-server flags. Stored in the app config; survives \
-                                     preset regeneration.",
-                                )
-                                .clicked()
-                            {
-                                pending = Some(RowAction::EditOverrides(id.clone()));
-                            }
-                        } else {
-                            ui.label("");
-                        }
-
-                        // Archive: pull a cache/Ollama-owned file into the
-                        // user's shelf, out of reach of other tools' pruning.
-                        if r.archivable
-                            && let Some(path) = &r.path
-                        {
-                            if ui
-                                .button("to shelf")
-                                .on_hover_text(
-                                    "Copies (hardlinks when free) this file into your models \
-                                     directory. It becomes a normal shelf model: served by the \
-                                     preset, measurable, and safe from cache eviction or \
-                                     `ollama rm`.",
-                                )
-                                .clicked()
-                            {
-                                pending = Some(RowAction::Archive(path.clone()));
-                            }
-                        } else {
-                            ui.label("");
-                        }
-
-                        let color = match r.advice_level {
-                            rows::AdviceLevel::Good => egui::Color32::from_rgb(0, 170, 0),
-                            rows::AdviceLevel::Warn => ui.visuals().warn_fg_color,
-                            rows::AdviceLevel::Bad => ui.visuals().error_fg_color,
-                            rows::AdviceLevel::Unknown => ui.visuals().weak_text_color(),
-                        };
-                        let short: String = if r.advice.chars().count() > 60 {
-                            let mut s: String = r.advice.chars().take(57).collect();
-                            s.push('…');
-                            s
-                        } else {
-                            r.advice.clone()
-                        };
-                        if disabled {
-                            ui.weak("disabled — not measured, benched, or offered");
-                        } else {
-                            ui.colored_label(color, short).on_hover_text(&r.advice);
-                        }
-                        if r.advice_level != rows::AdviceLevel::Good {
-                            if ui
-                                .button("Why?")
-                                .on_hover_text("Plain-language explanation and what to do about it")
-                                .clicked()
-                            {
-                                let not_offered = router_up
-                                    && r.router_id.is_some()
-                                    && r.server_status.is_none()
-                                    && r.failure.is_none();
-                                let mut failure = r.failure.clone();
-                                // "failed(1)" alone explains nothing — mine
-                                // the router log for this model's real error.
-                                if let (Some(f), Some(id)) = (&failure, &r.router_id)
-                                    && diagnose::classify(f) == diagnose::Cause::Unknown
-                                    && let Ok(log) = std::fs::read_to_string(
-                                        router::state_dir().join("router.log"),
-                                    )
-                                    && let Some(mined) = advisor::mine_failures(&log).get(id)
-                                {
-                                    failure = Some(format!("{f} — {mined}"));
-                                }
-                                why = Some(DiagnosisView {
-                                    display: r.display.clone(),
-                                    router_id: r.router_id.clone(),
-                                    path: r.path.clone(),
-                                    d: diagnose::diagnose(
-                                        failure.as_deref(),
-                                        not_offered,
-                                        r.archivable && r.path.is_some(),
-                                        self.build_check.as_ref().map(|c| {
-                                            matches!(
-                                                (c.current_build, c.upstream_build),
-                                                (Some(cur), Some(up)) if cur >= up
-                                            )
-                                        }),
-                                        // Name signal = display + path: the live
-                                        // dspark case only says so in its path.
-                                        &format!(
-                                            "{} {}",
-                                            r.display,
-                                            r.path
-                                                .as_deref()
-                                                .map(|p| p.display().to_string())
-                                                .unwrap_or_default()
-                                        ),
-                                    ),
-                                });
-                            }
-                        } else {
-                            ui.label("");
-                        }
-                        // Ignore/Restore (user request 2026-08-28): a model
-                        // that can never load here shouldn't be a permanent
-                        // red row. Reversible; drops out of the preset too.
-                        if let Some(key) =
-                            rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
-                        {
-                            let label = if disabled { "Enable" } else { "Disable" };
-                            if ui
-                                .small_button(label)
-                                .on_hover_text(if disabled {
-                                    "Resume measuring, benching, and offering this \
-                                     model."
-                                } else {
-                                    "Keep the row visible but stop acting on it: no \
-                                     measure, no bench, no Lab, not offered by the \
-                                     router. Reversible."
-                                })
-                                .clicked()
-                            {
-                                toggle_ignore = Some((key, !disabled));
-                            }
-                        } else {
-                            ui.label("");
-                        }
+                        ui.label(if r.in_opencode { "✓" } else { "—" });
                         ui.end_row();
                     }
                 });
         });
+        ui.separator();
+        // ── the detail panel for the selected model ──
+        let sel = self
+            .library_selected
+            .clone()
+            .and_then(|d| rows.iter().find(|r| r.display == d).cloned());
+        let Some(r) = sel else {
+            ui.weak("Select a model above for its advice, actions, quality scores, and history.");
+            if let Some(action) = pending {
+                self.run_row_action(action);
+            }
+            return;
+        };
+        let disabled = is_disabled(&r);
+        ui.horizontal(|ui| {
+            ui.strong(&r.display);
+            let mut badges: Vec<&str> = Vec::new();
+            if r.vision { badges.push("👁 vision"); }
+            if r.mtp { badges.push("⚡ MTP"); }
+            if r.embedding { badges.push("🧬 embedding"); }
+            if r.moe { badges.push("MoE"); }
+            if !badges.is_empty() {
+                ui.weak(badges.join(" · "));
+            }
+            if let Some(h) = &r.quant_header_disagrees {
+                ui.weak(format!("(header says {h}; filename wins for dynamic quants)"));
+            }
+        });
+        if let Some(m) = r.router_id.as_ref().and_then(|id| self.measurements.get(id)) {
+            let mut parts = Vec::new();
+            if let Some(e) = m.eval_score { parts.push(format!("evals {:.0}%", e * 100.0)); }
+            if let Some(t) = m.tool_reliability { parts.push(format!("tools {:.0}%", t * 100.0)); }
+            if let Some(l) = m.loop_reliability { parts.push(format!("agent loops {:.0}%", l * 100.0)); }
+            if !parts.is_empty() {
+                ui.label(format!("Quality: {}", parts.join(" · ")));
+            }
+        }
+        let color = match r.advice_level {
+            rows::AdviceLevel::Good => egui::Color32::from_rgb(0, 170, 0),
+            rows::AdviceLevel::Warn => ui.visuals().warn_fg_color,
+            rows::AdviceLevel::Bad => ui.visuals().error_fg_color,
+            rows::AdviceLevel::Unknown => ui.visuals().weak_text_color(),
+        };
+        if disabled {
+            ui.weak("disabled — not measured, benched, offered, or raced (Enable below resumes)");
+        } else {
+            ui.colored_label(color, &r.advice);
+        }
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            // In-OpenCode toggle — the whole make-it-usable flow.
+            let mut checked = r.in_opencode;
+            let can_act = if r.in_opencode {
+                r.router_id.is_some()
+            } else {
+                router_up && r.router_id.is_some() && r.server_status.is_some()
+            };
+            let cb = ui
+                .add_enabled(can_act, egui::Checkbox::new(&mut checked, "In OpenCode"))
+                .on_disabled_hover_text(
+                    "needs the router up and this model servable — start the router \
+                     / check the Server column",
+                )
+                .on_hover_text(
+                    "Checked = in opencode.json. Checking an unmeasured model loads \
+                     it briefly to measure the real context first.",
+                );
+            if cb.changed()
+                && let Some(id) = &r.router_id
+            {
+                pending = Some(if checked {
+                    RowAction::AddToOpenCode(id.clone())
+                } else {
+                    RowAction::RemoveFromOpenCode(id.clone())
+                });
+            }
+            match (&r.router_id, r.server_status.as_deref()) {
+                (Some(id), Some("loaded")) => {
+                    if ui.button("Unload").clicked() {
+                        pending = Some(RowAction::Unload(id.clone()));
+                    }
+                }
+                (Some(id), Some("unloaded")) => {
+                    if ui
+                        .add_enabled(router_up, egui::Button::new("Load"))
+                        .on_disabled_hover_text("router is down — Start Router first (top of the tab)")
+                        .on_hover_text(
+                            "Loads now, measures the real context, and adds it to \
+                             OpenCode automatically.",
+                        )
+                        .clicked()
+                    {
+                        pending = Some(RowAction::Load(id.clone()));
+                    }
+                }
+                _ => {}
+            }
+            if let Some(id) = &r.router_id
+                && ui
+                    .button("⚙ Tune")
+                    .on_hover_text(
+                        "Per-model overrides: pin context, KV cache type, extra \
+                         llama-server flags. Stored in the app config; survives \
+                         preset regeneration.",
+                    )
+                    .clicked()
+            {
+                pending = Some(RowAction::EditOverrides(id.clone()));
+            }
+            if r.archivable
+                && let Some(path) = &r.path
+                && ui
+                    .button("to shelf")
+                    .on_hover_text(
+                        "Copies (hardlinks when free) this file into your models \
+                         directory — a normal shelf model, safe from cache eviction \
+                         or `ollama rm`.",
+                    )
+                    .clicked()
+            {
+                pending = Some(RowAction::Archive(path.clone()));
+            }
+            if r.advice_level != rows::AdviceLevel::Good
+                && ui
+                    .button("Why?")
+                    .on_hover_text("Plain-language explanation and what to do about it")
+                    .clicked()
+            {
+                let not_offered = router_up
+                    && r.router_id.is_some()
+                    && r.server_status.is_none()
+                    && r.failure.is_none();
+                let mut failure = r.failure.clone();
+                if let (Some(f), Some(id)) = (&failure, &r.router_id)
+                    && diagnose::classify(f) == diagnose::Cause::Unknown
+                    && let Ok(log) =
+                        std::fs::read_to_string(router::state_dir().join("router.log"))
+                    && let Some(mined) = advisor::mine_failures(&log).get(id)
+                {
+                    failure = Some(format!("{f} — {mined}"));
+                }
+                why = Some(DiagnosisView {
+                    display: r.display.clone(),
+                    router_id: r.router_id.clone(),
+                    path: r.path.clone(),
+                    d: diagnose::diagnose(
+                        failure.as_deref(),
+                        not_offered,
+                        r.archivable && r.path.is_some(),
+                        self.build_check.as_ref().map(|c| {
+                            matches!(
+                                (c.current_build, c.upstream_build),
+                                (Some(cur), Some(up)) if cur >= up
+                            )
+                        }),
+                        &format!(
+                            "{} {}",
+                            r.display,
+                            r.path
+                                .as_deref()
+                                .map(|p| p.display().to_string())
+                                .unwrap_or_default()
+                        ),
+                    ),
+                });
+            }
+            if let Some(key) = rows::ignore_key(r.path.as_deref(), r.router_id.as_deref()) {
+                let label = if disabled { "Enable" } else { "Disable" };
+                if ui
+                    .small_button(label)
+                    .on_hover_text(if disabled {
+                        "Resume measuring, benching, and offering this model."
+                    } else {
+                        "Keep the row visible but stop acting on it: no measure, no \
+                         bench, no Lab, not offered by the router. Reversible."
+                    })
+                    .clicked()
+                {
+                    toggle_ignore = Some((key, !disabled));
+                }
+            }
+        });
+        // History, visible instead of hover-only (review G25).
+        if let Some(id) = &r.router_id {
+            let (c, sp) = (ctx_trails.get(id), speed_trails.get(id));
+            if c.is_some() || sp.is_some() {
+                ui.add_space(4.0);
+                ui.collapsing("History", |ui| {
+                    if let Some(t) = c {
+                        ui.label(t);
+                    }
+                    if let Some(t) = sp {
+                        ui.label(t);
+                    }
+                });
+            }
+        }
         if let Some(v) = why {
             self.diagnosis = Some(v);
         }

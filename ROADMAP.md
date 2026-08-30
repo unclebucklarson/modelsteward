@@ -268,8 +268,11 @@ recommendations became the Lab's standing recommendation blocks.
    consider a reasoning-content fallback + a larger budget for the
    49k-token brief. The new error banner surfaced this exactly as
    designed.
-2. Library structure decision (usability G5/G3) — design talk, then
-   build (search ships regardless).
+2. ✔ Library master-detail BUILT 2026-08-29 (Scott chose it from three
+   mocked options): slim 8-column grid + filter + advice sort;
+   selection detail panel with full advice, quality scores, every
+   action, and visible history (G25 resolved). Tab-semantics question
+   (OpenCode mirror inside Connections) still awaits Scott's yes/no.
 3. Usability P3 batch: CLI diagnose + exit codes, vocabulary
    unification, trial-header hovers, Settings offers actions not
    instructions, G11 progress/cancel placement.
