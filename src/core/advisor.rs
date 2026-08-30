@@ -53,6 +53,12 @@ pub struct BuildCheck {
     /// driver-init latency to every model load. None = not an NVIDIA box
     /// or nvidia-smi absent.
     pub persistence_mode: Option<bool>,
+    /// The tailored make-it-stick command when we can derive one from
+    /// how nvidia-persistenced is actually launched on THIS machine
+    /// (live incident 2026-08-30: `systemctl enable nvidia-persistenced`
+    /// fails on static units, and Ubuntu launches the daemon with
+    /// --no-persistence-mode so it deliberately does nothing).
+    pub persistence_fix: Option<String>,
     /// Models whose stored failure looks like "needs a newer build".
     pub locked_models: Vec<String>,
 }
@@ -307,6 +313,31 @@ pub fn parse_build_tag(tag: &str) -> Option<u64> {
 }
 
 /// nvidia-smi persistence_mode line -> Some(enabled). Pure for testing.
+/// From `systemctl show nvidia-persistenced -p ExecStart` output,
+/// derive the exact permanent fix — or None when the generic advice
+/// applies. Pure for testing; pinned with the real Ubuntu line from
+/// the 2026-08-30 incident.
+pub fn persistence_fix_from_execstart(show: &str) -> Option<String> {
+    // ExecStart={ path=... ; argv[]=/usr/bin/nvidia-persistenced --user X --no-persistence-mode --verbose ; ... }
+    let argv = show.split("argv[]=").nth(1)?.split(" ; ").next()?.trim();
+    if !argv.contains("--no-persistence-mode") {
+        return None;
+    }
+    let fixed: Vec<&str> = argv
+        .split_whitespace()
+        .filter(|a| *a != "--no-persistence-mode")
+        .collect();
+    Some(format!(
+        "your persistence daemon is RUNNING but launched with \
+         --no-persistence-mode (your distro's default), and its unit is \
+         static — `systemctl enable` refuses it. Permanent fix: \
+         sudo systemctl edit nvidia-persistenced   and add:\n\
+         [Service]\nExecStart=\nExecStart={}\n\
+         then: sudo systemctl restart nvidia-persistenced",
+        fixed.join(" ")
+    ))
+}
+
 pub fn parse_persistence_mode(s: &str) -> Option<bool> {
     match s.lines().next()?.trim() {
         "Enabled" => Some(true),
@@ -446,6 +477,12 @@ pub fn check(
         )
         .as_deref()
         .and_then(parse_persistence_mode),
+        persistence_fix: run(
+            "systemctl",
+            &["show", "nvidia-persistenced", "-p", "ExecStart", "--no-pager"],
+        )
+        .as_deref()
+        .and_then(persistence_fix_from_execstart),
         current_build,
         server_bin: server_bin.clone(),
         ..Default::default()
@@ -607,12 +644,16 @@ pub fn verdicts(c: &BuildCheck) -> Vec<(String, String)> {
         }
     }
     if c.persistence_mode == Some(false) {
+        let stick = c.persistence_fix.clone().unwrap_or_else(|| {
+            "a udev rule or the nvidia-persistenced service makes it stick".into()
+        });
         out.push((
             "GPU persistence mode is off".into(),
-            "The driver re-initializes on every model load, adding latency. Enable once \
-             with: sudo nvidia-smi -pm 1 (resets on reboot; a udev rule or service makes \
-             it stick)."
-                .into(),
+            format!(
+                "The driver re-initializes on every model load, adding latency. \
+                 Enable now with: sudo nvidia-smi -pm 1 (holds until reboot). \
+                 To survive reboots: {stick}"
+            ),
         ));
     }
     if !crate::core::energy::rapl_readable() {
@@ -808,6 +849,32 @@ pub fn run_steps(
 mod tests {
     use super::*;
     use crate::core::router::Measurement;
+
+    #[test]
+    fn persistence_fix_derived_from_the_real_ubuntu_unit() {
+        // Live incident 2026-08-30: Scott ran `systemctl enable --now
+        // nvidia-persistenced` and hit "unit files have no installation
+        // config" — the unit is static AND launches the daemon with
+        // --no-persistence-mode. The exact `systemctl show` line from
+        // that machine:
+        let show = "ExecStart={ path=/usr/bin/nvidia-persistenced ; \
+argv[]=/usr/bin/nvidia-persistenced --user nvidia-persistenced \
+--no-persistence-mode --verbose ; ignore_errors=no ; start_time=[n/a] ; \
+stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }";
+        let fix = persistence_fix_from_execstart(show).unwrap();
+        assert!(fix.contains("systemctl edit nvidia-persistenced"), "{fix}");
+        assert!(
+            fix.contains("/usr/bin/nvidia-persistenced --user nvidia-persistenced --verbose"),
+            "the derived ExecStart must be the real one minus the flag: {fix}"
+        );
+        assert!(!fix.contains("--no-persistence-mode\n"), "{fix}");
+        // A daemon launched WITHOUT the flag needs no override.
+        assert!(persistence_fix_from_execstart(
+            "ExecStart={ path=/usr/bin/nvidia-persistenced ; argv[]=/usr/bin/nvidia-persistenced --verbose ; }"
+        ).is_none());
+        // No daemon at all -> generic advice.
+        assert!(persistence_fix_from_execstart("").is_none());
+    }
 
     #[test]
     fn parses_build_tags_and_compute_caps() {

@@ -4399,9 +4399,10 @@ impl App {
                 });
                 ui.add_space(4.0);
                 ui.weak(
-                    "Make it permanent (survives reboot): sudo systemctl enable \
-                     --now nvidia-persistenced   — or a udev rule; details in the \
-                     Build Advisor.",
+                    "Make it permanent (survives reboot): Server -> Check My \
+                     llama.cpp — the Build Advisor derives the exact fix for \
+                     THIS machine's daemon setup (live catch 2026-08-30: the \
+                     generic systemctl-enable advice fails on static units).",
                 );
             });
         if !open {
