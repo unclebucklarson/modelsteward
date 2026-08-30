@@ -36,7 +36,12 @@ fn strip_snap_redirect(p: &Path) -> Option<PathBuf> {
 /// snap-redirected env var or HOME never decides where data lives.
 pub fn xdg_dir(var: &str, fallback_rel: &str) -> PathBuf {
     std::env::var_os(var)
+        // XDG spec: a set-but-empty variable means unset. Without this
+        // the config path came out RELATIVE ("modelsteward/config.json")
+        // — caught by the v0.5.2 release-checklist smoke, 2026-08-30.
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
         .filter(|p| strip_snap_redirect(p).is_none())
         .unwrap_or_else(|| real_home().join(fallback_rel))
         .join("modelsteward")
@@ -236,6 +241,24 @@ mod tests_snap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn xdg_empty_or_relative_means_unset() {
+        // XDG Base Directory spec: empty or relative values must be
+        // ignored. Live catch 2026-08-30: XDG_CONFIG_HOME="" produced
+        // a relative config path.
+        unsafe {
+            std::env::set_var("MODELSTEWARD_TEST_XDG", "");
+        }
+        assert!(xdg_dir("MODELSTEWARD_TEST_XDG", ".config").is_absolute());
+        unsafe {
+            std::env::set_var("MODELSTEWARD_TEST_XDG", "relative/path");
+        }
+        assert!(xdg_dir("MODELSTEWARD_TEST_XDG", ".config").is_absolute());
+        unsafe {
+            std::env::remove_var("MODELSTEWARD_TEST_XDG");
+        }
+    }
 
     #[test]
     fn roundtrips_and_tolerates_partial_files() {
