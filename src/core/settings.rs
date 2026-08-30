@@ -103,6 +103,11 @@ pub struct AppConfig {
     /// are never pruned. Design session 2026-08-30.
     #[serde(default = "default_archives_keep")]
     pub archives_keep: u32,
+    /// The user answered "don't ask again" to the one-time GPU
+    /// persistence prompt (2026-08-30). The Build Advisor verdict
+    /// still reports the state either way.
+    #[serde(default)]
+    pub persistence_prompt_dismissed: bool,
 }
 
 fn default_archives_keep() -> u32 {
@@ -128,6 +133,7 @@ impl Default for AppConfig {
             disabled: Vec::new(),
             managed_auto_build: false,
             archives_keep: default_archives_keep(),
+            persistence_prompt_dismissed: false,
         }
     }
 }

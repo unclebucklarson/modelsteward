@@ -41,6 +41,8 @@ enum Msg {
     Configured(Vec<opencode::ConfiguredModel>),
     /// Live (free, total) MiB for the primary CUDA card.
     Vram(Option<(u64, u64)>),
+    /// NVIDIA persistence mode at startup / after an enable attempt.
+    Persistence(Option<bool>),
     BuildCheck(Box<advisor::BuildCheck>),
     PresetWritten(PathBuf, usize),
     SyncDone(opencode::SyncReport),
@@ -141,6 +143,7 @@ struct App {
     settings_needs_apply: bool,
     show_meter: bool,
     confirm_disrupt: Option<(String, Disrupt)>,
+    show_persistence_prompt: bool,
     /// Mirrors self.busy for the poller thread (auto-build must never
     /// compile beside a measurement/trial/bench).
     busy_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -351,6 +354,7 @@ impl App {
             settings_needs_apply: false,
             show_meter: false,
             confirm_disrupt: None,
+            show_persistence_prompt: false,
             busy_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             meter_report: String::new(),
             meter_report_range: None,
@@ -368,6 +372,7 @@ impl App {
         };
         app.reset_edit_buffers();
         app.spawn_scan();
+        app.spawn_persistence_probe();
         app.spawn_status_poller(cc.egui_ctx.clone());
         app.spawn_config_read();
         app
@@ -477,6 +482,22 @@ impl App {
         let cfg = self.cfg.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Scanned(system::scan_report(&cfg, &[])));
+        });
+    }
+
+    /// One cheap nvidia-smi query at startup (no CUDA init) so the
+    /// one-time persistence prompt can fire without waiting for a
+    /// Build Advisor check.
+    fn spawn_persistence_probe(&self) {
+        let tx = self.tx.clone();
+        std::thread::spawn(move || {
+            let state = std::process::Command::new("nvidia-smi")
+                .args(["--query-gpu=persistence_mode", "--format=csv,noheader"])
+                .output()
+                .ok()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .and_then(|s| advisor::parse_persistence_mode(&s));
+            let _ = tx.send(Msg::Persistence(state));
         });
     }
 
@@ -1538,6 +1559,15 @@ impl App {
                 }
                 Msg::Ollama(o) => self.ollama = o,
                 Msg::Vram(v) => self.live_vram = v,
+                Msg::Persistence(state) => {
+                    if state == Some(false) && !self.cfg.persistence_prompt_dismissed {
+                        self.show_persistence_prompt = true;
+                    }
+                    if state == Some(true) && self.show_persistence_prompt {
+                        self.show_persistence_prompt = false;
+                        self.log("GPU persistence mode is ON — model loads skip the driver re-init from now on");
+                    }
+                }
                 Msg::BuildCheck(c) => {
                     self.backend_sel = Some(advisor::default_backends(&c));
                     self.build_check = Some(*c);
@@ -3805,6 +3835,7 @@ impl App {
             disabled: self.cfg.disabled.clone(),
             managed_auto_build: self.managed_auto_edit,
             archives_keep: self.cfg.archives_keep,
+            persistence_prompt_dismissed: self.cfg.persistence_prompt_dismissed,
             overrides: self.cfg.overrides.clone(),
         })
     }
@@ -4302,6 +4333,81 @@ impl App {
         self.meter_report =
             system::meter_report_text(&self.cfg, self.meter_report_range, false)
                 .unwrap_or_else(|e| format!("meter: {e:#}"));
+    }
+
+    fn persistence_window(&mut self, ctx: &egui::Context) {
+        if !self.show_persistence_prompt {
+            return;
+        }
+        let mut open = true;
+        egui::Window::new("One-time setup: GPU persistence")
+            .collapsible(false)
+            .resizable(false)
+            .default_width(460.0)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.label(
+                    "Your NVIDIA driver tears down and re-initializes on every \
+                     model load — a fixed tax of up to a few seconds on each load, \
+                     hot-swap, and measurement. Persistence mode keeps the driver \
+                     resident (cost: a few idle watts).",
+                );
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let has_pkexec = std::path::Path::new("/usr/bin/pkexec").exists();
+                    if ui
+                        .add_enabled(has_pkexec, egui::Button::new("Enable now (until reboot)"))
+                        .on_disabled_hover_text("pkexec not found — run: sudo nvidia-smi -pm 1")
+                        .on_hover_text(
+                            "Runs `pkexec nvidia-smi -pm 1` — your desktop asks for \
+                             your password; this app never handles it.",
+                        )
+                        .clicked()
+                    {
+                        let tx = self.tx.clone();
+                        std::thread::spawn(move || {
+                            let ok = std::process::Command::new("pkexec")
+                                .args(["nvidia-smi", "-pm", "1"])
+                                .status()
+                                .map(|s| s.success())
+                                .unwrap_or(false);
+                            let _ = tx.send(Msg::Progress(if ok {
+                                "persistence: enabled until reboot".into()
+                            } else {
+                                "persistence: not enabled (cancelled or failed)".into()
+                            }));
+                            // Re-probe so the window reacts to the truth,
+                            // not the button click.
+                            let state = std::process::Command::new("nvidia-smi")
+                                .args(["--query-gpu=persistence_mode", "--format=csv,noheader"])
+                                .output()
+                                .ok()
+                                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                                .and_then(|s| advisor::parse_persistence_mode(&s));
+                            let _ = tx.send(Msg::Persistence(state));
+                        });
+                    }
+                    if ui
+                        .button("Don't ask again")
+                        .on_hover_text("The Build Advisor still shows the state and the commands.")
+                        .clicked()
+                    {
+                        self.cfg.persistence_prompt_dismissed = true;
+                        let _ = self.cfg.save(&system::config_file());
+                        self.show_persistence_prompt = false;
+                    }
+                });
+                ui.add_space(4.0);
+                ui.weak(
+                    "Make it permanent (survives reboot): sudo systemctl enable \
+                     --now nvidia-persistenced   — or a udev rule; details in the \
+                     Build Advisor.",
+                );
+            });
+        if !open {
+            // Closed with the X = \"later\": ask again next launch.
+            self.show_persistence_prompt = false;
+        }
     }
 
     fn disrupt_window(&mut self, ctx: &egui::Context) {
@@ -5720,6 +5826,7 @@ impl eframe::App for App {
             std::sync::atomic::Ordering::Relaxed,
         );
         self.ai_advisor_window(ui.ctx());
+        self.persistence_window(ui.ctx());
         self.disrupt_window(ui.ctx());
         self.meter_window(ui.ctx());
         self.guide_window(ui.ctx());
