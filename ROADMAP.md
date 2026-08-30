@@ -544,6 +544,24 @@ Older items:
 
 ## Backlog — discussed 2026-08-28 (user ideas + pushback, logged)
 
+- **Pre-flight check (user idea 2026-08-30, design settled, build AFTER
+  Scott's GUIDE.md QA walk):** a deterministic checklist engine in core
+  — `preflight::check(scan, measurements, trials, cfg) →
+  Vec<(severity, finding, action)>` — composing the EXISTING tested
+  signals (Build Advisor verdicts, router state + version gate,
+  unmeasured/failed/oversized rows, stale bench baselines, unapplied ★
+  winners, MoE placement-first guard, OpenCode drift states, missing
+  quality/advisor seat) into one surface: each finding a plain sentence
+  plus a Fix button wired to the existing action. Placement (Scott's
+  pick): "Pre-flight Check…" in the File menu beside Set Up Everything
+  opening a findings dialog, plus a clickable "N suggested next steps"
+  status-bar line whenever findings exist. Distinction to preserve:
+  Set Up Everything RUNS the pipeline; Pre-flight EXAMINES and
+  proposes, touching nothing until a Fix is clicked. AI is an optional
+  "ask the advisor about this list" opinion — never the source of
+  findings. Scott's QA walk feeds the rule list: every rough edge from
+  walking docs/GUIDE.md becomes a pre-flight rule.
+
 - **Campaign ETAs — ✔ BUILT same day (deterministic, no AI needed):**
   the Lab sums a per-campaign estimate from the model's MEASURED tg/pp
   (probe token budgets are known), warns loudly ≥90 min, and asks for
