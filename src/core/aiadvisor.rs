@@ -168,6 +168,18 @@ KNOB NOTES (measured on real hardware by this app's trials):\n\
   context and ran 6x slower on a 24GB card.\n\
 - Prefill batch (ubatch-size): raises prompt-processing speed at some VRAM \
   cost; wins are real (+26-50%) when context headroom exists.\n\
+- Reasoning effort (--reasoning-effort, chat-template kwarg): READ THE \
+  MODEL'S OWN TEMPLATE before advising — defaults differ wildly and are \
+  often extreme. Verified 2026-08-30 on Qwen3.8-27B: its template does \
+  reasoning_effort|default('xhigh'), i.e. the MOST thinking unless told \
+  otherwise, accepts only xhigh/medium/low (and silently rewrites 'high' \
+  to 'xhigh'), and raises an exception on anything else. Passing \
+  --reasoning-effort low cuts thinking tokens on agent work where long \
+  deliberation mostly costs latency. Separately, enable_thinking=false \
+  disables thinking entirely on Qwen-family templates, while gpt-oss's \
+  Harmony template ignores enable_thinking and honors reasoning_effort \
+  only. Set per model via extra flags; the effect on tokens and \
+  second-turn latency is measurable, so trial it rather than assuming.\n\
 - KV precision (cache-type-v q4_0): buys context, can cost output quality \
   and rewrite speed — the fidelity gate exists because a config that \
   degrades output is never a win. q8_0 KV measured ~2x usable context vs \
