@@ -643,6 +643,18 @@ Older items:
   ov.extra, so keeps interoperate. STILL OPEN: the `think` trial menu
   (race low/medium/xhigh against tg, 2nd-turn ms, and the quality
   probe) — that would make "low is best" a number on this hardware.
+  DESIGN CONSTRAINT settled with Scott 2026-08-31, before anyone
+  builds it: reasoning effort barely moves tokens/sec — it changes HOW
+  MANY tokens you wait through. Racing it under an existing goal
+  (RewriteTg et al.) would report "no significant difference" while the
+  user sits through 5x the thinking: right arithmetic, useless verdict.
+  A think menu therefore needs a NEW instrument — thinking tokens spent
+  and wall-time to first useful content per prompt — with the fidelity
+  gate and quality probe as the counterweight, so the answer reads
+  "low costs N% of the eval battery and saves M seconds a turn" rather
+  than "low is faster". Second wrinkle: its variants are PER MODEL
+  (from reasoning::parse_support), while menu() returns a fixed list —
+  the first menu needing dynamic variants.
   Original note:
   **Thinking as a first-class knob (user question 2026-08-30):** llama-
   server exposes reasoning at the server level — `--reasoning
