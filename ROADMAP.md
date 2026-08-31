@@ -627,7 +627,24 @@ Older items:
   the clone's own repo link, a screenshot. Consider a README link to
   the showcase once entry #1 is finished.
 
-- **Thinking as a first-class knob (user question 2026-08-30):** llama-
+- **✔ Thinking PROMOTED to a first-class ⚙ field 2026-08-31** (Scott
+  asked for it after watching Qwen3.8 over-think all day). The field is
+  a dropdown built from THE MODEL'S OWN chat template, read out of the
+  GGUF header (core/reasoning.rs, 7 tests): accepted levels, the
+  template's default, and whether thinking can be switched off. Live
+  validation: Qwen3.8-27B -> [xhigh, medium, low], default xhigh
+  (confirmed), can disable; gpt-oss-20b -> unconfirmed fallback to
+  llama.cpp's ladder, can_disable false, independently rediscovering
+  the Harmony quirk behind the 2026-08-29 advisory bug. WHY THE
+  DROPDOWN MATTERS (measured): llama-server accepts ANY effort string
+  on the command line — the Jinja template raises on a bad one at
+  REQUEST time, so a typo would fail on the first message, not at
+  startup. Stored as reasoning-effort=<level> or reasoning=off in
+  ov.extra, so keeps interoperate. STILL OPEN: the `think` trial menu
+  (race low/medium/xhigh against tg, 2nd-turn ms, and the quality
+  probe) — that would make "low is best" a number on this hardware.
+  Original note:
+  **Thinking as a first-class knob (user question 2026-08-30):** llama-
   server exposes reasoning at the server level — `--reasoning
   on|off|auto`, `--reasoning-effort minimal…xhigh`, `--chat-template-
   kwargs` (verified in the b10672 help) — so it is per-model preset

@@ -51,6 +51,10 @@ pub struct Row {
     pub archivable: bool,
     /// Header-derived MoE flag (expert_count/arch/name, best available).
     pub moe: bool,
+    /// Reasoning contract read from this model's own chat template
+    /// (None = the template never mentions thinking). Drives the ⚙
+    /// Reasoning field so it can only offer accepted values.
+    pub reasoning: Option<crate::core::reasoning::ReasoningSupport>,
     /// Feature badges: vision projector paired, MTP tensors present,
     /// embedding architecture.
     pub vision: bool,
@@ -418,6 +422,7 @@ pub fn assemble(
             advice,
             vision,
             moe,
+            reasoning: m.meta.as_ref().and_then(|x| x.reasoning.clone()),
             mtp,
             embedding,
             pp_tps,
@@ -498,6 +503,7 @@ pub fn assemble(
             advice,
             vision: false,
             moe: false,
+            reasoning: None,
             mtp: false,
             embedding: false,
             pp_tps,

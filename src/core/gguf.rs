@@ -35,6 +35,12 @@ pub struct GgufMeta {
     pub has_mtp: bool,
     /// `<arch>.expert_count` — Some(n > 0) means Mixture-of-Experts.
     pub expert_count: Option<u64>,
+    /// What `tokenizer.chat_template` says about reasoning: which
+    /// effort levels it accepts, its default, whether thinking can be
+    /// switched off. Only the DERIVED contract is kept — templates run
+    /// to tens of KB and this metadata is cached (2026-08-31).
+    #[serde(default)]
+    pub reasoning: Option<crate::core::reasoning::ReasoningSupport>,
 }
 
 /// Hard ceiling on how much header we're willing to read. Real metadata
@@ -74,6 +80,11 @@ pub fn read_meta(path: &Path) -> Result<GgufMeta> {
             "general.architecture" => meta.architecture = as_string(&mut r, ty)?,
             "general.name" => meta.name = as_string(&mut r, ty)?,
             "general.size_label" => meta.size_label = as_string(&mut r, ty)?,
+            "tokenizer.chat_template" => {
+                meta.reasoning = as_string(&mut r, ty)?
+                    .as_deref()
+                    .and_then(crate::core::reasoning::parse_support);
+            }
             "general.file_type" => {
                 if let Some(n) = as_u64(&mut r, ty)? {
                     meta.quantization = Some(file_type_name(n));

@@ -13,7 +13,7 @@
 
 use crate::core::{
     advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, meter,
-    hermes, ollama, opencode, piagent, router, rows, settings, system, trial,
+    hermes, ollama, opencode, piagent, reasoning, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -292,6 +292,12 @@ struct OverrideEditor {
     /// The optimized context baseline: what --fit measured on this machine
     /// (None = not measured yet -> auto).
     optimized_ctx: Option<u64>,
+    /// What this model's OWN chat template accepts for reasoning
+    /// (None = the template never mentions it, so no field is shown).
+    reasoning: Option<reasoning::ReasoningSupport>,
+    /// Current choice: None = template default, Some("off") = disabled,
+    /// Some(level) = that effort level.
+    reasoning_choice: Option<String>,
     /// This model has a vision projector available on disk.
     has_mmproj: bool,
     /// User chose to serve WITHOUT it (restores cache-reuse).
@@ -1324,13 +1330,31 @@ impl App {
                 // about what the model will get. Promoted keys leave the
                 // free-form box and land in their own fields.
                 let mut extra_rest: Vec<String> = Vec::new();
+                // Reasoning lives across two keys: an effort level, or
+                // `reasoning = off` to disable thinking wholesale. Both
+                // leave the free-form box for the dropdown.
+                let mut reasoning_choice: Option<String> = None;
                 for (k, v) in &ov.extra {
-                    if let Some(f) = promoted.iter_mut().find(|f| f.key == k.as_str()) {
-                        f.text = v.clone();
-                    } else {
-                        extra_rest.push(format!("{k} = {v}"));
+                    match k.as_str() {
+                        "reasoning-effort" => reasoning_choice = Some(v.clone()),
+                        "reasoning" if v == "off" => reasoning_choice = Some("off".into()),
+                        _ => {
+                            if let Some(f) = promoted.iter_mut().find(|f| f.key == k.as_str()) {
+                                f.text = v.clone();
+                            } else {
+                                extra_rest.push(format!("{k} = {v}"));
+                            }
+                        }
                     }
                 }
+                // The model's own template is the authority on which
+                // levels exist (2026-08-31): no dropdown may offer a
+                // value the model would raise an exception on.
+                let reasoning = self
+                    .rows
+                    .iter()
+                    .find(|r| r.router_id.as_deref() == Some(id.as_str()))
+                    .and_then(|r| r.reasoning.clone());
                 self.override_editor = Some(OverrideEditor {
                     id,
                     error: None,
@@ -1343,6 +1367,8 @@ impl App {
                         .cache_type_kv
                         .clone()
                         .unwrap_or_else(|| router::DEFAULT_KV_TYPE.to_string()),
+                    reasoning,
+                    reasoning_choice,
                     has_mmproj,
                     no_mmproj: ov.no_mmproj,
                     extra_text: extra_rest.join("\n"),
@@ -4214,6 +4240,72 @@ impl App {
                         });
                         ui.end_row();
                     }
+                    // Reasoning — a dropdown of exactly what this
+                    // model's template accepts (user request 2026-08-31;
+                    // Qwen3.8 defaults to 'xhigh', the most thinking of
+                    // any level, which is why this needed promoting).
+                    if let Some(sup) = ed.reasoning.clone() {
+                        ui.label("Reasoning");
+                        ui.horizontal(|ui| {
+                            let shown = |c: &Option<String>| match c.as_deref() {
+                                None => match &sup.default_level {
+                                    Some(d) => format!("template default ({d})"),
+                                    None => "template default".to_string(),
+                                },
+                                Some("off") => "off — no thinking".to_string(),
+                                Some(l) => l.to_string(),
+                            };
+                            egui::ComboBox::from_id_salt("reasoning-effort")
+                                .selected_text(shown(&ed.reasoning_choice))
+                                .show_ui(ui, |ui| {
+                                    let mut pick = |ui: &mut egui::Ui, v: Option<String>| {
+                                        let label = shown(&v);
+                                        if ui
+                                            .selectable_label(ed.reasoning_choice == v, label)
+                                            .clicked()
+                                        {
+                                            ed.reasoning_choice = v;
+                                        }
+                                    };
+                                    pick(ui, None);
+                                    for l in &sup.levels {
+                                        pick(ui, Some(l.clone()));
+                                    }
+                                    if sup.can_disable {
+                                        pick(ui, Some("off".into()));
+                                    }
+                                });
+                            let hint = if sup.levels.is_empty() {
+                                "this template only switches thinking on or off".to_string()
+                            } else if sup.levels_confirmed {
+                                match &sup.default_level {
+                                    Some(d) => format!(
+                                        "read from this model's template: {} (default {d})",
+                                        sup.levels.join(" | ")
+                                    ),
+                                    None => format!(
+                                        "read from this model's template: {}",
+                                        sup.levels.join(" | ")
+                                    ),
+                                }
+                            } else {
+                                // Honest labelling: the template consumes
+                                // an effort but never states its set.
+                                // Verified 2026-08-31: llama-server accepts
+                                // ANY effort string on the command line —
+                                // the template rejects a bad one when a
+                                // request renders it, not at startup.
+                                format!(
+                                    "llama.cpp's levels ({}) — this model's template \
+                                     doesn't state its own, so a wrong one fails on \
+                                     the first message, not at load",
+                                    sup.levels.join(" | ")
+                                )
+                            };
+                            ui.small(hint);
+                        });
+                        ui.end_row();
+                    }
                     ui.label("Sampling defaults");
                     ui.horizontal(|ui| {
                         for f in ed
@@ -4318,7 +4410,9 @@ impl App {
                 // Accepts `--n-cpu-moe 32` / `-ub 2048` as every model
                 // card writes them (usability review G7).
                 let (k, v) = router::parse_extra_line(line).map_err(|e| e.to_string())?;
-                if ed.promoted.iter().any(|f| f.key == k) {
+                if ed.promoted.iter().any(|f| f.key == k)
+                    || (ed.reasoning.is_some() && matches!(k.as_str(), "reasoning" | "reasoning-effort"))
+                {
                     return Err(format!("{k} has its own field above — set it there"));
                 }
                 extra.push((k, v));
@@ -4328,6 +4422,13 @@ impl App {
                 if !t.is_empty() && t != f.default_text {
                     extra.push((f.key.to_string(), t.to_string()));
                 }
+            }
+            // Reasoning: an effort level, or off. "template default" is
+            // the absence of both keys — nothing pinned, still adaptive.
+            match ed.reasoning_choice.as_deref() {
+                None => {}
+                Some("off") => extra.push(("reasoning".into(), "off".into())),
+                Some(level) => extra.push(("reasoning-effort".into(), level.to_string())),
             }
             let ov = router::ModelOverrides {
                 cache_type_kv: kv,
