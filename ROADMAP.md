@@ -5,6 +5,11 @@ design; this file holds what's done, what's next, and the idea backlog.
 North star for every entry: **maximum llama.cpp + OpenCode performance
 without requiring expertise — measured, not guessed.**
 
+> **What to work on next: [THE PLAN](#the-plan--dependency-ordered-2026-08-31).**
+> Everything above it is history, kept because the reasoning behind
+> settled decisions is worth more than a clean file. Everything below
+> it is the backlog those phases draw from.
+
 ## Done
 
 - **M0** — plan, spikes against llama-server b10216 (router mode, `--fit`,
@@ -255,47 +260,92 @@ speculative-decoding trial ran (classic draft measured and REJECTED on
 this hardware, ngram adopted instead — spike 5); results-next-to-
 recommendations became the Lab's standing recommendation blocks.
 
-## Work queue — next up (ordered; 2026-08-29)
+## THE PLAN — dependency-ordered (2026-08-31)
 
-1. ✔ FIXED 2026-08-30 (v0.6.0): advisories now send BOTH reasoning
-   kwargs (enable_thinking:false + reasoning_effort:"low" — templates
-   ignore what they don't know), and an empty answer falls back to the
-   reasoning channel, labeled, instead of erroring. Test-pinned
-   (advisory_kwargs/extract_answer). LIVE VALIDATION PENDING: asking
-   gpt-oss would evict the Minecraft session (models_max=1) — run one
-   advisory when the machine is free. Original diagnosis kept below.
-   Was: **BENCHED BUG (top priority when work resumes): advisories fail on
-   gpt-oss** — "produced no answer (reasoning channel)". Diagnosed:
-   RouterAdvisor sends only `enable_thinking:false` (Qwen-family
-   kwarg); gpt-oss's Harmony template listens to `reasoning_effort`
-   instead (both exist in llama.cpp's chat layer — verified in
-   common/chat.cpp), so the earned advisor reasons at default effort
-   and exhausts its 2,500-token budget before answering. Fix: send
-   BOTH kwargs (`reasoning_effort:"low"` + `enable_thinking:false`),
-   consider a reasoning-content fallback + a larger budget for the
-   49k-token brief. The new error banner surfaced this exactly as
-   designed.
-2. ✔ Library master-detail BUILT 2026-08-29 (Scott chose it from three
-   mocked options): slim 8-column grid + filter + advice sort;
-   selection detail panel with full advice, quality scores, every
-   action, and visible history (G25 resolved). Tab-semantics DECIDED
-   2026-08-29: OpenCode mirror stays inside Connections (Scott's yes).
-3. ✔ Usability P3 batch DONE 2026-08-29 (two commits): CLI exit codes
-   + diagnosis + parse errors + --config; Lab (k/n) progress + inline
-   Cancel; trial-header hovers; Settings "Apply now" button; vocabulary
-   note in the Tuning Guide. C13 (named flags) deliberately deferred.
-   Was: Usability P3 batch: CLI diagnose + exit codes, vocabulary
-   unification, trial-header hovers, Settings offers actions not
-   instructions, G11 progress/cancel placement.
-4. ✔ QA/guides/work-left discussion HELD 2026-08-29 (The Steward's
-   Map brief). Scott's decisions: tab semantics = Connections keeps the
-   mirror; QA = release checklist + pre-tag review now, CLI harness
-   later (docs/RELEASE-CHECKLIST.md); docs/GUIDE.md written (Scott
-   working through it); next tag = v0.5.1 (tagged). Lab gained a
-   where-settings-live note (user question → feature, per the rule).
-5. gpt-oss advisor reasoning_effort fix — NOW the top dev item (see 1).
-6. README screenshot (D17) once one is saved to disk.
-7. Help → First Run (D10) — small, next polish pass.
+Reorganized on request after a stretch of opportunistic work. Ordering
+rule: **anything other items depend on comes first**, so nothing gets
+built twice. Everything below is open; finished work moved to the
+dated sections further down. Phases are ordered; items inside a phase
+are not.
+
+### Phase 0 — Validate what just shipped (Scott, cheap, do first)
+
+These are minutes of clicking, and a failure here reorders everything
+after it. All four validate code that is already live.
+
+- **Reasoning field** on qwen3.8-27b-ud-q4_k_xl: ⚙ Tune -> Reasoning ->
+  low -> Save -> next load. (Fixes the over-thinking Scott observed.)
+- **pi agent**: run `pi`, `/model` — 18 models with measured contexts.
+- **Hermes**: Connections -> Hermes -> Register -> restart Hermes ->
+  `/model`.
+- **AI advisor on gpt-oss** (needs the GPU free): one advisory, to
+  confirm the dual reasoning-kwarg fix works end to end.
+
+### Phase 1 — Act on the review findings (blocks everything structural)
+
+- **Triage `code-review/`** (correctness, robustness, structure,
+  efficiency — written 2026-08-31 by four independent reviewers).
+  CRITICAL and HIGH first; the rest becomes ordinary backlog.
+- Rationale for going first: every feature below is built on this
+  code, and reliability/stability is the stated priority. Fixing a
+  foundation after stacking features on it costs multiples.
+
+### Phase 2 — Foundations other work needs (do before the features that use them)
+
+- **Connector trait extraction** — opencode/piagent/hermes already
+  share diff/backup/sync shapes. Extract BEFORE agent #4, or the
+  duplication triples. Pure refactor, fully testable, no behavior
+  change. ENABLES: every future connector, and a uniform Connections
+  mirror.
+- **Thinking/latency instrument** — thinking tokens spent and
+  wall-time to first useful content, per prompt. REQUIRED BY the think
+  trial menu (see the backlog note: effort barely moves t/s, so an
+  existing goal would report "no difference" while the user waits 5x).
+  Also improves the meter, which currently counts thinking tokens as
+  ordinary output.
+- **Pre-flight rule list** — comes out of Scott walking docs/GUIDE.md
+  and noting every place he was unsure what to do next. The engine's
+  design is already settled (deterministic checks -> findings -> Fix
+  buttons; File menu + status-bar count). BLOCKED BY: the walk.
+
+### Phase 3 — Features that sit on Phase 2
+
+- **`think` trial menu** — races the levels a model's template accepts
+  against the new instrument, with fidelity + quality as the
+  counterweight. NEEDS: thinking/latency instrument (Phase 2), and the
+  first menu with PER-MODEL variants (menu() returns a fixed list
+  today).
+- **Pre-flight check** — build the engine + surfaces from the rule
+  list. NEEDS: rule list (Phase 2).
+- **More agent connectors** (as requested) — NEEDS: Connector trait
+  (Phase 2), plus per-agent requirements: repo/docs, a real sample
+  config, model-selection semantics, reload behavior, comment
+  preservation. Formats are never guessed.
+
+### Phase 4 — Leaves (no dependents; any time, good filler)
+
+- README screenshot (D17) — needs Scott to save one to disk.
+- Help -> First Run (D10) — small; GUIDE.md is already the script.
+- CHANGELOG.md fed by release notes (D12).
+- Showcase entry finish — repo link, screenshot, final meter numbers.
+- Legacy rename migrations (D16): `.lcc.bak` backups, the
+  `llamacpp-router` systemd unit name. Needs a migration, hence
+  parked, not hard.
+- CLI named flags (C13) — `--port`/`--model`/`--force` with positional
+  aliases. A compatibility break to design deliberately.
+- Daily upstream probe cadence — currently once/day; a faster tick is
+  a one-line decision if "17 builds behind" recurs.
+
+### Phase 5 — Blocked on data or hardware (not on us)
+
+- **J/token as a verdict guard** — needs accumulated energy numbers
+  across models before honest thresholds can be set.
+- **Prefill-side energy attribution** — generation-only today.
+- **Multi-GPU work** (topology_advice's scalar fit math, real layer
+  split verdicts) — needs multi-GPU hardware to test against.
+- **Slot-persistence workflow** — upstream save-on-evict is the clean
+  automation; measured a solid negative on b10630, watch upstream.
+- **Community dataset (Tier 2)** — needs a home to exist first.
 
 ## Where things stand (2026-08-29, 165 tests green — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 
