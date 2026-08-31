@@ -1,8 +1,10 @@
 # Code review — correctness, safety, and structure
 
 2026-08-31 · v0.6.5 + post-tag commits · 22,086 lines Rust, 189 tests ·
-three independent reviewers, every finding below re-verified by the dev
-session against the actual source before it landed here.
+four independent reviewers, every finding below re-verified by the dev
+session against the actual source before it landed here. Findings marked
+**EXECUTED** were reproduced by compiling the real code against a
+synthetic input in a scratch copy — not inferred by reading.
 
 Scott asked for brutal and honest. This is that. Companion document:
 [EFFICIENCY-RELIABILITY.md](EFFICIENCY-RELIABILITY.md).
@@ -20,14 +22,22 @@ codebase carrying one test, and that test checks font glyphs.** That
 untested third holds the sync orchestration, the auto-build gate, the
 install pick, and three copies of a verdict rule. Worse, the newest
 work — the agent connectors shipped 2026-08-30 — landed *there*, and
-introduced the two data-loss bugs at the top of this list. The debt is
+introduced three of the ten data-loss findings below. The debt is
 narrow, specific, and already written down in ROADMAP; it is simply
 being overtaken by feature work.
 
-**Honest note on provenance:** the two most severe connector findings
-(C4, C5) are in code the dev session wrote this week, and one of them
-is *pinned by a test that asserts the wrong behavior*. The reviews
-caught what the author did not.
+**The single worst finding is C6**, and it is not new code: the app's
+own ghost-commenting can make `opencode.json` unparseable, and because
+our reader is lenient about the exact damage our writer causes, **every
+surface reports success while OpenCode cannot load the file.** Two
+reviewers independently converged on the same shape — *a lenient reader
+hiding a destructive writer* — which is also C7's shape. That pattern,
+not any individual bug, is the thing to internalize.
+
+**Honest note on provenance:** the connector findings (C4, C5, C10) are
+in code the dev session wrote this week, and one is *pinned by a test
+that asserts the wrong behavior*. The reviews caught what the author did
+not.
 
 ---
 
@@ -118,6 +128,103 @@ written back.
 
 `piagent.rs:104` handles this class correctly — it *refuses* to rewrite
 a file it can't parse, with a test. Hermes needs the same.
+
+### C6. Sync can corrupt `opencode.json` into invalid JSON, and the app cannot see that it did — **EXECUTED**
+
+`core/jsonc.rs:607-613`. When inserting a new model, the cursor walks
+back over **whitespace only** to decide where the separating comma goes.
+It has no idea whether it landed inside a `//` comment — so when the
+last content before the closing brace is a line comment, **the comma is
+written inside that comment**, where a strict parser never sees it.
+
+**The app creates its own trigger.** `comment_out_ghosts` runs at the
+end of every sync and leaves a commented block as the last content; the
+next sync's insert then splices after it. Reproduced end-to-end through
+the real `sync_file`:
+
+```
+"keeper": { ... }
+// Commented out by modelsteward: ...
+// "ghost": { "name": "Ghost" },     <-- the comma landed in here
+"newmodel": { ... }
+```
+
+`keeper` and `newmodel` now have no separator between them.
+
+**The blindness is the dangerous half.** `jsonc_parser` is lenient about
+missing commas, so our own re-parse, the model-id listing, and the
+Connections mirror all still succeed. The sync reports success, the UI
+shows a healthy mirror — and **OpenCode cannot load the file**
+(`expected ',' or '}' at line 8`). The next sync writes again, rotating
+the last good backup away while OpenCode stays broken.
+
+Also fires from a user's own trailing comment, an inline `// note` after
+the last entry, and inside a single entry during the tool-call/modality
+fill-in. Block comments are safe.
+
+**Fix:** validate before writing — a strict, comment-stripped
+`serde_json` parse of the output before `write_backed_up`. A lenient
+re-parse cannot catch this.
+
+### C7. An *unreadable* `config.json` is silently replaced by defaults, and the rescue never fires — **EXECUTED**
+
+`core/settings.rs:158`: `Err(_) => (Self::default(), None)`. The C8 fix
+from the usability review guards a **parse** failure. A **read** failure
+— a permission change, an EIO, an NFS hiccup — takes this arm and
+reports "nothing wrong". Then `save()` gates its `.corrupt` rescue on a
+successful read, so the rescue is skipped too and the write clobbers.
+
+Executed: scan dirs, port, **per-model overrides (where kept trial
+winners live)**, checkouts and the disabled list all silently replaced
+by defaults, `err=None`, no rescue file. This is the C8 incident
+re-entering through a different door.
+
+**Fix:** match `NotFound` specifically; every other `Err` is loud.
+
+### C8. `RouterState::Ours` never checks the port, so we can drive a server we didn't start — **VERIFIED**
+
+`core/router.rs:409` proves ownership by preset path and PID only.
+`Marker.port` is written at `router.rs:461` and — confirmed by grep —
+**never read anywhere in the tree**.
+
+**Scenario:** our router runs on 18080; the user changes the port to
+8080 in Settings, where their own hand-run llama-server lives (a setup
+CLAUDE.md explicitly names). `fetch_models(8080)` succeeds against plain
+llama-server and returns an empty list rather than an error, so the
+state is `Ours`. `Ours` gates every mutating path — `run_trial` then
+fires reloads, loads, and chat probes at **the stranger's server** and
+records the results as measurements. `stop()` takes no port at all.
+
+This is the "never touch a server we didn't start" rule leaking through
+the port dimension. `start()` already passes `--port`, so the fix is one
+comparison.
+
+### C9. A failed RAPL read is laundered into a phantom 262 kJ in the cost line — **VERIFIED (code); live reachability hypothetical**
+
+`core/energy.rs:62` swallows a failed read into `0`, which
+`counter_delta` then treats as a counter wraparound, returning
+`max_range - before` — **262 kJ presented as measured joules for one
+trial window** on this machine. It flows into `served_j_per_token` →
+`cost_report` → the `--meter` measured-cost line with no plausibility
+clamp. Dormant only because RAPL is permission-locked here; it arms the
+moment the user follows the app's own `chmod a+r` advice. `None` is the
+honest value, and the module already uses it correctly elsewhere.
+
+### C10. Hermes deletes unmodeled entries and unrelated top-level keys — **EXECUTED**
+
+Beyond C5's parse-failure wipe: even on a **successful** parse, entries
+whose value isn't a plain unsigned integer (a float, a quoted number, a
+null) are filtered out, and any unrelated top-level key in the file is
+dropped — then the survivors are written back as the whole file.
+Executed: `floaty`, `quoted`, `nulled` and an entire unrelated section
+all vanished.
+
+Related, also executed: `hermes::register_provider` detects the provider
+block by exact line match, so a **flow-style** `custom_providers: [{…}]`
+— legal YAML — isn't recognized and a **second** `custom_providers:` key
+is appended, making the API-key-bearing config.yaml unparseable
+("duplicate entry with key"). The fallback must refuse when the key
+exists in a form it can't edit.
 
 ---
 
@@ -234,7 +341,64 @@ The GUI loads config once at startup and holds it for the session. A CLI
 Settings save in the GUI writes the **stale** struct back, erasing the
 kept winner, plus any `disabled` entries or checkouts the CLI added.
 
-### H10. Backup policy is triplicated and unequal
+### H10. Writing `opencode.json` destroys a dotfiles symlink and widens its permissions — **EXECUTED**
+
+`opencode.rs:230` renames over the path itself. Executed: a symlinked
+`opencode.json` (stow/chezmoi/yadm — a large fraction of people who hand
+-edit `~/.config`) **is replaced by a regular file**; the repo copy keeps
+the old content and silently diverges, and the next `chezmoi apply`
+clobbers the app's writes. Separately, a 0600 config (they carry cloud
+API keys) comes back **0664**, and the backup is created world-readable
+too. Note the inconsistency: pi, Hermes and settings use `fs::write`,
+which follows symlinks and preserves mode — three connectors, three
+behaviors.
+
+### H11. The meter cannot tell "you used nothing" from "I can no longer read your log" — **VERIFIED against the live 820 KB log**
+
+`evidence.rs:262` silently `continue`s every task it fails to parse, so
+an empty result has two causes and nothing downstream separates them:
+`fmt_report` prints *"no usage recorded in this range"* — a confident,
+wrong statement. CLAUDE.md warns about exactly this ("when the meter
+reads zero while tokens flow, suspect a new dialect"), and there is **no
+drift detector anywhere**.
+
+**The bias is already live**: the real log has 400 `stop processing`
+lines but 399 `prompt eval time` lines, because llama.cpp omits that
+line when nothing was processed — i.e. exactly the 100%-cache-hit turns
+the meter exists to celebrate. The dropped turn was 66,418 tokens, ~7%
+of the log's credited prompt tokens. **The headline cache-reuse number
+is biased downward.** The fix is one invariant: count `stop processing:`
+lines seen versus turns credited.
+
+### H12. Quality scores an HTTP failure as "the model got it wrong" — **VERIFIED**
+
+`quality.rs:270-286` collapses `Err` into `false`. `probe_tool_call`'s
+own doc states the contract — *"`Ok(false)` is a real measurement; `Err`
+is inconclusive and stored as `None`"* — and `calibrate` honors it. One
+connection reset permanently lowers `eval_score` / `tool_reliability` /
+`loop_reliability` in `measurements.json`, and those drive the advisor
+seat and the fleet brief. Nothing marks them degraded.
+
+### H13. A truncated generation yields a plausible number, not an error — **VERIFIED**
+
+`chat_template_kwargs` appears in exactly one file. `trial::timed_generation`
+and `quality::chat` send none, check no `finish_reason`, and floor on no
+`predicted_n` (which *is* guarded — but only as the energy divisor). A
+model that burns its budget on `reasoning_content` returns empty content
+with a valid tokens/sec, so the trial records a real-looking
+`tg_rewrite` plus `fidelity: 0.0` — and the fidelity gate then vetoes
+that side. **A confident wrong verdict produced by a truncation.**
+
+### H14. `skip_value` reads unbounded bytes from one corrupt GGUF length field — **VERIFIED**
+
+`gguf.rs:225`. `read_string` caps declared lengths at 64 MB; `skip_value`'s
+string arm does not, and the `MAX_HEADER_BYTES` guard only runs *after*
+it returns. One corrupt byte, or a `.gguf` from a stranger's repo, makes
+`read_meta` read the entire 20 GB file before erroring — and
+`library::scan` calls it on **every** GGUF at GUI startup. Terminates
+honestly, so this is a stall, not a wrong number.
+
+### H15. Backup policy is triplicated and unequal
 
 `opencode.rs` has the good one (5-deep rotation, temp+rename,
 no-op-when-unchanged, tested). pi and Hermes each hand-roll **a single
@@ -371,27 +535,53 @@ at all.
 - **ROADMAP is an honest debt ledger** — all four structural findings
   above were already written down in it. This codebase is not blind to
   its own debt; it is being outrun by feature work.
+- **The JSONC editor's *removal* path is careful about comments** — it
+  correctly skips both `//` and `/* */` when locating a separator. C6 is
+  precisely that the *insertion* path never got the same treatment.
+- **Fill-don't-overwrite is real and tested in both directions** — a
+  probe false-negative can never clobber a hand-set value.
+- **All 12 HTTP call sites set a timeout**, ureq's is a total deadline
+  covering the body read, non-2xx becomes `Err`, and no TLS feature is
+  compiled — so no call site can parse an error page as data or reach
+  an `https://` host.
+- **`bench::run` refuses to record an empty baseline** — the right
+  instinct, and the model for what H11 and H12 should do.
+- **Honest `None`s where it counts**: energy reports `cpu_j: None` when
+  RAPL is locked, the meter reports `uncovered_generated` rather than a
+  zero-dollar estimate, and discover keeps `build: None` distinct from a
+  parsed number.
 
 ---
 
 ## Recommended order
 
-1. **C1, C2** — atomic writes + rescue-don't-zero for measurements and
+1. **C6 + C7** — the lenient-reader/destructive-writer pair. Both fixes
+   are roughly one line (a strict parse before writing; match `NotFound`
+   specifically), and together they close the largest gap between this
+   app's stated contract and its behavior.
+2. **C1, C2** — atomic writes + rescue-don't-zero for measurements and
    trials. Copy the pattern `settings.rs` already has.
-2. **C3, H4** — the two `opencode.json` backup bugs. Both are small and
+3. **C3, H4** — the two `opencode.json` backup bugs. Both are small and
    both destroy the user's last recovery point.
-3. **C4, C5** — the connector data-loss pair. Fix the behavior *and* the
-   test that pins C4.
-4. **H1, H2** — the busy-gate and cancel-token bugs. Both are a few
+4. **C4, C5, C10** — the connector data-loss set. Fix the behavior *and*
+   the test that pins C4.
+5. **C8** — compare the port before claiming a router is ours. One
+   comparison, and it closes a hole in a house rule.
+6. **C9** — `None`, not `0`, for a failed energy read.
+7. **H1, H2** — the busy-gate and cancel-token bugs. Both are a few
    lines and both currently mislead the user about what is happening.
-5. **H3** — the poller-killing panic. One-line fix.
-6. **H5, H6, H10** — build-lock symmetry, honest heal reporting, one
-   shared backup helper.
-7. **H7, H8, H9** — extract the shared sync/pick/config paths into core
-   so the two surfaces stop diverging. This is the S3 refactor's real
-   payoff.
-8. Structural work (S1, S2, S6) as capacity allows; the MEDIUM list
-   opportunistically.
+8. **H3** — the poller-killing panic. One-line fix.
+9. **H11** — the meter's drift detector (count `stop processing:` lines
+   versus turns credited). One invariant, and it protects the number the
+   whole product is sold on.
+10. **H5, H6, H10, H12, H15** — build-lock symmetry, honest heal
+    reporting, symlink/mode preservation, inconclusive-not-failed
+    quality scoring, one shared backup helper.
+11. **H7, H8, H9** — extract the shared sync/pick/config paths into core
+    so the two surfaces stop diverging. This is the S3 refactor's real
+    payoff.
+12. Structural work (S1, S2, S6) as capacity allows; the MEDIUM list
+    opportunistically.
 
 ## Dev session responses
 
