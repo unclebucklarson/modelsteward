@@ -2144,7 +2144,14 @@ impl App {
             .clone()
             .and_then(|d| rows.iter().find(|r| r.display == d).cloned());
         let Some(r) = sel else {
-            ui.weak("Select a model above for its advice, actions, quality scores, and history.");
+            // Name the actions explicitly: after master-detail moved
+            // them off the rows, "where did ⚙ Tune go?" was the first
+            // question asked (2026-08-31). A generic "actions" doesn't
+            // answer it; the verbs do.
+            ui.weak(
+                "Select a model above for its advice and history — and its actions: \
+                 Load/Unload, ⚙ Tune (per-model flags), In OpenCode, Why?, Disable.",
+            );
             if let Some(action) = pending {
                 self.run_row_action(action);
             }
