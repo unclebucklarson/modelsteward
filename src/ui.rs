@@ -3389,8 +3389,52 @@ impl App {
                 self.log("models JSON copied");
             }
         });
+        ui.add_space(6.0);
+        // The model list this tab's own text promises. It used to lean
+        // on the OpenCode table sitting underneath in the stacked
+        // layout; sub-tabs orphaned that sentence (user catch
+        // 2026-08-30). This is the reference for ANY client, including
+        // the ones with no connector.
         if measured.is_empty() {
             ui.small("No measured models yet — Load one on the Library tab first.");
+            return;
+        }
+        ui.strong(format!("{} model ids you can request", measured.len()));
+        ui.small(
+            "Send one of these as the \"model\" field. Context is what it measured \
+             on this machine, so a client can size its own budget honestly.",
+        );
+        ui.add_space(4.0);
+        let mut copied: Option<String> = None;
+        egui::Grid::new("anyapp-models")
+            .striped(true)
+            .min_col_width(64.0)
+            .show(ui, |ui| {
+                for h in ["Model id", "Measured context", "Tool calls", ""] {
+                    ui.strong(h);
+                }
+                ui.end_row();
+                for (id, ctx, tools) in &measured {
+                    ui.monospace(id);
+                    ui.label(ctx.to_string());
+                    ui.label(match tools {
+                        Some(true) => "yes",
+                        Some(false) => "no",
+                        None => "untested",
+                    });
+                    if ui
+                        .small_button("copy id")
+                        .on_hover_text("Copy this model id to the clipboard")
+                        .clicked()
+                    {
+                        copied = Some(id.clone());
+                    }
+                    ui.end_row();
+                }
+            });
+        if let Some(id) = copied {
+            ui.ctx().copy_text(id.clone());
+            self.log(format!("copied model id {id}"));
         }
     }
 
