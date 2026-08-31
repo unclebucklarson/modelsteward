@@ -234,3 +234,13 @@ last Lab selection set in config.json (they're already config-shaped).
   offers "Apply now: restart router + regen preset + sync" (one worker
   does all three) with a "later" dismiss. G13 fixed via the new
   RouterState Display (CLI batch). 167 tests green.
+
+- 2026-08-30, dev session: Connections got sub-tabs (Any app /
+  OpenCode / pi / Hermes) after Scott reported the third connector was
+  entirely below the fold with the activity log open. Pushed back on a
+  separate "Agents" tab: it would leave Connections holding only a base
+  URL and would split one concept across two homes, undoing the
+  2026-08-29 tab-semantics decision. Sub-tabs give each connector the
+  full pane height, name absent agents on the tab itself, and scale to
+  agent four. Inner fixed-height scroll areas (140/160px) removed — one
+  scrollbar per pane now, not three fighting.

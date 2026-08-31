@@ -83,6 +83,17 @@ enum Msg {
     Activity(Option<String>),
 }
 
+/// Sub-tabs inside Connections. Three connectors stacked vertically put
+/// Hermes below the fold entirely (user report 2026-08-30) — one at a
+/// time, each with the full pane height, and it scales to agent four.
+#[derive(PartialEq, Clone, Copy)]
+enum ConnTab {
+    AnyApp,
+    OpenCode,
+    Pi,
+    Hermes,
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum Pane {
     Library,
@@ -142,6 +153,7 @@ struct App {
     tuning_question: String,
     settings_needs_apply: bool,
     show_meter: bool,
+    conn_tab: ConnTab,
     confirm_disrupt: Option<(String, Disrupt)>,
     show_persistence_prompt: bool,
     /// Mirrors self.busy for the poller thread (auto-build must never
@@ -353,6 +365,7 @@ impl App {
             tuning_question: String::new(),
             settings_needs_apply: false,
             show_meter: false,
+            conn_tab: ConnTab::OpenCode,
             confirm_disrupt: None,
             show_persistence_prompt: false,
             busy_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3247,7 +3260,8 @@ impl App {
     // measured model list, and copy-paste snippets.
 
     fn connections_pane(&mut self, ui: &mut egui::Ui) {
-        ui.strong("Any app (OpenAI-compatible API)");
+        // The base URL is the identity of this whole tab — one line,
+        // always visible above the sub-tabs.
         let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
         ui.horizontal(|ui| {
             ui.label("Base URL:");
@@ -3257,6 +3271,58 @@ impl App {
                 self.log("base URL copied");
             }
         });
+        ui.horizontal(|ui| {
+            let pi_here = piagent::pi_present(&piagent::default_models_path());
+            let hermes_here = hermes::hermes_present(&hermes::default_home());
+            let oc_here = opencode::default_config_path().exists();
+            let tab = |ui: &mut egui::Ui, cur: &mut ConnTab, which: ConnTab, label: String| {
+                if ui.selectable_label(*cur == which, label).clicked() {
+                    *cur = which;
+                }
+            };
+            tab(ui, &mut self.conn_tab, ConnTab::AnyApp, "Any app".into());
+            // Installed connectors read plainly; absent ones say so on
+            // the tab itself, so nobody hunts for a section that has
+            // nothing to show.
+            tab(
+                ui,
+                &mut self.conn_tab,
+                ConnTab::OpenCode,
+                if oc_here { "OpenCode".into() } else { "OpenCode (absent)".to_string() },
+            );
+            tab(
+                ui,
+                &mut self.conn_tab,
+                ConnTab::Pi,
+                if pi_here { "pi".into() } else { "pi (absent)".to_string() },
+            );
+            tab(
+                ui,
+                &mut self.conn_tab,
+                ConnTab::Hermes,
+                if hermes_here { "Hermes".into() } else { "Hermes (absent)".to_string() },
+            );
+        });
+        ui.separator();
+        // Each sub-pane gets the whole remaining height and scrolls
+        // inside it — no more fixed 140px windows fighting each other.
+        egui::ScrollArea::vertical()
+            .id_salt("connections-body")
+            .auto_shrink([false, false])
+            .show(ui, |ui| match self.conn_tab {
+                ConnTab::AnyApp => self.any_app_section(ui, &base_url),
+                ConnTab::OpenCode => {
+                    ui.strong("OpenCode (synced connector)");
+                    self.opencode_section(ui);
+                }
+                ConnTab::Pi => self.pi_section(ui),
+                ConnTab::Hermes => self.hermes_section(ui),
+            });
+    }
+
+    fn any_app_section(&mut self, ui: &mut egui::Ui, base_url: &str) {
+        let base_url = base_url.to_string();
+        ui.strong("Any app (OpenAI-compatible API)");
         ui.small(
             "Point any OpenAI-compatible client here (API key: anything, it's ignored). Use a model id below; the router loads it on first request.",
         );
@@ -3326,16 +3392,6 @@ impl App {
         if measured.is_empty() {
             ui.small("No measured models yet — Load one on the Library tab first.");
         }
-        ui.add_space(8.0);
-        ui.separator();
-        ui.strong("OpenCode (synced connector)");
-        self.opencode_section(ui);
-        ui.add_space(8.0);
-        ui.separator();
-        self.pi_section(ui);
-        ui.add_space(8.0);
-        ui.separator();
-        self.hermes_section(ui);
     }
 
     /// Hermes agent (Connections p2, half two). Narrower than the other
@@ -3419,21 +3475,16 @@ impl App {
         if cached.is_empty() {
             ui.small("No measured contexts written yet — press Sync all measured above.");
         } else {
-            egui::ScrollArea::vertical()
-                .id_salt("hermes-models")
-                .max_height(140.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("hermes-grid").striped(true).show(ui, |ui| {
-                        ui.strong("Model");
-                        ui.strong("Context written");
-                        ui.end_row();
-                        for (id, ctx) in &cached {
-                            ui.label(id);
-                            ui.label(ctx.to_string());
-                            ui.end_row();
-                        }
-                    });
-                });
+            egui::Grid::new("hermes-grid").striped(true).show(ui, |ui| {
+                ui.strong("Model");
+                ui.strong("Context written");
+                ui.end_row();
+                for (id, ctx) in &cached {
+                    ui.label(id);
+                    ui.label(ctx.to_string());
+                    ui.end_row();
+                }
+            });
         }
         // Name what Hermes will refuse, so a missing model is never a
         // mystery (its own failure mode is a startup error).
@@ -3486,11 +3537,7 @@ impl App {
                  File -> Set Up Everything).",
             );
         } else {
-            egui::ScrollArea::vertical()
-                .id_salt("pi-models")
-                .max_height(160.0)
-                .show(ui, |ui| {
-                    egui::Grid::new("pi-grid").striped(true).show(ui, |ui| {
+            egui::Grid::new("pi-grid").striped(true).show(ui, |ui| {
                         ui.strong("Model (pi id)");
                         ui.strong("Context written");
                         ui.strong("Status");
@@ -3521,8 +3568,7 @@ impl App {
                             };
                             ui.end_row();
                         }
-                    });
-                });
+            });
         }
         ui.add_space(4.0);
         ui.horizontal(|ui| {
@@ -3566,7 +3612,7 @@ impl App {
         }
         let mut pending: Option<RowAction> = None;
         let configured = self.configured.clone();
-        egui::ScrollArea::both().show(ui, |ui| {
+        egui::ScrollArea::horizontal().show(ui, |ui| {
             egui::Grid::new("configured")
                 .striped(true)
                 .min_col_width(56.0)
