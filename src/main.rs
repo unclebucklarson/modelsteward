@@ -523,45 +523,59 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         }
     }
     if report.skipped_missing {
+        // NOT a return: pi and Hermes are independent of OpenCode, and
+        // returning here made `--sync` silently skip them on a machine
+        // without OpenCode while the GUI synced them — same command, two
+        // answers (review finding H7, 2026-08-31).
         println!(
             "opencode.json not found ({}) — OpenCode isn't installed; skipped. \
              Other apps connect via the base URL (see --help / Connections tab).",
             path.display()
         );
-        return Ok(());
-    }
-    println!(
-        "synced {}: {} added, {} updated",
-        path.display(),
-        report.added.len(),
-        report.updated.len()
-    );
-    for id in &report.added {
-        println!("  + {id}");
-    }
-    for id in &report.updated {
-        println!("  ~ {id} (context refreshed)");
-    }
-    if !report.orphans.is_empty() {
-        println!("orphans (in config, not measured — left untouched):");
-        for id in &report.orphans {
-            println!("  ? {id}");
+    } else {
+        println!(
+            "synced {}: {} added, {} updated",
+            path.display(),
+            report.added.len(),
+            report.updated.len()
+        );
+        for id in &report.added {
+            println!("  + {id}");
+        }
+        for id in &report.updated {
+            println!("  ~ {id} (context refreshed)");
+        }
+        if !report.orphans.is_empty() {
+            println!("orphans (in config, not measured — left untouched):");
+            for id in &report.orphans {
+                println!("  ? {id}");
+            }
         }
     }
     // pi coding agent (Connections p2, 2026-08-30): measured context
     // windows into ~/.pi/agent/models.json — pi's native router
     // integration assumes 128k when the router doesn't report n_ctx.
     let pi_path = piagent::default_models_path();
-    match piagent::sync_file(&pi_path, &base_url, &desired) {
+    let known = router::ids_in_preset(&system::preset_path());
+    match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
         Ok(r) if r.skipped_missing => {}
-        Ok(r) => println!(
-            "pi agent synced ({}): {} added, {} updated, {} removed{}",
-            pi_path.display(),
-            r.added.len(),
-            r.updated.len(),
-            r.removed.len(),
-            if r.created_file { " — models.json created" } else { "" },
-        ),
+        Ok(r) => {
+            println!(
+                "pi agent synced ({}): {} added, {} updated, {} removed{}",
+                pi_path.display(),
+                r.added.len(),
+                r.updated.len(),
+                r.removed.len(),
+                if r.created_file { " — models.json created" } else { "" },
+            );
+            if !r.kept_unmeasured.is_empty() {
+                println!(
+                    "  ~ {} entr(ies) kept although not measurable right now — a \
+                     transient load failure never deletes a config entry",
+                    r.kept_unmeasured.len()
+                );
+            }
+        }
         Err(e) => eprintln!("pi agent sync FAILED: {e:#}"),
     }
     // Hermes: measured contexts into its context cache. Registering the

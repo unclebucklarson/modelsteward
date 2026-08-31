@@ -44,10 +44,12 @@ pub fn pi_present(models_path: &Path) -> bool {
 pub struct PiSyncReport {
     pub added: Vec<String>,
     pub updated: Vec<String>,
-    /// Entries dropped from OUR provider because their measurement is
-    /// gone. Measurements persist across router restarts, so a stopped
-    /// router never causes removals (house rule).
+    /// Entries dropped from OUR provider because the model has genuinely
+    /// left the fleet (file gone, or disabled by the user).
     pub removed: Vec<String>,
+    /// Entries KEPT although they aren't currently measurable — a
+    /// transient load failure must never delete a user's config entry.
+    pub kept_unmeasured: Vec<String>,
     pub created_file: bool,
     /// ~/.pi/agent doesn't exist — pi isn't installed; nothing written.
     pub skipped_missing: bool,
@@ -88,8 +90,33 @@ pub fn provider_json(base_url: &str, desired: &[DesiredModel]) -> serde_json::Va
     })
 }
 
-/// Sync our provider into models.json. Reads, diffs, backs up, writes.
+/// Sync our provider block. `known` is every model id the app still
+/// knows about — measured OR merely failing today. Entries are removed
+/// only when the id has genuinely left the fleet (the file is gone, or
+/// the user disabled it), never because a load failed this morning:
+/// "a stopped provider is not evidence its models are gone" (CLAUDE.md;
+/// review finding C4, 2026-08-31).
+pub fn sync_file_with_known(
+    path: &Path,
+    base_url: &str,
+    desired: &[DesiredModel],
+    known: &std::collections::BTreeSet<String>,
+) -> Result<PiSyncReport> {
+    sync_inner(path, base_url, desired, Some(known))
+}
+
+/// Back-compat shim: no known-set means nothing is ever removed, which
+/// is the safe direction.
 pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Result<PiSyncReport> {
+    sync_inner(path, base_url, desired, None)
+}
+
+fn sync_inner(
+    path: &Path,
+    base_url: &str,
+    desired: &[DesiredModel],
+    known: Option<&std::collections::BTreeSet<String>>,
+) -> Result<PiSyncReport> {
     let mut report = PiSyncReport::default();
     if !pi_present(path) {
         report.skipped_missing = true;
@@ -109,7 +136,7 @@ pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Resul
             )
         })?,
     };
-    let new_block = provider_json(base_url, desired);
+    let mut new_block = provider_json(base_url, desired);
     let old_models: std::collections::BTreeMap<String, serde_json::Value> = doc
         .get("providers")
         .and_then(|p| p.get(PROVIDER_KEY))
@@ -130,9 +157,31 @@ pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Resul
         }
     }
     for id in old_models.keys() {
-        if !desired.iter().any(|d| &d.id == id) {
-            report.removed.push(id.clone());
+        if desired.iter().any(|d| &d.id == id) {
+            continue;
         }
+        // Absent from `desired` is NOT evidence the model is gone — a
+        // transient load failure clears n_ctx and drops it from
+        // `desired` while the file sits happily on disk. Only remove
+        // when the caller positively knows the id has left the fleet.
+        match known {
+            Some(k) if !k.contains(id) => report.removed.push(id.clone()),
+            Some(_) => report.kept_unmeasured.push(id.clone()),
+            None => report.kept_unmeasured.push(id.clone()),
+        }
+    }
+    // Carry kept-but-unmeasured entries through VERBATIM. Reporting
+    // them as kept while writing a block without them would delete them
+    // just the same — the report and the file have to agree.
+    if !report.kept_unmeasured.is_empty()
+        && let Some(arr) = new_block["models"].as_array_mut()
+    {
+        for id in &report.kept_unmeasured {
+            if let Some(old) = old_models.get(id) {
+                arr.push(old.clone());
+            }
+        }
+        arr.sort_by(|a, b| a["id"].as_str().unwrap_or("").cmp(b["id"].as_str().unwrap_or("")));
     }
     let unchanged = report.added.is_empty()
         && report.updated.is_empty()
@@ -154,7 +203,7 @@ pub fn sync_file(path: &Path, base_url: &str, desired: &[DesiredModel]) -> Resul
         .context("models.json 'providers' is not an object")?
         .insert(PROVIDER_KEY.to_string(), new_block);
     let text = serde_json::to_string_pretty(&doc)? + "\n";
-    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))?;
+    crate::core::safefs::write_atomic(path, &text)?;
     Ok(report)
 }
 
@@ -273,10 +322,30 @@ mod tests {
             doc["providers"]["modelsteward"]["models"][1]["input"],
             serde_json::json!(["text", "image"])
         );
-        // a remeasured bigger, b gone entirely.
+        // a remeasured bigger; b merely FAILS TO LOAD today, so it
+        // drops out of `desired` while its file sits on disk.
+        //
+        // Review finding C4 (2026-08-31): this test used to assert that
+        // b was REMOVED — pinning a bug that deleted a user's config
+        // entry over a transient VRAM conflict, in direct violation of
+        // "a stopped provider is not evidence its models are gone".
+        // The contract is now: keep it, and say so.
         let v2 = [desired("a", 120_000, false)];
-        let r = sync_file(&path, "http://x/v1", &v2).unwrap();
+        let known: std::collections::BTreeSet<String> =
+            ["a".to_string(), "b".to_string()].into_iter().collect();
+        let r = sync_file_with_known(&path, "http://x/v1", &v2, &known).unwrap();
         assert_eq!(r.updated, vec!["a".to_string()]);
+        assert!(r.removed.is_empty(), "a failed load must NOT delete an entry");
+        assert_eq!(r.kept_unmeasured, vec!["b".to_string()]);
+        let after = configured_models(&path);
+        assert!(
+            after.iter().any(|(id, _)| id == "b"),
+            "b must still be in the user's file: {after:?}"
+        );
+
+        // Genuinely gone (file deleted / model disabled): now it goes.
+        let only_a: std::collections::BTreeSet<String> = ["a".to_string()].into_iter().collect();
+        let r = sync_file_with_known(&path, "http://x/v1", &v2, &only_a).unwrap();
         assert_eq!(r.removed, vec!["b".to_string()]);
         assert_eq!(configured_models(&path), vec![("a".into(), safety_context(120_000))]);
     }

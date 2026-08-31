@@ -586,3 +586,42 @@ at all.
 ## Dev session responses
 
 *(Append here when acting on these, as the usability review does.)*
+
+- 2026-08-31, dev session (v0.6.75). FIXED, each test-pinned:
+  **C6** — the comma now anchors to the last property's VALUE via the
+  AST, never the last byte, so it can't land inside a trailing comment;
+  plus `jsonc::strictly_valid` runs before every opencode.json write and
+  refuses BEFORE the backup rotates. Two tests reproduce the original
+  corruption (ghost block, inline note) and assert a strict parse.
+  **C7** — only `NotFound` is silent; every other read error is loud and
+  the rescue fires for unreadable as well as unparseable files.
+  **C1/C2** — new `core::safefs`: temp+fsync+rename writes, and reads
+  that distinguish Missing from Damaged, with the damaged file moved
+  aside so the next write cannot eat it. Applied to measurements,
+  trials, config, preset, history, meter cursor, upstream, pi, hermes.
+  **C3** — restore writes the good content first, then reuses the slot.
+  **C4** — pi removes an entry only when the id has genuinely left the
+  preset; a failed load is reported as `kept_unmeasured` and the entry
+  is carried through verbatim. The test that pinned the WRONG behavior
+  was rewritten. **C5/C10** — hermes edits its cache in place and
+  refuses a YAML it cannot parse; unmodeled values and unrelated
+  top-level keys survive. Flow-style `custom_providers` is refused
+  rather than duplicated. **C8** — ownership now compares the port, so
+  a stranger's server on our port is never claimed. **C9** — a failed
+  RAPL read is `None`; one missing package makes the whole CPU figure
+  None rather than inventing 262 kJ. **H1** — `Msg::Scanned` and
+  `Msg::PresetWritten` no longer clear a busy they never claimed.
+  **H2** — the cancel token is only replaced when a worker actually
+  starts. **H3** — `fnv_bytes` ends the poller-killing panic. **H4** —
+  ghost commenting is one read/one write, costing one backup slot.
+  **H5** — the auto-build holds a build flag for its duration and the
+  GUI refuses to measure beside it. **H6** — heal only claims a restore
+  that happened, and keeps the marker when it fails. **H7** — the CLI no
+  longer returns before pi/Hermes when opencode.json is absent. **H10**
+  — writes preserve mode and follow symlinks. **H11** —
+  `evidence::Coverage` compares finished turns against credited ones and
+  warns once when the log stops parsing.
+  DEFERRED with reasons: H8/H9 (pick_server + config lost-update) and
+  the structural items S1-S8 need the core extraction, which is Phase 2
+  of the roadmap; M-list items remain open. First integration tests
+  landed: `tests/sync_flow.rs`.

@@ -383,6 +383,73 @@ fn collect_merge_splices(
 
 /// Build the single splice that appends `entries` before `object`'s closing
 /// brace, matching the surrounding comma and indent style.
+/// Where a separating comma must go when appending to `object`, and
+/// where the new entry starts.
+///
+/// The comma belongs immediately after the last property's VALUE — NOT
+/// after the last non-whitespace byte. Those differ whenever a comment
+/// trails the last entry, and the app produces exactly that shape
+/// itself (comment_out_ghosts leaves a commented block as the last
+/// content). Writing the comma at the end of a `//` line buries it in
+/// the comment, where a strict parser never sees it: the file becomes
+/// invalid JSON while our own lenient reader still parses it, so every
+/// surface reports success and OpenCode cannot load the file.
+/// Live-reproduced 2026-08-31 (review finding C6).
+///
+/// Returns `(comma_pos, insert_pos)`: `comma_pos` is `None` when no
+/// comma is needed (empty object, or the last property already has a
+/// trailing comma).
+fn append_positions(source: &str, object: &Object<'_>, close_pos: usize) -> (Option<usize>, usize) {
+    // Insert point: back up over the whitespace run before `}` so the
+    // entry lands after real content, not after a blank line.
+    let before_close = &source[..close_pos];
+    let bytes = before_close.as_bytes();
+    let mut insert_pos = before_close.len();
+    while insert_pos > 0 && bytes[insert_pos - 1].is_ascii_whitespace() {
+        insert_pos -= 1;
+    }
+    let Some(last) = object.properties.last() else {
+        return (None, insert_pos); // empty object: no comma needed
+    };
+    let value_end = value_range(&last.value).end;
+    // Already terminated? Scan the gap between the last value and the
+    // insert point for a comma that isn't inside a comment.
+    let gap = &source[value_end..insert_pos];
+    if gap_has_comma(gap) {
+        return (None, insert_pos);
+    }
+    (Some(value_end), insert_pos)
+}
+
+/// True when `gap` contains a real `,` — one outside any `//` or `/* */`
+/// comment. Mirrors find_separator_comma's comment-awareness, which the
+/// removal path always had and the insertion path lacked.
+fn gap_has_comma(gap: &str) -> bool {
+    let b = gap.as_bytes();
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b',' => return true,
+            b'/' if i + 1 < b.len() && b[i + 1] == b'/' => {
+                while i < b.len() && b[i] != b'\n' {
+                    i += 1;
+                }
+            }
+            b'/' if i + 1 < b.len() && b[i + 1] == b'*' => {
+                i += 2;
+                while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                    i += 1;
+                }
+                i += 2;
+                continue;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 fn build_insertion_splice(
     source: &str,
     object: &Object<'_>,
@@ -392,19 +459,15 @@ fn build_insertion_splice(
     let close_pos = object.range.end - 1; // position of the `}` byte
     debug_assert_eq!(&source[close_pos..close_pos + 1], "}");
 
-    // Back up over the whitespace run before `}` so we insert after the last
-    // real token rather than after a blank line.
-    let before_close = &source[..close_pos];
-    let bytes = before_close.as_bytes();
-    let mut cursor = before_close.len();
-    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
-        cursor -= 1;
-    }
-    let needs_leading_comma = cursor > 0 && bytes[cursor - 1] != b'{' && bytes[cursor - 1] != b',';
-
+    let (comma_pos, cursor) = append_positions(source, object, close_pos);
+    // The span starts at the comma position when one is needed, so the
+    // comma lands right after the last VALUE and any trailing comment
+    // is carried through verbatim after it.
+    let start = comma_pos.unwrap_or(cursor);
     let mut text = String::new();
-    if needs_leading_comma {
+    if let Some(cp) = comma_pos {
         text.push(',');
+        text.push_str(&source[cp..cursor]);
     }
     for (i, (key, value)) in entries.iter().enumerate() {
         if i > 0 {
@@ -418,7 +481,7 @@ fn build_insertion_splice(
     text.push_str(&outer_indent_of(source, object));
 
     Ok(Splice {
-        start: cursor,
+        start,
         end: close_pos,
         text,
     })
@@ -461,6 +524,46 @@ fn apply_splices(source: &str, mut splices: Vec<Splice>) -> String {
 /// alive for the duration of the edit.
 struct ParsedAst<'a> {
     value: Value<'a>,
+}
+
+/// Would a STRICT JSON parser accept this text once comments are
+/// removed? Our own parser is lenient about missing commas — exactly
+/// the damage a bad splice causes — so it cannot answer this, and
+/// without it the app reported success on a file OpenCode could not
+/// load (review finding C6, 2026-08-31). Comment ranges come from the
+/// parser itself, so strings containing `//` are handled correctly.
+pub fn strictly_valid(source: &str) -> Result<(), String> {
+    let result = parse_to_ast(
+        source,
+        &CollectOptions {
+            comments: jsonc_parser::CommentCollectionStrategy::Separate,
+            tokens: false,
+        },
+        &ParseOptions::default(),
+    )
+    .map_err(|e| e.to_string())?;
+    // Blank out every comment, preserving byte offsets and newlines so
+    // any error message still points at the right line.
+    let mut bytes = source.as_bytes().to_vec();
+    if let Some(map) = result.comments {
+        for comments in map.values() {
+            for c in comments.iter() {
+                let r = match c {
+                    jsonc_parser::ast::Comment::Line(l) => l.range,
+                    jsonc_parser::ast::Comment::Block(b) => b.range,
+                };
+                for b in &mut bytes[r.start..r.end.min(source.len())] {
+                    if *b != b'\n' {
+                        *b = b' ';
+                    }
+                }
+            }
+        }
+    }
+    let stripped = String::from_utf8_lossy(&bytes);
+    serde_json::from_str::<serde_json::Value>(&stripped)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn parse_source(source: &str) -> Result<ParsedAst<'_>, EditError> {
@@ -604,19 +707,19 @@ fn splice_into_object(source: &str, object: &Object<'_>, entry_text: &str) -> St
 
     // Find the last non-whitespace char before the `}` to see if we need a
     // preceding comma.
-    let before_close = &source[..close_pos];
-    let mut cursor = before_close.len();
-    let bytes = before_close.as_bytes();
-    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
-        cursor -= 1;
-    }
-    let needs_leading_comma = cursor > 0 && bytes[cursor - 1] != b'{' && bytes[cursor - 1] != b',';
+    // Same comment-safe anchoring as build_insertion_splice: the comma
+    // goes after the last VALUE, never at the end of a trailing comment
+    // line (review finding C6, 2026-08-31).
+    let (comma_pos, cursor) = append_positions(source, object, close_pos);
 
     let mut out = String::with_capacity(source.len() + entry_text.len() + indent.len() + 4);
-    // Everything up to (but not including) the whitespace run before `}`.
-    out.push_str(&source[..cursor]);
-    if needs_leading_comma {
-        out.push(',');
+    match comma_pos {
+        Some(cp) => {
+            out.push_str(&source[..cp]);
+            out.push(',');
+            out.push_str(&source[cp..cursor]);
+        }
+        None => out.push_str(&source[..cursor]),
     }
     out.push('\n');
     out.push_str(&indent);
@@ -646,6 +749,86 @@ fn splice_into_object(source: &str, object: &Object<'_>, entry_text: &str) -> St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Strip `//` line comments the way a strict JSON consumer must,
+    /// then parse. This is the contract every write has to meet:
+    /// OpenCode reads this file with a real JSON parser, and our own
+    /// reader is LENIENT about missing commas — so only a strict parse
+    /// can tell us we corrupted it. (Review 2026-08-31, finding C6.)
+    fn strict_parse(src: &str) -> Result<serde_json::Value, String> {
+        let stripped: String = src
+            .lines()
+            .map(|l| match l.find("//") {
+                // Naive but sufficient for these fixtures: no `//`
+                // appears inside a string value in them.
+                Some(i) => &l[..i],
+                None => l,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        serde_json::from_str(&stripped).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn inserting_after_a_trailing_comment_keeps_the_file_strictly_valid() {
+        // The app CREATES this shape itself: comment_out_ghosts leaves a
+        // commented block as the last content of the models object, and
+        // the next sync inserts after it. The separating comma used to
+        // land INSIDE the comment, where a strict parser never sees it —
+        // and our lenient reader reported success while OpenCode could
+        // not load the file.
+        let src = r#"{
+  "provider": {
+    "llamacpp": {
+      "models": {
+        "keeper": { "name": "Keeper" }
+        // Commented out by modelsteward: not in the current router preset.
+        // "ghost": { "name": "Ghost" }
+      }
+    }
+  }
+}"#;
+        let out = add_model(
+            src,
+            "llamacpp",
+            "newmodel",
+            &serde_json::json!({ "name": "New" }),
+        )
+        .unwrap();
+        let parsed = strict_parse(&out).unwrap_or_else(|e| panic!("STRICT PARSE FAILED: {e}\n{out}"));
+        let models = &parsed["provider"]["llamacpp"]["models"];
+        assert!(models.get("keeper").is_some(), "{out}");
+        assert!(models.get("newmodel").is_some(), "{out}");
+        // The comment itself must survive — that is the whole point of
+        // the JSONC editor.
+        assert!(out.contains("Commented out by modelsteward"), "{out}");
+        assert!(out.contains("// \"ghost\""), "{out}");
+    }
+
+    #[test]
+    fn inserting_after_an_inline_comment_keeps_the_file_strictly_valid() {
+        // Same bug, a user's own shape: a trailing note after the last
+        // entry on the same line.
+        let src = r#"{
+  "provider": {
+    "llamacpp": {
+      "models": {
+        "keeper": { "name": "Keeper" } // my daily driver
+      }
+    }
+  }
+}"#;
+        let out = add_model(
+            src,
+            "llamacpp",
+            "newmodel",
+            &serde_json::json!({ "name": "New" }),
+        )
+        .unwrap();
+        let parsed = strict_parse(&out).unwrap_or_else(|e| panic!("STRICT PARSE FAILED: {e}\n{out}"));
+        assert!(parsed["provider"]["llamacpp"]["models"]["newmodel"].is_object(), "{out}");
+        assert!(out.contains("my daily driver"), "comment must survive: {out}");
+    }
 
     const REAL: &str = include_str!("../../tests/fixtures/opencode_real.json");
     const COMMENTED: &str = include_str!("../../tests/fixtures/opencode_commented.jsonc");

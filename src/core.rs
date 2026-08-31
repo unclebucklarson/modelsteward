@@ -22,6 +22,7 @@ pub mod hermes;
 pub mod opencode;
 pub mod piagent;
 pub mod reasoning;
+pub mod safefs;
 pub mod router;
 pub mod rows;
 pub mod settings;

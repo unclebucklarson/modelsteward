@@ -59,13 +59,16 @@ pub fn rapl_readable() -> bool {
     !rapl_packages().is_empty()
 }
 
-fn rapl_read_uj(pkgs: &[Rapl]) -> Vec<u64> {
+fn rapl_read_uj(pkgs: &[Rapl]) -> Vec<Option<u64>> {
     pkgs.iter()
         .map(|p| {
+            // A failed read is UNKNOWN, not zero. Zero was fed to
+            // counter_delta as a "before", whose wraparound branch then
+            // returned max_range - before — up to 262 kJ of phantom
+            // energy in the measured-cost line (review finding C9).
             std::fs::read_to_string(&p.energy_path)
                 .ok()
-                .and_then(|s| s.trim().parse().ok())
-                .unwrap_or(0)
+                .and_then(|s| s.trim().parse::<u64>().ok())
         })
         .collect()
 }
@@ -151,12 +154,21 @@ pub fn measure_window<T>(f: impl FnOnce() -> T) -> EnergySampleOf<T> {
     stop.store(true, Ordering::Relaxed);
     let gpu_j = sampler.join().ok().flatten();
     let cpu_after = rapl_read_uj(&pkgs);
-    let cpu_j = (!pkgs.is_empty()).then(|| {
+    // Every package must have BOTH a before and an after reading, or
+    // the CPU figure is unknown — reporting a partial sum (or worse, a
+    // phantom wraparound from a zeroed "before") would inject invented
+    // joules into the measured-cost line the product is sold on.
+    let cpu_j: Option<f64> = if pkgs.is_empty() {
+        None
+    } else {
         pkgs.iter()
             .zip(cpu_before.iter().zip(cpu_after.iter()))
-            .map(|(p, (b, a))| counter_delta(*b, *a, p.max_range_uj) as f64 / 1e6)
-            .sum()
-    });
+            .map(|(p, (b, a))| match (b, a) {
+                (Some(b), Some(a)) => Some(counter_delta(*b, *a, p.max_range_uj) as f64 / 1e6),
+                _ => None,
+            })
+            .sum::<Option<f64>>()
+    };
     EnergySampleOf {
         value,
         sample: EnergySample { secs, gpu_j, cpu_j },
@@ -190,6 +202,29 @@ impl EnergySample {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_energy_read_is_unknown_not_a_phantom_wraparound() {
+        // Review finding C9 (2026-08-31): a failed RAPL read became 0,
+        // which counter_delta then read as a counter wrap and returned
+        // max_range - 0 — on this machine 262 kJ of invented energy for
+        // one trial window, flowing straight into the measured $/token
+        // line with no plausibility clamp.
+        let max = 262_143_328_850u64;
+        // The old behavior, shown for what it was:
+        assert_eq!(counter_delta(0, 0, max), 0);
+        assert_eq!(
+            counter_delta(500, 0, max),
+            max - 500,
+            "a zeroed 'after' really does look like a full wrap"
+        );
+        // The contract now: any missing reading makes the whole CPU
+        // figure None. Summing Options is what enforces it.
+        let partial: Option<f64> = [Some(1.0), None, Some(2.0)].into_iter().sum();
+        assert_eq!(partial, None, "one missing package poisons the sum, by design");
+        let complete: Option<f64> = [Some(1.0), Some(2.0)].into_iter().sum();
+        assert_eq!(complete, Some(3.0));
+    }
 
     #[test]
     fn counter_delta_handles_wraparound() {

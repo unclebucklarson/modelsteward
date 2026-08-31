@@ -3,7 +3,7 @@
 //! records what the user changed.
 
 use crate::core::router::ModelOverrides;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -157,7 +157,13 @@ impl AppConfig {
     /// (usability review C8, 2026-08-29).
     pub fn load_checked(path: &Path) -> (Self, Option<String>) {
         match std::fs::read_to_string(path) {
-            Err(_) => (Self::default(), None),
+            // ONLY a missing file is silent. A permission change, an
+            // EIO, an NFS hiccup used to take this arm and report
+            // "nothing wrong" while every setting — including kept
+            // trial winners in `overrides` — was replaced by defaults
+            // (review finding C7, 2026-08-31).
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Self::default(), None),
+            Err(e) => (Self::default(), Some(format!("unreadable: {e}"))),
             Ok(text) => match serde_json::from_str(&text) {
                 Ok(cfg) => (cfg, None),
                 Err(e) => (Self::default(), Some(e.to_string())),
@@ -169,26 +175,46 @@ impl AppConfig {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        // Never clobber an unparseable original — it may hold settings
-        // the defaults just replaced; rescue it beside the new file.
-        if let Ok(existing) = std::fs::read_to_string(path)
-            && serde_json::from_str::<Self>(&existing).is_err()
+        // Never clobber a damaged original — it may hold settings the
+        // defaults just replaced. Covers BOTH unparseable and
+        // unreadable (the latter used to skip the rescue entirely and
+        // let the write clobber: finding C7).
+        let damaged = match std::fs::read_to_string(path) {
+            Ok(existing) => serde_json::from_str::<Self>(&existing).is_err(),
+            Err(e) => e.kind() != std::io::ErrorKind::NotFound,
+        };
+        if damaged
+            && let Some(rescued) = crate::core::safefs::rescue(path)
         {
-            let rescue = path.with_extension("json.corrupt");
-            let _ = std::fs::write(&rescue, existing);
             eprintln!(
                 "preserved unreadable config as {} before saving",
-                rescue.display()
+                rescued.display()
             );
         }
-        std::fs::write(path, serde_json::to_string_pretty(self)?)
-            .with_context(|| format!("writing {}", path.display()))
+        crate::core::safefs::write_atomic(path, &serde_json::to_string_pretty(self)?)
     }
 }
 
 #[cfg(test)]
 mod tests_load {
     use super::*;
+
+    #[test]
+    fn an_unreadable_config_is_loud_and_never_silently_clobbered() {
+        // Review finding C7 (2026-08-31): the C8 fix guarded a PARSE
+        // failure. A READ failure took the silent-defaults arm and
+        // reported "nothing wrong", then save() skipped the rescue and
+        // clobbered — taking kept trial winners in `overrides` with it.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        // A directory where a file is expected: read fails with EISDIR,
+        // which is emphatically not "missing".
+        std::fs::create_dir(&path).unwrap();
+        let (cfg, err) = AppConfig::load_checked(&path);
+        assert_eq!(cfg.port, AppConfig::default().port);
+        let why = err.expect("an unreadable config must be REPORTED");
+        assert!(why.contains("unreadable"), "{why}");
+    }
 
     #[test]
     fn corrupt_configs_are_loud_and_never_silently_clobbered() {

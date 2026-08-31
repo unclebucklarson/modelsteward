@@ -349,8 +349,14 @@ fn stable_args<'a>(args: &[&'a str]) -> Vec<&'a str> {
 /// FNV-1a 64-bit, hex. Stable across runs and Rust versions (unlike
 /// DefaultHasher), which is what a persisted fingerprint requires.
 pub fn fnv(s: &str) -> String {
+    fnv_bytes(s.as_bytes())
+}
+
+/// FNV over raw bytes — for callers slicing at a fixed offset, where a
+/// `&str` slice would panic on a multibyte boundary.
+pub fn fnv_bytes(bytes: &[u8]) -> String {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in s.as_bytes() {
+    for b in bytes {
         h ^= u64::from(*b);
         h = h.wrapping_mul(0x0000_0100_0000_01b3);
     }
@@ -407,7 +413,13 @@ fn fetch_models(port: u16) -> Result<Vec<RouterModel>> {
 /// wrote at spawn is live, OR some process (e.g. a systemd user unit) is
 /// running llama-server with our preset file.
 pub fn status(dir: &Path, cfg: &RouterConfig) -> RouterState {
-    let ours = read_marker(dir).is_some_and(|m| marker_is_live(&m))
+    // Ownership includes the PORT. Marker.port was written at spawn and
+    // never read, so pointing the app at a port where the user runs
+    // their OWN llama-server made us claim it, drive it, and record its
+    // numbers as measurements — the "never touch a server we didn't
+    // start" rule leaking through a dimension nobody checked (review
+    // finding C8, 2026-08-31).
+    let ours = read_marker(dir).is_some_and(|m| marker_is_live(&m) && m.port == cfg.port)
         || find_preset_process(&cfg.preset_path).is_some();
     match fetch_models(cfg.port) {
         Ok(models) if ours => RouterState::Ours { models },
@@ -596,11 +608,38 @@ fn measurements_path(dir: &Path) -> PathBuf {
     dir.join("measurements.json")
 }
 
+/// Read the measurement store. A DAMAGED file is rescued aside and
+/// reported loudly rather than read as empty: the old
+/// `.ok().unwrap_or_default()` turned a half-written file into an empty
+/// map, and the next write persisted that emptiness over every model's
+/// context, speed and quality numbers (review finding C1, 2026-08-31).
 pub fn read_measurements(dir: &Path) -> Measurements {
-    std::fs::read_to_string(measurements_path(dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let (m, _) = read_measurements_checked(dir);
+    m
+}
+
+/// As [`read_measurements`], but returns the damage reason so a caller
+/// can surface it. The rescue happens here so the damaged file cannot
+/// be overwritten by the next save.
+pub fn read_measurements_checked(dir: &Path) -> (Measurements, Option<String>) {
+    let path = measurements_path(dir);
+    match crate::core::safefs::read_json::<Measurements>(&path) {
+        crate::core::safefs::Loaded::Ok(m) => (m, None),
+        crate::core::safefs::Loaded::Missing => (Measurements::default(), None),
+        crate::core::safefs::Loaded::Damaged(why) => {
+            let saved = crate::core::safefs::rescue(&path);
+            let note = format!(
+                "{} is damaged ({why}) — starting from empty{}. Nothing was \
+                 silently discarded; re-measure to rebuild.",
+                path.display(),
+                saved
+                    .map(|p| format!("; the damaged file is preserved as {}", p.display()))
+                    .unwrap_or_default()
+            );
+            eprintln!("WARNING: {note}");
+            (Measurements::default(), Some(note))
+        }
+    }
 }
 
 /// Carry a model's measurement to its new alias when a file changes
@@ -647,8 +686,9 @@ pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) 
 
 pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(measurements_path(dir), serde_json::to_string_pretty(m)?)
-        .with_context(|| format!("writing {}", measurements_path(dir).display()))
+    // Atomic: this file is rewritten after EVERY model during
+    // calibration, so a Ctrl-C used to be able to truncate it.
+    crate::core::safefs::write_atomic(&measurements_path(dir), &serde_json::to_string_pretty(m)?)
 }
 
 /// Settled context for one model, measured without any long-blocking
@@ -991,6 +1031,27 @@ pub fn embedding_ids_in_preset(preset: &Path) -> std::collections::HashSet<Strin
     ids_with_key_in_preset(preset, |line| line == "embedding=true")
 }
 
+/// Every model section in the preset — i.e. what the router is
+/// currently able to serve. This is the honest "still in the fleet"
+/// signal for connector removals: a model that merely failed to load
+/// today is still here, while one whose file is gone (or that the user
+/// disabled) has left the preset entirely (review finding C4).
+pub fn ids_in_preset(preset: &Path) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let Ok(text) = std::fs::read_to_string(preset) else {
+        return out;
+    };
+    for line in text.lines() {
+        let t = line.trim();
+        if let Some(name) = t.strip_prefix('[').and_then(|r| r.strip_suffix(']'))
+            && name != "*"
+        {
+            out.insert(name.to_string());
+        }
+    }
+    out
+}
+
 fn ids_with_key_in_preset(
     preset: &Path,
     matches: impl Fn(&str) -> bool,
@@ -1065,6 +1126,40 @@ mod tests_flags {
 mod tests {
     use super::*;
     use crate::core::library::Source;
+
+    #[test]
+    fn a_truncated_measurements_file_is_rescued_not_read_as_empty() {
+        // Review finding C1 (2026-08-31): --calibrate rewrites this file
+        // after EVERY model, so a Ctrl-C could truncate it. The old read
+        // turned that into an empty map, and the next write persisted
+        // the emptiness over every model's context, speed and quality.
+        let dir = tempfile::tempdir().unwrap();
+        let good: Measurements = [(
+            "qwen".to_string(),
+            Measurement { n_ctx: Some(113920), ..Default::default() },
+        )]
+        .into_iter()
+        .collect();
+        write_measurements(dir.path(), &good).unwrap();
+        assert_eq!(read_measurements(dir.path()).len(), 1);
+
+        // Truncate it the way an interrupted write would.
+        let path = measurements_path(dir.path());
+        let whole = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, &whole[..whole.len() / 2]).unwrap();
+
+        let (m, damage) = read_measurements_checked(dir.path());
+        assert!(m.is_empty(), "a damaged file yields no measurements");
+        let why = damage.expect("damage must be REPORTED, not swallowed");
+        assert!(why.contains("damaged"), "{why}");
+        // The damaged bytes must survive beside the file, so the next
+        // write cannot destroy the user's only copy.
+        let rescued = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .find(|e| e.file_name().to_string_lossy().ends_with(".corrupt"));
+        assert!(rescued.is_some(), "damaged file must be preserved");
+    }
 
     #[test]
     fn router_state_display_is_plain_language() {

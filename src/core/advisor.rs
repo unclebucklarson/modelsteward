@@ -94,7 +94,7 @@ pub fn read_upstream_status(dir: &Path) -> Option<UpstreamStatus> {
 pub fn write_upstream_status(dir: &Path, s: &UpstreamStatus) {
     let _ = std::fs::create_dir_all(dir);
     if let Ok(json) = serde_json::to_string_pretty(s) {
-        let _ = std::fs::write(upstream_path(dir), json);
+        let _ = crate::core::safefs::write_atomic(&upstream_path(dir), &json);
     }
 }
 

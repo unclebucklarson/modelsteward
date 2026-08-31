@@ -217,6 +217,18 @@ fn backup_path(path: &Path, n: u32) -> std::path::PathBuf {
 /// Numbered backups, newest = .1, capped at [`BACKUP_DEPTH`]. A sync
 /// followed by a comment-out no longer eats the only recovery point.
 fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
+    // Never write a file a strict JSON parser would reject. Our own
+    // reader is lenient about missing commas, so without this check a
+    // bad splice reports success while OpenCode cannot load the result
+    // (review finding C6, 2026-08-31). It fails BEFORE the backup
+    // rotation, so the user's recovery points stay intact.
+    if let Err(e) = jsonc::strictly_valid(updated) {
+        anyhow::bail!(
+            "refusing to write {}: the edit would produce invalid JSON ({e}). \
+             Nothing was changed.",
+            path.display()
+        );
+    }
     if updated == original {
         return Ok(());
     }
@@ -242,10 +254,16 @@ pub fn restore_last_backup(path: &Path) -> Result<String> {
     if current == backup {
         return Ok("config and newest backup are identical — nothing to restore".into());
     }
-    let tmp = path.with_extension("json.lcc.tmp");
-    std::fs::write(&tmp, &backup).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::write(&bak, &current).context("stashing current into backup slot")?;
-    std::fs::rename(&tmp, path).context("moving restored config into place")?;
+    // Order matters: put the GOOD content in place first, and only
+    // then reuse the backup slot. The old order overwrote the backup
+    // before the restore landed, so a crash (or a failed rename on a
+    // read-only dir / full disk) between the two left the good config
+    // in neither place — on the one path a user reaches when something
+    // has already gone wrong (review finding C3, 2026-08-31).
+    crate::core::safefs::write_atomic(path, &backup)
+        .context("moving restored config into place")?;
+    crate::core::safefs::write_atomic(&bak, &current)
+        .context("stashing previous config into the backup slot")?;
     Ok(format!(
         "restored {} from {} (run again to toggle back)",
         path.display(),
@@ -321,24 +339,38 @@ pub fn comment_out_ghosts(
     offered: &[String],
     measurements: &crate::core::router::Measurements,
 ) -> Result<Vec<String>> {
+    // ONE read, ONE write, however many ghosts. Doing a full
+    // read/rotate/write per ghost meant six ghosts performed six backup
+    // rotations and pushed the user's pre-sync config off the end of the
+    // 5-deep ring — every recovery slot holding an intermediate state of
+    // the same click (review finding H4, 2026-08-31).
+    let original = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut updated = original.clone();
     let mut out = Vec::new();
     for id in orphans {
         if offered.iter().any(|o| o == id) || measurements.contains_key(id) {
             continue;
         }
-        comment_out_in_file(path, id)?;
+        updated = jsonc::comment_out_model(&updated, PROVIDER_ID, id, GHOST_NOTE)
+            .with_context(|| format!("commenting out {id}"))?;
         out.push(id.clone());
+    }
+    if !out.is_empty() {
+        write_backed_up(path, &original, &updated)?;
     }
     Ok(out)
 }
+
+/// The note left in place of a commented-out entry.
+const GHOST_NOTE: &str = "Commented out by modelsteward: not in the current router \npreset / never measured. Uncomment to restore, or delete these \nlines to discard permanently.";
 
 /// Comment one orphan out in place (never deletes; the entry stays visible
 /// in the file under an explanatory note). Backed up like every write.
 pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
-    let note = "Commented out by modelsteward: not in the current router \npreset / never measured. Uncomment to restore, or delete these \nlines to discard permanently.";
-    let updated = jsonc::comment_out_model(&original, PROVIDER_ID, model_id, note)
+    let updated = jsonc::comment_out_model(&original, PROVIDER_ID, model_id, GHOST_NOTE)
         .with_context(|| format!("commenting out {model_id}"))?;
     write_backed_up(path, &original, &updated)
 }
@@ -346,6 +378,64 @@ pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commenting_many_ghosts_costs_exactly_one_backup_slot() {
+        // Review finding H4 (2026-08-31): one read/rotate/write PER
+        // ghost meant a sync with six ghosts rotated the backup ring six
+        // times, pushing the user's pre-sync config off the end — every
+        // recovery point holding an intermediate state of one click.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let mut models = String::new();
+        for i in 0..6 {
+            models.push_str(&format!("        \"ghost{i}\": {{ \"name\": \"G{i}\" }},\n"));
+        }
+        let original = format!(
+            "{{\n  \"provider\": {{\n    \"llamacpp\": {{\n      \"models\": {{\n{models}        \"keeper\": {{ \"name\": \"K\" }}\n      }}\n    }}\n  }}\n}}"
+        );
+        std::fs::write(&path, &original).unwrap();
+        let orphans: Vec<String> = (0..6).map(|i| format!("ghost{i}")).collect();
+        let done = comment_out_ghosts(&path, &orphans, &[], &Default::default()).unwrap();
+        assert_eq!(done.len(), 6, "all six commented");
+        // The pre-click file must still be recoverable from slot 1.
+        assert_eq!(
+            std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
+            original,
+            "the user's pre-sync config must be the newest backup"
+        );
+        assert!(
+            !backup_path(&path, 2).exists(),
+            "one user action must consume exactly one backup slot"
+        );
+        // And the result is still strictly valid JSON.
+        let after = std::fs::read_to_string(&path).unwrap();
+        jsonc::strictly_valid(&after).unwrap_or_else(|e| panic!("{e}\n{after}"));
+    }
+
+    #[test]
+    fn restore_puts_the_good_config_in_place_before_reusing_the_backup_slot() {
+        // Review finding C3 (2026-08-31): the old order stashed `current`
+        // into the backup slot BEFORE the restore landed, so an
+        // interruption between the two lost the good config from both
+        // places — on the undo path specifically.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let good = "{\n  \"good\": true\n}";
+        let bad = "{\n  \"bad\": true\n}";
+        std::fs::write(&path, good).unwrap();
+        write_backed_up(&path, good, bad).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 1)).unwrap(), good);
+
+        restore_last_backup(&path).unwrap();
+        // At NO point may both the file and slot 1 hold `bad`.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), good);
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 1)).unwrap(), bad);
+        // Toggling back still works.
+        restore_last_backup(&path).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), bad);
+    }
 
     const SAMPLE: &str = r#"{
   "$schema": "https://opencode.ai/config.json",
@@ -581,24 +671,54 @@ mod tests {
     fn backups_are_numbered_and_restore_toggles() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.json");
-        std::fs::write(&path, "v0").unwrap();
-        for v in ["v1", "v2", "v3"] {
+        // Fixtures must be real JSON: write_backed_up now refuses to
+        // write anything a strict parser would reject (finding C6).
+        let doc = |n: u32| format!("{{\"v\": {n}}}");
+        std::fs::write(&path, doc(0)).unwrap();
+        for v in 1..=3 {
             let cur = std::fs::read_to_string(&path).unwrap();
-            write_backed_up(&path, &cur, v).unwrap();
+            write_backed_up(&path, &cur, &doc(v)).unwrap();
         }
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), doc(3));
         assert_eq!(
             std::fs::read_to_string(backup_path(&path, 1)).unwrap(),
-            "v2",
+            doc(2),
             "newest backup is .1"
         );
-        assert_eq!(std::fs::read_to_string(backup_path(&path, 3)).unwrap(), "v0");
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 3)).unwrap(), doc(0));
 
         // Restore = swap with .1; twice = back where we started.
         restore_last_backup(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v2");
-        assert_eq!(std::fs::read_to_string(backup_path(&path, 1)).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), doc(2));
+        assert_eq!(std::fs::read_to_string(backup_path(&path, 1)).unwrap(), doc(3));
         restore_last_backup(&path).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "v3");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), doc(3));
+    }
+
+    #[test]
+    fn a_write_that_would_corrupt_the_file_is_refused_before_any_backup_moves() {
+        // Finding C6's second half: the guard must fire BEFORE backup
+        // rotation, so a bad edit cannot also cost the user a recovery
+        // point. Missing comma = exactly the damage a bad splice makes.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let good = "{\n  \"a\": 1\n}";
+        std::fs::write(&path, good).unwrap();
+        let bad = "{\n  \"a\": 1 // note\n  \"b\": 2\n}";
+        let e = write_backed_up(&path, good, bad).unwrap_err().to_string();
+        assert!(e.contains("invalid JSON"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            good,
+            "the original file must be untouched"
+        );
+        assert!(
+            !backup_path(&path, 1).exists(),
+            "no backup should have been rotated for a refused write"
+        );
+        // And a file whose comments merely LOOK like trouble is fine.
+        let ok = "{\n  // a note with // inside\n  \"a\": \"http://x\"\n}";
+        write_backed_up(&path, good, ok).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), ok);
     }
 }

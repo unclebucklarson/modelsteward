@@ -29,7 +29,6 @@
 use crate::core::opencode::{DesiredModel, safety_context};
 use crate::core::settings;
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Hermes refuses to start a model under this many tokens
@@ -116,27 +115,44 @@ pub fn sync_context_cache(
     desired: &[DesiredModel],
 ) -> Result<Vec<String>> {
     let (usable, _) = partition_by_minimum(desired);
-    let mut cache: BTreeMap<String, u64> = match std::fs::read_to_string(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+    // Read the WHOLE document and edit it in place. The old code
+    // extracted only the (String -> u64) entries it understood and then
+    // wrote THAT back as the entire file — so a float value, a quoted
+    // number, a null, or any unrelated top-level key was deleted on the
+    // next sync, and a YAML the parser rejected became an empty map that
+    // wiped every cached context Hermes had (review findings C5/C10,
+    // 2026-08-31).
+    let mut doc: serde_yaml::Value = match std::fs::read_to_string(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_yaml::Value::Mapping(Default::default())
+        }
         Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
-        Ok(text) => serde_yaml::from_str::<serde_yaml::Value>(&text)
-            .ok()
-            .and_then(|d| {
-                let m = d.get("context_lengths")?.as_mapping()?.clone();
-                Some(
-                    m.into_iter()
-                        .filter_map(|(k, v)| Some((k.as_str()?.to_string(), v.as_u64()?)))
-                        .collect(),
-                )
-            })
-            .unwrap_or_default(),
+        Ok(text) if text.trim().is_empty() => serde_yaml::Value::Mapping(Default::default()),
+        Ok(text) => serde_yaml::from_str(&text).with_context(|| {
+            format!(
+                "{} is not valid YAML — refusing to rewrite it, because doing so \
+                 would discard every context it holds. Fix or remove the file, \
+                 then sync again",
+                path.display()
+            )
+        })?,
     };
+    let map = doc
+        .as_mapping_mut()
+        .ok_or_else(|| anyhow::anyhow!("{}: root is not a YAML mapping", path.display()))?;
+    let key_ctx = serde_yaml::Value::String("context_lengths".into());
+    let entry = map
+        .entry(key_ctx)
+        .or_insert_with(|| serde_yaml::Value::Mapping(Default::default()));
+    let ctxs = entry.as_mapping_mut().ok_or_else(|| {
+        anyhow::anyhow!("{}: context_lengths is not a mapping", path.display())
+    })?;
     let mut written = Vec::new();
     for d in &usable {
-        let key = cache_key(&d.id, base_url);
+        let key = serde_yaml::Value::String(cache_key(&d.id, base_url));
         let ctx = safety_context(d.context);
-        if cache.get(&key) != Some(&ctx) {
-            cache.insert(key.clone(), ctx);
+        if ctxs.get(&key).and_then(|v| v.as_u64()) != Some(ctx) {
+            ctxs.insert(key, serde_yaml::Value::Number(ctx.into()));
             written.push(d.id.clone());
         }
     }
@@ -147,15 +163,7 @@ pub fn sync_context_cache(
         std::fs::copy(path, path.with_extension("yaml.modelsteward.bak"))
             .with_context(|| format!("backing up {}", path.display()))?;
     }
-    let doc = serde_yaml::to_string(&serde_yaml::Value::Mapping(
-        [(
-            serde_yaml::Value::String("context_lengths".into()),
-            serde_yaml::to_value(&cache)?,
-        )]
-        .into_iter()
-        .collect(),
-    ))?;
-    std::fs::write(path, doc).with_context(|| format!("writing {}", path.display()))?;
+    crate::core::safefs::write_atomic(path, &serde_yaml::to_string(&doc)?)?;
     Ok(written)
 }
 
@@ -192,8 +200,30 @@ pub fn provider_block(base_url: &str, default_model: &str) -> String {
 ///
 /// Two shapes are handled: an existing `custom_providers:` sequence
 /// (we insert as its last item) and no such key (we append the block).
-pub fn register_provider_text(config_text: &str, base_url: &str, default_model: &str) -> String {
+pub fn register_provider_text(
+    config_text: &str,
+    base_url: &str,
+    default_model: &str,
+) -> Option<String> {
     let entry = provider_block(base_url, default_model);
+    // Present but not as a block-style key we can extend? Refuse. The
+    // old code appended a SECOND `custom_providers:` key, which makes
+    // the API-key-bearing config unparseable ("duplicate entry") —
+    // reproduced 2026-08-31, review finding C3.
+    let has_key = serde_yaml::from_str::<serde_yaml::Value>(config_text)
+        .ok()
+        .is_some_and(|d| d.get("custom_providers").is_some());
+    let block_style = config_text
+        .lines()
+        .any(|l| l.trim_end() == "custom_providers:");
+    if has_key && !block_style {
+        return None;
+    }
+    // A flow-style `custom_providers: [{...}]` is legal YAML that this
+    // line-based editor cannot extend. Appending a second
+    // `custom_providers:` key would make the API-key-bearing config
+    // unparseable, so refuse instead (review finding C3, 2026-08-31).
+    // The caller turns None into an honest error.
     let Some(idx) = config_text
         .lines()
         .position(|l| l.trim_end() == "custom_providers:")
@@ -204,7 +234,7 @@ pub fn register_provider_text(config_text: &str, base_url: &str, default_model: 
         }
         out.push_str("custom_providers:\n");
         out.push_str(&entry);
-        return out;
+        return Some(out);
     };
     // Find the end of that block: the first later line that is neither
     // blank nor indented (i.e. the next top-level key or a comment at
@@ -230,7 +260,7 @@ pub fn register_provider_text(config_text: &str, base_url: &str, default_model: 
     if config_text.ends_with('\n') {
         text.push('\n');
     }
-    text
+    Some(text)
 }
 
 /// Register with a backup. Refuses when an entry already points at
@@ -242,10 +272,17 @@ pub fn register_provider(home: &Path, base_url: &str, default_model: &str) -> Re
     if let Some(name) = registered_provider(&text, base_url) {
         anyhow::bail!("Hermes already has a provider for this router: {name:?}");
     }
+    let new = register_provider_text(&text, base_url, default_model).ok_or_else(|| {
+        anyhow::anyhow!(
+            "{} declares custom_providers in a form this editor can't extend \
+             safely (flow style?) — add the provider by hand, or reformat that \
+             key as a block list first. Nothing was changed.",
+            path.display()
+        )
+    })?;
     std::fs::copy(&path, path.with_extension("yaml.modelsteward.bak"))
         .with_context(|| format!("backing up {}", path.display()))?;
-    let new = register_provider_text(&text, base_url, default_model);
-    std::fs::write(&path, new).with_context(|| format!("writing {}", path.display()))?;
+    crate::core::safefs::write_atomic(&path, &new)?;
     Ok(())
 }
 
@@ -274,6 +311,70 @@ pub fn cached_for(path: &Path, base_url: &str) -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_damaged_cache_is_refused_not_silently_emptied() {
+        // Review finding C5 (2026-08-31): a parse failure became an
+        // empty map, and the empty map was written back as the WHOLE
+        // file — wiping every context Hermes had cached for Ollama and
+        // cloud providers, while reporting success.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        let broken = "context_lengths:\n  good@http://a: 131072\n\tbad_indent: 1\n";
+        std::fs::write(&path, broken).unwrap();
+        let e = sync_context_cache(&path, "http://127.0.0.1:8080/v1", &[d("mine", 131_072)])
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("refusing to rewrite"), "{e}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "the user's file must be untouched"
+        );
+    }
+
+    #[test]
+    fn entries_we_do_not_model_survive_a_sync() {
+        // Review finding C10: values that aren't plain unsigned ints,
+        // and unrelated top-level keys, were filtered out on read and
+        // therefore deleted on write. Executed by the reviewer against
+        // the real code; pinned here.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        std::fs::write(
+            &path,
+            concat!(
+                "context_lengths:\n",
+                "  good@http://a: 131072\n",
+                "  floaty@http://a: 1.5\n",
+                "  quoted@http://a: '4096'\n",
+                "  nulled@http://a: null\n",
+                "other_top_level_key:\n",
+                "  keep: me\n",
+            ),
+        )
+        .unwrap();
+        sync_context_cache(&path, "http://127.0.0.1:8080/v1", &[d("mine", 131_072)]).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        for must in ["good@http://a", "floaty", "quoted", "nulled", "other_top_level_key", "keep"] {
+            assert!(after.contains(must), "{must} was destroyed:\n{after}");
+        }
+        assert!(after.contains("mine@http://127.0.0.1:8080/v1"), "{after}");
+    }
+
+    #[test]
+    fn flow_style_custom_providers_is_refused_not_duplicated() {
+        // Review finding C3 (2026-08-31), executed: appending a second
+        // `custom_providers:` key makes the API-key-bearing config
+        // unparseable. Refusing is the only safe answer.
+        let flow = "model:\n  default: x\ncustom_providers: [{name: mine, base_url: \"http://127.0.0.1:11434/v1\"}]\n";
+        assert!(
+            register_provider_text(flow, "http://127.0.0.1:8080/v1", "q").is_none(),
+            "must refuse rather than duplicate the key"
+        );
+        // And the block-style path still works.
+        assert!(register_provider_text(REAL_CONFIG, "http://127.0.0.1:8080/v1", "q").is_some());
+    }
 
     fn d(id: &str, ctx: u64) -> DesiredModel {
         DesiredModel {
@@ -382,7 +483,7 @@ mod tests {
             "existing ollama provider is detected by base_url"
         );
         assert_eq!(registered_provider(REAL_CONFIG, "http://127.0.0.1:8080/v1"), None);
-        let new = register_provider_text(REAL_CONFIG, "http://127.0.0.1:8080/v1", "qwen3.8");
+        let new = register_provider_text(REAL_CONFIG, "http://127.0.0.1:8080/v1", "qwen3.8").unwrap();
         // The comment block survives verbatim — the whole reason this
         // is a text edit and not a serde round-trip.
         assert!(new.contains("# ── Security ──"), "{new}");
@@ -405,7 +506,7 @@ mod tests {
     #[test]
     fn registration_without_an_existing_block_creates_one() {
         let text = "model:\n  default: x\n";
-        let new = register_provider_text(text, "http://127.0.0.1:8080/v1", "qwen3.8");
+        let new = register_provider_text(text, "http://127.0.0.1:8080/v1", "qwen3.8").unwrap();
         assert_eq!(
             registered_provider(&new, "http://127.0.0.1:8080/v1"),
             Some(PROVIDER_NAME.into())

@@ -389,7 +389,8 @@ pub fn write_preset(
     // The preset's [*] names this dir for slot snapshots — llama-server
     // won't create it, and a save into a missing dir is a 500.
     std::fs::create_dir_all(router::slot_save_dir())?;
-    std::fs::write(preset_path(), &ini)?;
+    // Atomic: a truncated router.ini means the router won't start.
+    crate::core::safefs::write_atomic(&preset_path(), &ini)?;
     Ok((preset_path(), entries.len()))
 }
 

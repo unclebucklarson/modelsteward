@@ -124,7 +124,7 @@ fn prune(dir: &Path) -> Result<()> {
         .filter_map(|e| serde_json::to_string(e).ok())
         .map(|l| l + "\n")
         .collect();
-    std::fs::write(path(dir), text)?;
+    crate::core::safefs::write_atomic(&path(dir), &text)?;
     Ok(())
 }
 

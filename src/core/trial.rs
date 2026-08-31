@@ -351,7 +351,19 @@ pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
     if pid.is_some_and(marker_owner_alive) {
         return None;
     }
-    let _ = system::write_preset(cfg, &[]);
+    // Only claim a restoration that actually happened, and only drop
+    // the breadcrumb when it did. Swallowing the error told the user the
+    // preset was restored while the router kept serving the trial's
+    // temporary config indefinitely — with the marker that would have
+    // healed it on a later start already deleted (review finding H6).
+    if let Err(e) = system::write_preset(cfg, &[]) {
+        return Some(format!(
+            "a trial ({model}) was interrupted and the router may still be serving \
+             its temporary config, but restoring the real preset FAILED: {e:#}. \
+             The marker is kept so this is retried at next start; regenerate the \
+             preset by hand if it persists."
+        ));
+    }
     let _ = router::reload(cfg.port);
     clear_trial_marker(&dir);
     Some(format!(
@@ -422,17 +434,32 @@ fn trials_path(dir: &Path) -> std::path::PathBuf {
     dir.join("trials.json")
 }
 
+/// Read the trial store. Same contract as the measurement store: a
+/// damaged file is rescued and reported, never read as empty — this one
+/// is rewritten after every variant round, so a 20-minute campaign used
+/// to offer dozens of chances to truncate it (review finding C2).
 pub fn read_trials(dir: &Path) -> Trials {
-    std::fs::read_to_string(trials_path(dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
+    let path = trials_path(dir);
+    match crate::core::safefs::read_json::<Trials>(&path) {
+        crate::core::safefs::Loaded::Ok(t) => t,
+        crate::core::safefs::Loaded::Missing => Trials::default(),
+        crate::core::safefs::Loaded::Damaged(why) => {
+            let saved = crate::core::safefs::rescue(&path);
+            eprintln!(
+                "WARNING: {} is damaged ({why}) — starting from empty{}",
+                path.display(),
+                saved
+                    .map(|p| format!("; preserved as {}", p.display()))
+                    .unwrap_or_default()
+            );
+            Trials::default()
+        }
+    }
 }
 
 pub fn write_trials(dir: &Path, t: &Trials) -> Result<()> {
     std::fs::create_dir_all(dir)?;
-    std::fs::write(trials_path(dir), serde_json::to_string_pretty(t)?)
-        .with_context(|| format!("writing {}", trials_path(dir).display()))
+    crate::core::safefs::write_atomic(&trials_path(dir), &serde_json::to_string_pretty(t)?)
 }
 
 /// The measured verdict over one model's trial table. Pure, so the rules

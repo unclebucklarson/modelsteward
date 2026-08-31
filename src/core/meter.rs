@@ -104,7 +104,15 @@ fn cursor_path(dir: &Path) -> PathBuf {
 /// is stable). The legacy first-line fingerprint lives on only to
 /// recognize cursors written before v2.
 pub fn log_fingerprint(log: &str) -> String {
-    crate::core::router::fnv(&log[..log.len().min(4096)])
+    // Slice BYTES, not the &str. A fixed byte offset into a &str panics
+    // when a multibyte character straddles it — and the first 4 KB of
+    // router.log echoes model filenames and $HOME, so one accented
+    // directory name was enough. The panic killed the status poller
+    // thread silently: the GUI kept running while router status, VRAM,
+    // the meter and the activity indicator all froze forever, and it
+    // re-panicked on every launch because the log's first 4 KB never
+    // changes (review finding H3, 2026-08-31). fnv hashes bytes anyway.
+    crate::core::router::fnv_bytes(&log.as_bytes()[..log.len().min(4096)])
 }
 
 fn legacy_fingerprint(log: &str) -> String {
@@ -217,7 +225,12 @@ pub fn harvest_stats(
         || cursor.fingerprint_v2.as_deref() != advanced.fingerprint_v2.as_deref()
         || cursor.credited != advanced.credited;
     if changed {
-        std::fs::write(cursor_path(dir), serde_json::to_string_pretty(&advanced)?)?;
+        // Atomic: a torn cursor write used to yield a default cursor on
+        // the next read, which re-credited the ENTIRE log (finding M5).
+        crate::core::safefs::write_atomic(
+            &cursor_path(dir),
+            &serde_json::to_string_pretty(&advanced)?,
+        )?;
     }
     Ok(credited)
 }
@@ -440,6 +453,29 @@ fn fmt_hour(epoch: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fingerprinting_a_log_with_multibyte_text_does_not_panic() {
+        // Review finding H3 (2026-08-31): log_fingerprint sliced a &str
+        // at byte 4096. The first 4 KB of router.log echoes model
+        // filenames and $HOME, so one accented directory name panicked
+        // the status poller — silently, since the GUI kept running while
+        // every live indicator froze, and it re-panicked every launch
+        // because a log's first 4 KB never changes.
+        let mut log = "x".repeat(4095);
+        log.push('—'); // 3 bytes, straddling byte 4096
+        log.push_str(&"y".repeat(200));
+        let fp = log_fingerprint(&log);
+        assert_eq!(fp.len(), 16, "{fp}");
+        // Deterministic, and sensitive to the bytes in range.
+        assert_eq!(fp, log_fingerprint(&log));
+        let mut other = "z".repeat(4095);
+        other.push('—');
+        assert_ne!(fp, log_fingerprint(&other));
+        // Short logs and empty logs stay safe too.
+        assert_eq!(log_fingerprint("").len(), 16);
+        assert_eq!(log_fingerprint("héllo").len(), 16);
+    }
 
     fn tal(turns: u64, prompt: u64, generated: u64, reused: u64) -> Tally {
         Tally {

@@ -159,6 +159,12 @@ struct App {
     /// Mirrors self.busy for the poller thread (auto-build must never
     /// compile beside a measurement/trial/bench).
     busy_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set by the poller's auto-build for its whole duration. Flows the
+    /// OTHER way from busy_flag: it stops the GUI from starting a
+    /// measurement while a full-core cmake is running, which would
+    /// record tokens/sec from a saturated machine as a baseline
+    /// (review finding H5, 2026-08-31).
+    build_flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
     meter_report: String,
     meter_report_range: Option<&'static str>,
     library_filter: String,
@@ -375,6 +381,7 @@ impl App {
             confirm_disrupt: None,
             show_persistence_prompt: false,
             busy_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            build_flag: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             meter_report: String::new(),
             meter_report_range: None,
             library_filter: String::new(),
@@ -534,6 +541,7 @@ impl App {
     fn spawn_status_poller(&self, ctx: egui::Context) {
         let tx = self.tx.clone();
         let app_busy = self.busy_flag.clone();
+        let build_busy_flag = self.build_flag.clone();
         std::thread::spawn(move || {
             let meas_path = router::state_dir().join("measurements.json");
             let trials_path = router::state_dir().join("trials.json");
@@ -544,6 +552,7 @@ impl App {
             let log_path = router::state_dir().join("router.log");
             let mut last_log_len: u64 = 0;
             let mut last_activity_len: u64 = 0;
+            let mut drift_warned = false;
             let mut quiet_ticks: u32 = 0;
             let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
             let cfg_path = system::config_file();
@@ -645,7 +654,16 @@ impl App {
                         // (the log was parsed twice per tick — review
                         // catch), and the ledger + summary only rewrite
                         // when something was actually credited.
-                        let stats = evidence::cache_effectiveness(&text);
+                        let (stats, coverage) =
+                            evidence::cache_effectiveness_with_coverage(&text);
+                        // Say so ONCE when the log stops parsing, rather
+                        // than reporting zero usage as fact (finding H11).
+                        if let Some(note) = coverage.note()
+                            && !drift_warned
+                        {
+                            drift_warned = true;
+                            let _ = tx.send(Msg::Error(format!("meter: {note}")));
+                        }
                         let now = advisor::now_epoch();
                         let credited = meter::harvest_stats(
                             &router::state_dir(),
@@ -739,6 +757,7 @@ impl App {
                             matches!(m.status.as_str(), "loading" | "downloading" | "downloaded")
                         };
                         let idle = !app_busy.load(std::sync::atomic::Ordering::Relaxed)
+                            && !build_busy_flag.load(std::sync::atomic::Ordering::Relaxed)
                             && !trial::trial_marker_present(&router::state_dir())
                             && quiet_secs >= 600
                             && match &state {
@@ -760,7 +779,24 @@ impl App {
                             let serving = server.clone();
                             pending_autobuild = None;
                             let tx2 = tx.clone();
+                            // Hold the app-busy flag for the build's
+                            // duration. The gate only checked it before
+                            // STARTING, so a build begun at 03:00 did
+                            // not stop a bench at 03:05 — and llama-bench
+                            // then measured tokens/sec on a machine
+                            // saturated by cmake and stored it as a
+                            // baseline (review finding H5, 2026-08-31).
+                            let build_busy = build_busy_flag.clone();
+                            build_busy.store(true, std::sync::atomic::Ordering::Relaxed);
                             std::thread::spawn(move || {
+                                // Cleared on every exit path below.
+                                struct ClearOnDrop(std::sync::Arc<std::sync::atomic::AtomicBool>);
+                                impl Drop for ClearOnDrop {
+                                    fn drop(&mut self) {
+                                        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+                                    }
+                                }
+                                let _clear = ClearOnDrop(build_busy);
                                 let tx3 = tx2.clone();
                                 let mut progress = move |line: String| {
                                     let _ = tx3
@@ -808,6 +844,30 @@ impl App {
         });
     }
 
+    /// Reserve the busy slot and hand back a FRESH cancel token, or
+    /// `None` when something else is already running.
+    ///
+    /// The token used to be replaced before this check, so a click that
+    /// bounced off "busy with…" still swapped it — and the ✖ Cancel
+    /// button then flipped a token nobody held, leaving the campaign
+    /// running for hours while the UI said "cancelling…" (review
+    /// finding H2, 2026-08-31).
+    fn begin(&mut self, _label: &str) -> Option<cancel::CancelToken> {
+        if self.busy.is_some() {
+            return None;
+        }
+        if self.build_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            self.log(
+                "a managed llama.cpp build is running — measurements taken beside a \
+                 full-core compile are not honest; try again when it finishes"
+                    .to_string(),
+            );
+            return None;
+        }
+        self.cancel_token = cancel::CancelToken::default();
+        Some(self.cancel_token.clone())
+    }
+
     fn spawn(&mut self, label: &str, job: impl FnOnce(&Sender<Msg>) + Send + 'static) {
         if let Some(b) = &self.busy {
             let b = b.clone();
@@ -829,9 +889,12 @@ impl App {
         } else {
             "benching new/stale models (speed)"
         };
-        let cancel_token = {
-            self.cancel_token = cancel::CancelToken::default();
-            self.cancel_token.clone()
+        let Some(cancel_token) = self.begin(label) else {
+            self.log(format!(
+                "busy with {}; try again when it finishes",
+                self.busy.clone().unwrap_or_default()
+            ));
+            return;
         };
         self.spawn(label, move |tx| {
             let tx2 = tx.clone();
@@ -871,6 +934,7 @@ impl App {
                             models.len()
                         )));
                     }
+                    let _ = tx.send(Msg::Finished(format!("preset regenerated ({n} models)")));
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("preset: {e:#}")));
@@ -983,8 +1047,13 @@ impl App {
 
     fn dispatch_now(&mut self, action: AfterStart, start_first: bool) {
         let cfg = self.cfg.clone();
-        self.cancel_token = cancel::CancelToken::default();
-        let cancel_token = self.cancel_token.clone();
+        let Some(cancel_token) = self.begin("campaign") else {
+            self.log(format!(
+                "busy with {}; try again when it finishes",
+                self.busy.clone().unwrap_or_default()
+            ));
+            return;
+        };
         let label = if start_first {
             format!("starting router, then: {}", action.describe())
         } else {
@@ -1592,7 +1661,11 @@ impl App {
                         report.models.len()
                     ));
                     self.scan = Some(report);
-                    self.busy = None;
+                    // Does NOT clear busy: spawn_scan is a bare thread
+                    // that never claimed it. Clearing it here opened the
+                    // gate mid-campaign, letting a second worker drive
+                    // the same router and both rewrite measurements.json
+                    // (review finding H1, 2026-08-31).
                     rebuild = true;
                 }
                 Msg::RouterState(s) => {
@@ -1668,8 +1741,12 @@ impl App {
                     self.upstream = Some(s);
                 }
                 Msg::PresetWritten(path, n) => {
+                    // Informational ONLY. It used to clear busy, which
+                    // released the gate in the MIDDLE of apply-settings
+                    // (which keeps working for many seconds afterward)
+                    // — review finding H1. Terminal messages are
+                    // Finished / Error / SyncDone.
                     self.log(format!("preset written: {} models -> {}", n, path.display()));
-                    self.busy = None;
                 }
                 Msg::SyncDone(r) => {
                     if r.skipped_missing {
@@ -5793,14 +5870,27 @@ fn run_sync(
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let mut lines = Vec::new();
     let pi_path = piagent::default_models_path();
-    match piagent::sync_file(&pi_path, &base_url, &desired) {
+    // "Still in the fleet" = present in the preset. A model that failed
+    // to load today is still there; one whose file is gone, or that the
+    // user disabled, is not (review finding C4).
+    let known = router::ids_in_preset(&system::preset_path());
+    match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
         Ok(r) if r.skipped_missing => {}
         Ok(r) => lines.push(format!(
-            "pi agent synced ({}): {} added, {} updated, {} removed{}",
+            "pi agent synced ({}): {} added, {} updated, {} removed{}{}",
             pi_path.display(),
             r.added.len(),
             r.updated.len(),
             r.removed.len(),
+            if r.kept_unmeasured.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    ", {} kept (not measurable right now — never deleted over a \
+                     transient failure)",
+                    r.kept_unmeasured.len()
+                )
+            },
             if r.created_file { " — models.json created" } else { "" },
         )),
         Err(e) => lines.push(format!("pi agent sync FAILED: {e:#}")),

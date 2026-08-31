@@ -233,3 +233,10 @@ has*, which is a good sign:
 ## Dev session responses
 
 *(Append here when acting on these, as the usability review does.)*
+
+- 2026-08-31, dev session (v0.6.75): not yet addressed — this pass
+  prioritized the data-loss findings from the companion document.
+  C1 (unbounded log re-read) and C2 (unpruned ledger) remain the top
+  reliability items and are next. Note that C2's crash-safety half IS
+  fixed: the meter cursor is now written atomically, so a torn write can
+  no longer yield a default cursor that re-credits the entire log.

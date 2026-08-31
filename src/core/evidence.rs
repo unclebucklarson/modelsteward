@@ -185,7 +185,49 @@ pub fn topology_advice(
 
 /// Mine the whole log. Later instances of a port override earlier ones for
 /// the port->model mapping (ports get reused across restarts within one log).
+/// How much of the log we could actually read.
+///
+/// The meter could not tell "you used nothing" from "I can no longer
+/// parse your log", and printed the first as a confident statement
+/// either way — while CLAUDE.md's own warning says a zero reading with
+/// tokens flowing means suspect a new dialect. This is that invariant,
+/// made cheap: every finished turn announces itself with a `stop
+/// processing:` line, so compare those against what we credited
+/// (review finding H11, 2026-08-31).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Coverage {
+    /// Turns the log says completed.
+    pub finished: usize,
+    /// Turns we successfully attributed and credited.
+    pub credited: usize,
+}
+
+impl Coverage {
+    /// Materially more finished turns than credited ones: our parser is
+    /// probably behind the log's dialect. Small gaps are normal —
+    /// llama.cpp omits the prompt-eval line for a fully cached prompt.
+    pub fn drifting(&self) -> bool {
+        self.finished >= 10 && self.credited * 4 < self.finished * 3
+    }
+
+    pub fn note(&self) -> Option<String> {
+        self.drifting().then(|| {
+            format!(
+                "only {} of {} finished turns in router.log could be read — the \
+                 log format has probably changed (llama.cpp dialects drift). \
+                 Token counts below are UNDER-reported; please report this.",
+                self.credited, self.finished
+            )
+        })
+    }
+}
+
 pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
+    cache_effectiveness_with_coverage(log).0
+}
+
+/// As [`cache_effectiveness`], plus how much of the log was readable.
+pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Coverage) {
     #[derive(Default)]
     struct Task {
         model: Option<String>,
@@ -193,6 +235,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
         generated: Option<u64>,
         release: Option<u64>,
     }
+    let mut coverage = Coverage::default();
     let mut port_model: BTreeMap<u32, String> = BTreeMap::new();
     // Ports get REUSED within one router lifetime, and a new child
     // restarts task ids at 0 — so tasks are keyed by (port, spawn
@@ -248,6 +291,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
             let n = field_u64(body, "n_gen");
             t.generated = t.generated.max(n);
         } else if body.contains("stop processing: n_tokens =") {
+            coverage.finished += 1;
             t.release = field_u64(body, "n_tokens");
         }
     }
@@ -262,6 +306,7 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
         let (Some(prompt), Some(generated), Some(release)) = (t.prompt, t.generated, t.release) else {
             continue;
         };
+        coverage.credited += 1;
         let total_prompt = release.saturating_sub(generated);
         if total_prompt == 0 {
             continue;
@@ -307,12 +352,77 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
                 });
         }
     }
-    per_model.into_values().filter(|s| s.turns > 0 || s.reuse_disabled).collect()
+    (
+        per_model
+            .into_values()
+            .filter(|s| s.turns > 0 || s.reuse_disabled)
+            .collect(),
+        coverage,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coverage_distinguishes_no_usage_from_an_unreadable_log() {
+        // Review finding H11 (2026-08-31): an empty result had two
+        // causes — no traffic, or a log dialect we no longer parse — and
+        // the meter printed "no usage recorded in this range" for both.
+        // A silently under-reported number is the worst outcome for a
+        // product whose thesis is "measured, not guessed".
+        let (_, empty) = cache_effectiveness_with_coverage("");
+        assert_eq!(empty, Coverage::default());
+        assert!(!empty.drifting(), "no log is not drift");
+
+        // A log full of finished turns we cannot parse at all: the
+        // shape a future llama.cpp dialect change produces.
+        let mut unreadable = String::new();
+        for i in 0..40 {
+            unreadable.push_str(&format!(
+                "[40001] 0.10 I slot release: id 0 | task {i} | stop processing: n_tokens = 100, truncated = 0\n"
+            ));
+        }
+        let (stats, cov) = cache_effectiveness_with_coverage(&unreadable);
+        assert!(stats.is_empty(), "nothing creditable");
+        assert_eq!(cov.finished, 40, "but the log SAYS 40 turns finished");
+        assert_eq!(cov.credited, 0);
+        assert!(cov.drifting(), "that gap must be reported, not printed as zero usage");
+        let note = cov.note().expect("a drifting coverage must produce a note");
+        assert!(note.contains("0 of 40"), "{note}");
+        assert!(note.contains("UNDER-reported"), "{note}");
+
+        // A healthy log must not cry wolf. llama.cpp omits the
+        // prompt-eval line for a FULLY CACHED prompt, so a real log
+        // always credits slightly fewer turns than it finishes — on the
+        // live 820 KB log, 399 of 400. That gap must stay quiet.
+        let mut healthy_log = String::from(
+            "1.0 I srv load: spawning server instance with name=coder on port 40001\n",
+        );
+        for i in 0..40 {
+            if i != 7 {
+                healthy_log.push_str(&format!(
+                    "[40001] 0.05 I slot print_timing: id 0 | task {i} | prompt processing, n_tokens = 1000, progress = 1.00\n"
+                ));
+            }
+            healthy_log.push_str(&format!(
+                "[40001] 0.09 I slot print_timing: id 0 | task {i} | n_gen = 100, tg = 40.00 t/s\n"
+            ));
+            healthy_log.push_str(&format!(
+                "[40001] 0.10 I slot release: id 0 | task {i} | stop processing: n_tokens = 1100, truncated = 0\n"
+            ));
+        }
+        let (stats, healthy) = cache_effectiveness_with_coverage(&healthy_log);
+        assert_eq!(healthy.finished, 40);
+        assert_eq!(healthy.credited, 39, "one fully-cached turn has no prompt line");
+        assert!(
+            !healthy.drifting(),
+            "a normal 39/40 must NOT trip the detector: {healthy:?}"
+        );
+        assert!(healthy.note().is_none());
+        assert_eq!(stats.len(), 1);
+    }
 
     #[test]
     fn mines_reuse_from_real_grammar() {
