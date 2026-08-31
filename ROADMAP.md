@@ -565,9 +565,22 @@ Older items:
   vision flags from the preset, user's ollama provider byte-identical.
   Wired into every sync path (GUI action, Set Up Everything, Apply
   Settings, CLI --sync) + a Connections mirror with ✔/⟳/? verdicts.
-  NEXT (hermes-agent): needs the same requirements — repo/docs, a
-  sanitized sample config, how it selects models, reload behavior.
-  Original ask below.
+  **✔ hermes-agent connector SHIPPED 2026-08-30 too** — the local
+  install bundles its own source (~/.hermes/hermes-agent), so schema
+  came from agent/model_metadata.py + hermes_cli/runtime_provider.py,
+  nothing guessed. TWO FINDINGS SHAPED IT: (a) Hermes reads llama.cpp
+  meta.n_ctx from /v1/models, which is null for UNLOADED models — same
+  128k-guess gap as pi; (b) MINIMUM_CONTEXT_LENGTH = 64_000 — Hermes
+  REFUSES a model under 64k at init, so sub-minimum models are skipped
+  and NAMED rather than offered broken (3 of the fleet here). Scope
+  (Scott's call): we own context_length_cache.yaml (machine-written by
+  Hermes itself, no comments — safe round-trip), and touch the
+  hand-maintained config.yaml only via an explicit 'Register this
+  router with Hermes' button that APPENDS one custom_providers entry
+  by surgical text edit, backed up, comments preserved. Live-validated:
+  15 contexts written, user's ollama entries untouched. Also: the tofu
+  guard scoped to non-test code (test fixtures are verbatim copies of
+  real files). Original ask below.
   **Connections p2 gets its driver: pi-agent + hermes-agent config
   sync (external request via Scott, 2026-08-30 — the project's first
   outside feature ask).** Design settled with Scott: a `Connector`

@@ -18,6 +18,7 @@ pub mod meter;
 pub mod ollama;
 pub mod quality;
 pub mod report;
+pub mod hermes;
 pub mod opencode;
 pub mod piagent;
 pub mod router;

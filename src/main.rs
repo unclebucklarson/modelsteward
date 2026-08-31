@@ -43,8 +43,8 @@
 //! Ports default to the configured value (~/.config/modelsteward/config.json).
 
 use modelsteward::core::{
-    advisor, bench, cancel, diagnose, discover, opencode, piagent, router, settings, system,
-    trial,
+    advisor, bench, cancel, diagnose, discover, hermes, opencode, piagent, router, settings,
+    system, trial,
 };
 use std::path::PathBuf;
 
@@ -563,6 +563,30 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
             if r.created_file { " — models.json created" } else { "" },
         ),
         Err(e) => eprintln!("pi agent sync FAILED: {e:#}"),
+    }
+    // Hermes: measured contexts into its context cache. Registering the
+    // provider itself is an explicit GUI action (it edits a live,
+    // hand-maintained config) — the CLI reports when it's missing.
+    let home = hermes::default_home();
+    match hermes::sync(&home, &base_url, &desired) {
+        Ok(r) if r.skipped_missing => {}
+        Ok(r) => {
+            println!("Hermes synced: {} context(s) written", r.written.len());
+            if !r.below_minimum.is_empty() {
+                println!(
+                    "  ! {} model(s) skipped — under Hermes's 64,000-token minimum: {}",
+                    r.below_minimum.len(),
+                    r.below_minimum.join(", ")
+                );
+            }
+            if r.provider_unregistered {
+                println!(
+                    "  ? no Hermes custom provider points at this router yet — \
+                     register one in the GUI (Connections tab) or Hermes's own /model"
+                );
+            }
+        }
+        Err(e) => eprintln!("Hermes sync FAILED: {e:#}"),
     }
     Ok(())
 }

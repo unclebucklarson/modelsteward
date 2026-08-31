@@ -13,7 +13,7 @@
 
 use crate::core::{
     advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, meter,
-    ollama, opencode, piagent, router, rows, settings, system, trial,
+    hermes, ollama, opencode, piagent, router, rows, settings, system, trial,
 };
 use eframe::egui;
 use std::path::PathBuf;
@@ -1084,9 +1084,9 @@ impl App {
         let measurements = self.measurements.clone();
         self.spawn("syncing opencode.json", move |tx| {
             match run_sync(&cfg, &measurements) {
-                Ok((report, pi_line)) => {
+                Ok((report, lines)) => {
                     let _ = tx.send(Msg::SyncDone(report));
-                    if let Some(l) = pi_line {
+                    for l in lines {
                         let _ = tx.send(Msg::Progress(l));
                     }
                     send_configured(tx);
@@ -3333,6 +3333,124 @@ impl App {
         ui.add_space(8.0);
         ui.separator();
         self.pi_section(ui);
+        ui.add_space(8.0);
+        ui.separator();
+        self.hermes_section(ui);
+    }
+
+    /// Hermes agent (Connections p2, half two). Narrower than the other
+    /// connectors by design: we own the machine-written context cache,
+    /// and touch the hand-maintained config.yaml only on an explicit
+    /// click (user decision 2026-08-30).
+    fn hermes_section(&mut self, ui: &mut egui::Ui) {
+        let home = hermes::default_home();
+        ui.strong("Hermes agent (synced connector)");
+        if !hermes::hermes_present(&home) {
+            ui.small(format!(
+                "Not installed — nothing to sync (looked for {}).",
+                home.display()
+            ));
+            return;
+        }
+        let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
+        let cfg_text = std::fs::read_to_string(hermes::config_path(&home)).unwrap_or_default();
+        let registered = hermes::registered_provider(&cfg_text, &base_url);
+        ui.label(format!("Config: {}", hermes::config_path(&home).display()));
+        ui.small(
+            "Hermes reads llama.cpp's /v1/models for context, and our router reports \
+             none for an UNLOADED model — so Hermes would assume 128,000 tokens. We \
+             write each model's measured window into its context cache instead. \
+             Hermes refuses any model under 64,000 tokens, so smaller ones are \
+             skipped rather than offered and broken.",
+        );
+        ui.add_space(4.0);
+        match &registered {
+            Some(name) => {
+                ui.colored_label(
+                    egui::Color32::from_rgb(0, 170, 0),
+                    format!("✔ registered in Hermes as provider \"{name}\" (use: /model)"),
+                );
+            }
+            None => {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "No Hermes provider points at this router yet — the measured \
+                     contexts below have nothing to attach to until one exists.",
+                );
+                let default_model = self
+                    .measurements
+                    .iter()
+                    .filter(|(_, m)| {
+                        m.n_ctx
+                            .map(opencode::safety_context)
+                            .is_some_and(|c| c >= hermes::MINIMUM_CONTEXT)
+                    })
+                    .map(|(id, _)| id.clone())
+                    .next();
+                let can = self.busy.is_none() && default_model.is_some();
+                if ui
+                    .add_enabled(can, egui::Button::new("Register this router with Hermes"))
+                    .on_disabled_hover_text(
+                        "needs at least one measured model of 64,000+ tokens — \
+                         measure one on the Library tab first",
+                    )
+                    .on_hover_text(
+                        "Appends one custom_providers entry to Hermes's config.yaml. \
+                         The file is backed up first and every comment, quote, and \
+                         ordering elsewhere is left exactly as it is. Restart Hermes \
+                         to pick it up.",
+                    )
+                    .clicked()
+                    && let Some(model) = default_model
+                {
+                    match hermes::register_provider(&home, &base_url, &model) {
+                        Ok(()) => self.log(format!(
+                            "registered with Hermes as '{}' (default model {model}) — \
+                             restart Hermes, then /model to pick one",
+                            hermes::PROVIDER_NAME
+                        )),
+                        Err(e) => self.log(format!("ERROR registering with Hermes: {e:#}")),
+                    }
+                }
+            }
+        }
+        ui.add_space(4.0);
+        let cached = hermes::cached_for(&hermes::context_cache_path(&home), &base_url);
+        if cached.is_empty() {
+            ui.small("No measured contexts written yet — press Sync all measured above.");
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("hermes-models")
+                .max_height(140.0)
+                .show(ui, |ui| {
+                    egui::Grid::new("hermes-grid").striped(true).show(ui, |ui| {
+                        ui.strong("Model");
+                        ui.strong("Context written");
+                        ui.end_row();
+                        for (id, ctx) in &cached {
+                            ui.label(id);
+                            ui.label(ctx.to_string());
+                            ui.end_row();
+                        }
+                    });
+                });
+        }
+        // Name what Hermes will refuse, so a missing model is never a
+        // mystery (its own failure mode is a startup error).
+        let small: Vec<String> = self
+            .measurements
+            .iter()
+            .filter_map(|(id, m)| {
+                let c = opencode::safety_context(m.n_ctx?);
+                (c < hermes::MINIMUM_CONTEXT).then(|| format!("{id} ({c})"))
+            })
+            .collect();
+        if !small.is_empty() {
+            ui.small(format!(
+                "Below Hermes's 64,000-token minimum, so not offered there: {}",
+                small.join(", ")
+            ));
+        }
     }
 
     /// pi coding agent (Connections p2, first external request —
@@ -3877,9 +3995,9 @@ impl App {
                 return;
             }
             match run_sync(&cfg, &measurements) {
-                Ok((report, pi_line)) => {
+                Ok((report, lines)) => {
                     let _ = tx.send(Msg::SyncDone(report));
-                    if let Some(l) = pi_line {
+                    for l in lines {
                         let _ = tx.send(Msg::Progress(l));
                     }
                     send_configured(tx);
@@ -5429,14 +5547,13 @@ fn run_calibration(
     )
 }
 
-/// Sync every connected agent: opencode.json (the original) and, when
-/// pi is installed, its models.json (Connections p2, 2026-08-30). The
-/// second return is a human line about the pi side, None when pi
-/// isn't installed.
+/// Sync every connected agent: opencode.json (the original) plus each
+/// detected peer agent (Connections p2, 2026-08-30). The second return
+/// is one human line per agent that was actually present.
 fn run_sync(
     cfg: &settings::AppConfig,
     measurements: &router::Measurements,
-) -> anyhow::Result<(opencode::SyncReport, Option<String>)> {
+) -> anyhow::Result<(opencode::SyncReport, Vec<String>)> {
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let vision = router::vision_ids_in_preset(&system::preset_path());
     let desired: Vec<_> = measurements
@@ -5475,14 +5592,12 @@ fn run_sync(
     // pi coding agent (Connections p2): measured contexts into
     // ~/.pi/agent/models.json — pi's native router integration assumes
     // 128k when the router doesn't say (measured 2026-08-30).
+    let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
+    let mut lines = Vec::new();
     let pi_path = piagent::default_models_path();
-    let pi_line = match piagent::sync_file(
-        &pi_path,
-        &format!("http://127.0.0.1:{}/v1", cfg.port),
-        &desired,
-    ) {
-        Ok(r) if r.skipped_missing => None,
-        Ok(r) => Some(format!(
+    match piagent::sync_file(&pi_path, &base_url, &desired) {
+        Ok(r) if r.skipped_missing => {}
+        Ok(r) => lines.push(format!(
             "pi agent synced ({}): {} added, {} updated, {} removed{}",
             pi_path.display(),
             r.added.len(),
@@ -5490,9 +5605,33 @@ fn run_sync(
             r.removed.len(),
             if r.created_file { " — models.json created" } else { "" },
         )),
-        Err(e) => Some(format!("pi agent sync FAILED: {e:#}")),
-    };
-    Ok((report, pi_line))
+        Err(e) => lines.push(format!("pi agent sync FAILED: {e:#}")),
+    }
+    // Hermes: measured contexts into its context cache. Registration of
+    // the provider itself stays an explicit click (Connections).
+    let home = hermes::default_home();
+    match hermes::sync(&home, &base_url, &desired) {
+        Ok(r) if r.skipped_missing => {}
+        Ok(r) => {
+            let mut l = format!("Hermes synced: {} context(s) written", r.written.len());
+            if !r.below_minimum.is_empty() {
+                l.push_str(&format!(
+                    " — {} skipped below Hermes's 64k minimum ({})",
+                    r.below_minimum.len(),
+                    r.below_minimum.join(", ")
+                ));
+            }
+            if r.provider_unregistered {
+                l.push_str(
+                    " · no Hermes provider points at this router yet — \
+                     register it on the Connections tab",
+                );
+            }
+            lines.push(l);
+        }
+        Err(e) => lines.push(format!("Hermes sync FAILED: {e:#}")),
+    }
+    Ok((report, lines))
 }
 
 /// Sync exactly one measured model into opencode.json.
@@ -5716,9 +5855,9 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
     let _ = tx.send(Msg::Measurements(measurements.clone()));
     step("syncing opencode.json");
     match run_sync(cfg, &measurements) {
-        Ok((report, pi_line)) => {
+        Ok((report, lines)) => {
             let _ = tx.send(Msg::SyncDone(report));
-            if let Some(l) = pi_line {
+            for l in lines {
                 let _ = tx.send(Msg::Progress(l));
             }
             send_configured(tx);
@@ -6081,6 +6220,10 @@ mod tofu_tests {
         let mut tofu = std::collections::BTreeMap::new();
         for f in files {
             let src = std::fs::read_to_string(&f).unwrap();
+            // Test modules are out of scope: their fixtures are verbatim
+            // copies of real-world files (Hermes's own box-drawing
+            // comment banners, for one) and never reach a renderer.
+            let src = src.split("#[cfg(test)]").next().unwrap_or("").to_string();
             for c in string_literal_chars(&src) {
                 if c.is_ascii() {
                     continue;
