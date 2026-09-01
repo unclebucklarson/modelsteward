@@ -216,6 +216,32 @@ mod tests_load {
         assert!(why.contains("unreadable"), "{why}");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn saving_over_an_unreadable_config_rescues_it_first() {
+        // The audit found only load_checked's half asserted; this is the
+        // clobber half of C7: save() must move a damaged original aside
+        // before writing, even when the damage is unreadability.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{\"port\": 9999, \"precious\": true}").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read_to_string(&path).is_ok() {
+            // Running as root / CAP_DAC_OVERRIDE: the scenario can't be
+            // simulated; skip rather than assert a vacuous truth.
+            return;
+        }
+        AppConfig::default().save(&path).unwrap();
+        let rescue = dir.path().join("config.json.corrupt");
+        assert!(rescue.exists(), "the unreadable original must be rescued");
+        std::fs::set_permissions(&rescue, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(
+            std::fs::read_to_string(&rescue).unwrap().contains("precious"),
+            "rescued bytes are the user's original"
+        );
+    }
+
     #[test]
     fn corrupt_configs_are_loud_and_never_silently_clobbered() {
         // Usability review C8 (2026-08-29): a hand-edit's trailing comma

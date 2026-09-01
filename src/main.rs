@@ -445,7 +445,7 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
         eprintln!("router reload failed ({e:#}) — measuring what it currently offers");
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let off = system::disabled_ids(cfg, &system::scan_models(cfg, &[]));
+    let off = system::disabled_ids(cfg, &report.models);
     let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &off, &mut |line| {
         eprintln!("{line}");
     })?;
@@ -557,7 +557,7 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
     // windows into ~/.pi/agent/models.json — pi's native router
     // integration assumes 128k when the router doesn't report n_ctx.
     let pi_path = piagent::default_models_path();
-    let known = router::ids_in_preset(&system::preset_path());
+    let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
     match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
         Ok(r) if r.skipped_missing => {}
         Ok(r) => {

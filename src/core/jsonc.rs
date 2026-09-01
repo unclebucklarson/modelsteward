@@ -560,6 +560,23 @@ pub fn strictly_valid(source: &str) -> Result<(), String> {
             }
         }
     }
+    // Blank legal-JSONC trailing commas too (review finding F1,
+    // 2026-09-01, EXECUTED): our reader allows them, so a user's own
+    // `"a": 1, }` style must not read as corruption. A comma whose next
+    // non-blank byte is `}` or `]` is a trailing comma.
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b'}' || bytes[j] == b']') {
+                bytes[i] = b' ';
+            }
+        }
+        i += 1;
+    }
     let stripped = String::from_utf8_lossy(&bytes);
     serde_json::from_str::<serde_json::Value>(&stripped)
         .map(|_| ())
@@ -749,6 +766,19 @@ fn splice_into_object(source: &str, object: &Object<'_>, entry_text: &str) -> St
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn legal_jsonc_trailing_commas_pass_the_strict_gate() {
+        // Review finding F1 (2026-09-01, EXECUTED): a user's own
+        // trailing-comma style — which our reader accepts — used to make
+        // strictly_valid refuse EVERY future sync, blaming the edit.
+        assert!(strictly_valid("{\n  \"a\": 1,\n}").is_ok());
+        assert!(strictly_valid("{\"xs\": [1, 2,], \"b\": {\"c\": 3, // note\n},}").is_ok());
+        // A comma inside a STRING is content, not syntax.
+        assert!(strictly_valid("{\"s\": \"a,}\"}").is_ok());
+        // A genuinely missing comma still fails — the C6 protection.
+        assert!(strictly_valid("{\n  \"a\": 1 // note\n  \"b\": 2\n}").is_err());
+    }
 
     /// Strip `//` line comments the way a strict JSON consumer must,
     /// then parse. This is the contract every write has to meet:

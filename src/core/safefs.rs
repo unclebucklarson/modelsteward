@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 /// managers like stow/chezmoi symlink these configs; replacing the link
 /// silently diverges the repo copy).
 pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
-    let target = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let target = resolve_write_target(path);
     let dir = target
         .parent()
         .ok_or_else(|| anyhow::anyhow!("{} has no parent directory", target.display()))?;
@@ -54,7 +54,21 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
 
     let write_and_sync = || -> Result<()> {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
+        // The temp is born 0600 and only WIDENED to the destination's
+        // mode after the contents are safely down. Creating it at the
+        // umask default put the full contents of a 0600 secrets file
+        // world-readable in the same directory for the entire
+        // write+fsync (review finding B1, 2026-09-01, EXECUTED:
+        // 3000+ sightings per run by a polling watcher).
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts
+            .open(&tmp)
             .with_context(|| format!("creating {}", tmp.display()))?;
         f.write_all(contents.as_bytes())
             .with_context(|| format!("writing {}", tmp.display()))?;
@@ -69,12 +83,15 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         return Err(e);
     }
 
-    // Carry the destination's mode across, so a 0600 config holding API
-    // keys does not come back world-readable.
+    // Widen (or narrow) to the destination's mode now that the bytes
+    // are down; a brand-new file gets the conventional 0644.
     #[cfg(unix)]
-    if let Ok(meta) = std::fs::metadata(&target) {
+    {
         use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(meta.permissions().mode()));
+        let mode = std::fs::metadata(&target)
+            .map(|m| m.permissions().mode())
+            .unwrap_or(0o644);
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
     }
 
     if let Err(e) = std::fs::rename(&tmp, &target) {
@@ -86,6 +103,32 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         let _ = d.sync_all();
     }
     Ok(())
+}
+
+/// Where a write to `path` must actually land: through symlinks —
+/// including a DANGLING one, which `canonicalize` refuses to resolve.
+/// Renaming over a dangling link replaced the link with a regular file
+/// (review finding B4, 2026-09-01, EXECUTED), silently diverging a
+/// dotfiles repo whose target had been cleaned. Bounded hops so a link
+/// loop cannot spin us.
+fn resolve_write_target(path: &Path) -> std::path::PathBuf {
+    if let Ok(c) = std::fs::canonicalize(path) {
+        return c;
+    }
+    let mut cur = path.to_path_buf();
+    for _ in 0..8 {
+        match std::fs::read_link(&cur) {
+            Ok(next) => {
+                cur = if next.is_absolute() {
+                    next
+                } else {
+                    cur.parent().map(|p| p.join(&next)).unwrap_or(next)
+                };
+            }
+            Err(_) => break,
+        }
+    }
+    cur
 }
 
 /// What a read of a state file found.
@@ -120,16 +163,39 @@ pub fn rescue(path: &Path) -> Option<PathBuf> {
     if !path.exists() {
         return None;
     }
-    let rescue = path.with_extension(format!(
-        "{}.corrupt",
-        path.extension().map(|e| e.to_string_lossy().to_string()).unwrap_or_default()
-    ));
+    let rescue = match path.extension() {
+        Some(e) => path.with_extension(format!("{}.corrupt", e.to_string_lossy())),
+        None => path.with_extension("corrupt"),
+    };
     std::fs::rename(path, &rescue).ok().map(|_| rescue)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn a_dangling_symlink_is_followed_not_replaced() {
+        // Review finding B4 (2026-09-01, EXECUTED): canonicalize refuses
+        // a dangling link, the old fallback renamed OVER the link, and a
+        // dotfiles repo whose target had been cleaned silently diverged.
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("repo/cfg.json"); // does not exist yet
+        std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+        let link = dir.path().join("cfg.json");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        write_atomic(&link, "{\"v\":1}").unwrap();
+        assert!(
+            std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(),
+            "the link must survive"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "{\"v\":1}",
+            "the write must land at the link's target"
+        );
+    }
 
     #[test]
     fn atomic_write_replaces_content_and_leaves_no_temp_files() {

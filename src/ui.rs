@@ -553,6 +553,7 @@ impl App {
             let mut last_log_len: u64 = 0;
             let mut last_activity_len: u64 = 0;
             let mut drift_warned = false;
+            let mut damage_warned = false;
             let mut quiet_ticks: u32 = 0;
             let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
             let cfg_path = system::config_file();
@@ -592,6 +593,14 @@ impl App {
                 let mtime = std::fs::metadata(&meas_path).and_then(|m| m.modified()).ok();
                 if mtime != last_meas_mtime {
                     last_meas_mtime = mtime;
+                    let (_, damage) =
+                        router::read_measurements_checked(&router::state_dir());
+                    if let Some(note) = damage
+                        && !damage_warned
+                    {
+                        damage_warned = true;
+                        let _ = tx.send(Msg::Error(format!("measurements: {note}")));
+                    }
                     let _ = tx.send(Msg::Measurements(router::read_measurements(
                         &router::state_dir(),
                     )));
@@ -852,6 +861,23 @@ impl App {
     /// button then flipped a token nobody held, leaving the campaign
     /// running for hours while the UI said "cancelling…" (review
     /// finding H2, 2026-08-31).
+    /// True (with a log line) when a managed build is running —
+    /// measuring beside a full-core compile records contention as a
+    /// baseline. Checked by every measurement entry point, not only
+    /// begin(): Set Up Everything and the Load/measure flows go through
+    /// bare spawn (review finding F9, 2026-09-01).
+    fn refuse_while_building(&mut self) -> bool {
+        if self.build_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            self.log(
+                "a managed llama.cpp build is running — measurements taken beside a \
+                 full-core compile are not honest; try again when it finishes"
+                    .to_string(),
+            );
+            return true;
+        }
+        false
+    }
+
     fn begin(&mut self, _label: &str) -> Option<cancel::CancelToken> {
         if self.busy.is_some() {
             return None;
@@ -890,10 +916,9 @@ impl App {
             "benching new/stale models (speed)"
         };
         let Some(cancel_token) = self.begin(label) else {
-            self.log(format!(
-                "busy with {}; try again when it finishes",
-                self.busy.clone().unwrap_or_default()
-            ));
+            if let Some(b) = self.busy.clone() {
+                self.log(format!("busy with {b}; try again when it finishes"));
+            }
             return;
         };
         self.spawn(label, move |tx| {
@@ -1048,10 +1073,9 @@ impl App {
     fn dispatch_now(&mut self, action: AfterStart, start_first: bool) {
         let cfg = self.cfg.clone();
         let Some(cancel_token) = self.begin("campaign") else {
-            self.log(format!(
-                "busy with {}; try again when it finishes",
-                self.busy.clone().unwrap_or_default()
-            ));
+            if let Some(b) = self.busy.clone() {
+                self.log(format!("busy with {b}; try again when it finishes"));
+            }
             return;
         };
         let label = if start_first {
@@ -1189,6 +1213,9 @@ impl App {
     /// The one-click flow: preset if missing -> start if down -> wait ->
     /// incremental calibrate -> sync. Each step narrates.
     fn action_setup(&mut self) {
+        if self.refuse_while_building() {
+            return;
+        }
         let cfg = self.cfg.clone();
         self.spawn("setting up everything", move |tx| {
             setup_flow(&cfg, tx);
@@ -1272,6 +1299,9 @@ impl App {
         let cfg = self.cfg.clone();
         match action {
             RowAction::Load(id) => {
+                if self.refuse_while_building() {
+                    return;
+                }
                 // Load = measure = make available to OpenCode, and keep it
                 // warm for immediate use.
                 self.spawn(&format!("loading + measuring {id}"), move |tx| {
@@ -1306,6 +1336,9 @@ impl App {
                         };
                     });
                 } else {
+                    if self.refuse_while_building() {
+                        return;
+                    }
                     // Not measured yet: load briefly, measure, add, unload.
                     self.spawn(&format!("measuring {id} for OpenCode"), move |tx| {
                         measure_and_sync(&cfg, &id, false, true, tx);
@@ -4219,7 +4252,9 @@ impl App {
             }
             match run_sync(&cfg, &measurements) {
                 Ok((report, lines)) => {
-                    let _ = tx.send(Msg::SyncDone(report));
+                    // All real work is done; Finished releases the busy
+                    // gate LAST (F13: SyncDone clears busy too, and
+                    // sending it first opened a tiny crack mid-worker).
                     for l in lines {
                         let _ = tx.send(Msg::Progress(l));
                     }
@@ -4227,6 +4262,7 @@ impl App {
                     let _ = tx.send(Msg::Finished(
                         "settings applied: router restarted, preset regenerated, opencode.json synced".into(),
                     ));
+                    let _ = tx.send(Msg::SyncDone(report));
                 }
                 Err(e) => {
                     let _ = tx.send(Msg::Error(format!("sync: {e:#}")));
@@ -5831,7 +5867,9 @@ fn run_calibration(
         )));
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let off = system::disabled_ids(cfg, &system::scan_models(cfg, &[]));
+    // Reuse the scan from a few lines up — a third full model-tree walk
+    // per setup was pure waste (review finding F11, 2026-09-01).
+    let off = system::disabled_ids(cfg, &report.models);
     let progress_tx = tx.clone();
     router::calibrate(
         &router::state_dir(),
@@ -5895,10 +5933,10 @@ fn run_sync(
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let mut lines = Vec::new();
     let pi_path = piagent::default_models_path();
-    // "Still in the fleet" = present in the preset. A model that failed
-    // to load today is still there; one whose file is gone, or that the
-    // user disabled, is not (review finding C4).
-    let known = router::ids_in_preset(&system::preset_path());
+    // Positive evidence for removals: preset ∪ measurement keys −
+    // disabled (F3: cache models never enter the preset, and an
+    // unreadable preset must not read as "everything left").
+    let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
     match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
         Ok(r) if r.skipped_missing => {}
         Ok(r) => lines.push(format!(

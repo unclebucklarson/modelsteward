@@ -47,10 +47,16 @@ pub fn meter_report_text(
     use crate::core::{advisor, meter, router, trial};
     let dir = router::state_dir();
     let now = advisor::now_epoch();
+    let mut drift_note = None;
     if harvest_first
         && let Ok(text) = std::fs::read_to_string(dir.join("router.log"))
     {
         let _ = meter::harvest(&dir, &text, now);
+        // The GUI poller warns on parser drift; the CLI surface must
+        // too, or `--meter` prints a confident zero when the log
+        // dialect changed (review finding H11's CLI half, 2026-09-01).
+        let (_, coverage) = crate::core::evidence::cache_effectiveness_with_coverage(&text);
+        drift_note = coverage.note();
     }
     let (label, since) = match range {
         Some("today") => ("today (UTC)", Some(now - now % 86_400)),
@@ -74,12 +80,17 @@ pub fn meter_report_text(
         })
         .collect();
     let cost = meter::cost_report(&r, &j, cfg.kwh_price_usd);
-    Ok(meter::fmt_report(
+    let mut out = String::new();
+    if let Some(note) = drift_note {
+        out.push_str(&format!("WARNING: {note}\n\n"));
+    }
+    out.push_str(&meter::fmt_report(
         &r,
         label,
         cfg.cloud_price_per_mtok,
         Some((&cost, cfg.kwh_price_usd)),
-    ))
+    ));
+    Ok(out)
 }
 
 pub fn config_file() -> PathBuf {
@@ -363,6 +374,28 @@ pub fn disabled_ids(
         }
     }
     out
+}
+
+/// Every id the app still KNOWS — the positive-evidence set connector
+/// removals require. Union of the preset's sections and the measurement
+/// store's keys (cache-source models never pass through our preset:
+/// review finding F3, 2026-09-01), minus what the user disabled (a
+/// disabled model SHOULD leave the agents' configs). An unreadable
+/// preset contributes nothing — and because the union covers it,
+/// absence of the file is no longer treated as evidence that every
+/// model left the fleet.
+pub fn fleet_known_ids(
+    cfg: &settings::AppConfig,
+    models: &[crate::core::library::ModelFile],
+) -> std::collections::BTreeSet<String> {
+    let mut known = router::ids_in_preset(&preset_path());
+    for id in router::read_measurements(&router::state_dir()).keys() {
+        known.insert(id.clone());
+    }
+    for off in disabled_ids(cfg, models) {
+        known.remove(&off);
+    }
+    known
 }
 
 pub fn write_preset(

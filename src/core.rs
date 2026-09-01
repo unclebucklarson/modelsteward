@@ -1,5 +1,5 @@
-//! The headless engine. Everything here is GUI-free and testable; `src/ui`
-//! (M4) renders over it and must never be a dependency of it.
+//! The headless engine. Everything here is GUI-free and testable;
+//! `src/ui.rs` renders over it and must never be a dependency of it.
 
 pub mod advisor;
 pub mod aiadvisor;

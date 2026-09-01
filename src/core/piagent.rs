@@ -137,17 +137,29 @@ fn sync_inner(
         })?,
     };
     let mut new_block = provider_json(base_url, desired);
-    let old_models: std::collections::BTreeMap<String, serde_json::Value> = doc
-        .get("providers")
-        .and_then(|p| p.get(PROVIDER_KEY))
+    let old_block = doc.get("providers").and_then(|p| p.get(PROVIDER_KEY));
+    let old_arr: Vec<serde_json::Value> = old_block
         .and_then(|b| b.get("models"))
         .and_then(|m| m.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| Some((m.get("id")?.as_str()?.to_string(), m.clone())))
-                .collect()
-        })
+        .cloned()
         .unwrap_or_default();
+    // Hand-edited entries WITHOUT an "id" used to fall through every
+    // bucket and vanish on the next write (review finding B3,
+    // 2026-09-01, EXECUTED). Carried through verbatim instead: what we
+    // don't understand, we don't get to delete.
+    let unidentified: Vec<serde_json::Value> = old_arr
+        .iter()
+        .filter(|m| m.get("id").and_then(|i| i.as_str()).is_none())
+        .cloned()
+        .collect();
+    let old_base_url = old_block
+        .and_then(|b| b.get("baseUrl"))
+        .and_then(|b| b.as_str())
+        .map(str::to_string);
+    let old_models: std::collections::BTreeMap<String, serde_json::Value> = old_arr
+        .iter()
+        .filter_map(|m| Some((m.get("id")?.as_str()?.to_string(), m.clone())))
+        .collect();
     for m in new_block["models"].as_array().unwrap() {
         let id = m["id"].as_str().unwrap().to_string();
         match old_models.get(&id) {
@@ -170,6 +182,11 @@ fn sync_inner(
             None => report.kept_unmeasured.push(id.clone()),
         }
     }
+    if !unidentified.is_empty()
+        && let Some(arr) = new_block["models"].as_array_mut()
+    {
+        arr.extend(unidentified);
+    }
     // Carry kept-but-unmeasured entries through VERBATIM. Reporting
     // them as kept while writing a block without them would delete them
     // just the same — the report and the file have to agree.
@@ -187,7 +204,11 @@ fn sync_inner(
         && report.updated.is_empty()
         && report.removed.is_empty()
         && !report.created_file
-        && doc.get("providers").and_then(|p| p.get(PROVIDER_KEY)).is_some();
+        // A moved router is a change even when the model set isn't —
+        // the entry's whole point is the URL (finding B6, 2026-09-01,
+        // EXECUTED: a port change left pi on the dead URL forever).
+        && old_base_url.as_deref() == Some(base_url)
+        && old_block.is_some();
     if unchanged {
         return Ok(report);
     }
@@ -239,6 +260,34 @@ pub fn configured_models(path: &Path) -> Vec<(String, u64)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hand_edits_we_do_not_understand_survive_and_a_moved_router_is_a_change() {
+        // Review findings B3 + B6 (2026-09-01, EXECUTED): an entry with
+        // no "id" fell through every bucket and vanished; a baseUrl-only
+        // change was swallowed by the unchanged short-circuit, leaving
+        // pi pointed at a dead port forever.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("models.json");
+        std::fs::write(&path, "{\"providers\":{}}").unwrap();
+        let want = [desired("qwen", 120_000, false)];
+        sync_file(&path, "http://127.0.0.1:8080/v1", &want).unwrap();
+        // Hand-add an id-less note entry inside OUR block.
+        let mut doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        doc["providers"][PROVIDER_KEY]["models"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"note": "hand-added, no id"}));
+        std::fs::write(&path, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+
+        // A baseUrl-only change must trigger a write…
+        sync_file(&path, "http://127.0.0.1:9090/v1", &want).unwrap();
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("9090"), "the new URL must land: {after}");
+        // …and the id-less entry must ride through it untouched.
+        assert!(after.contains("hand-added, no id"), "{after}");
+    }
 
     fn desired(id: &str, ctx: u64, vision: bool) -> DesiredModel {
         DesiredModel {

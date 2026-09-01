@@ -625,3 +625,68 @@ at all.
   the structural items S1-S8 need the core extraction, which is Phase 2
   of the roadmap; M-list items remain open. First integration tests
   landed: `tests/sync_flow.rs`.
+
+### Correction — 2026-09-01, second-cycle audit of these very responses
+
+Scott asked for a fresh brutal review; three independent reviewers
+examined the fix batch itself, and their headline was that **the
+2026-08-31 response above overstated six fixes.** Corrections, each now
+actually fixed and test-pinned in this cycle unless marked otherwise:
+
+- **H10 was claimed fixed and was not, at the very file the finding
+  named**: `write_backed_up` — the path every sync goes through — still
+  did the old symlink-destroying, mode-widening write. NOW fixed (it
+  uses `safefs::write_atomic`; backups inherit the source's mode).
+- **C8 was half a fix**: the marker arm compared the port, the
+  `find_preset_process` arm didn't — and the old-router-alive-during-a-
+  port-change scenario sailed through the unfixed half. NOW fixed
+  (`cmdline_matches_port`; status uses the port-checked variant, stop
+  paths deliberately keep the port-less one), test-pinned.
+- **C4 was half a fix**: `known` came from the preset only, so
+  cache-source models (which never enter our preset) were still
+  deletable, and an UNREADABLE preset read as "everything left the
+  fleet". NOW fixed (`system::fleet_known_ids` = preset ∪ measurement
+  keys − disabled).
+- **H5's gate covered two of five measurement entry points**: Set Up
+  Everything and the Load/measure flows bypassed it. NOW fixed
+  (`refuse_while_building` at every entry; `run_rebuild` also takes the
+  in-process build lock). Cross-process exclusion remains open and is
+  now documented at the lock rather than implied fixed.
+- **H11's fix covered the GUI only**; `--meter` still printed a
+  confident zero on parser drift. NOW fixed (the CLI report carries the
+  same warning).
+- **H6's fix checked the write and not the reload** — a failed reload
+  still claimed restoration. NOW fixed (marker kept, honest message).
+- **H12-H15 vanished from this ledger entirely** — neither fixed nor
+  deferred. For the record: H12 (quality scores HTTP failure as model
+  failure) and H14 (gguf unbounded skip) remain OPEN; H13 (truncated
+  generation yields plausible numbers) remains OPEN; H15 was silently
+  half-fixed (atomic writes yes, single overwritten backup slot for
+  pi/Hermes remains OPEN).
+- One claimed-pinned test was **theater** (restore ordering: it asserted
+  an end state the buggy order also produced) — retitled to what it
+  actually pins, with the reason in its comment. Two **weak** tests
+  (energy, settings) got their missing load-bearing assertions.
+
+New findings from executing the fixes themselves, all fixed this cycle:
+- **F1/B2 (the one regression):** the C6 strict gate refused legal
+  JSONC (trailing commas anywhere in the file), permanently bricking
+  sync with a message blaming the edit. The gate now blanks legal
+  trailing commas AND fires only when the edit made the file worse.
+- **B1:** `write_atomic`'s temp file was world-readable WITH the secret
+  content during the whole write — the exact threat the function
+  claimed to close. Temps are now born 0600 and widened after.
+- **B4:** a dangling symlink was replaced by a regular file; writes now
+  resolve the link chain by hand when canonicalize refuses.
+- **B3:** a hand-edited pi entry without an "id" silently vanished; such
+  entries now ride through verbatim.
+- **B6 (pre-existing):** a router port change never reached pi's
+  baseUrl; a moved router now counts as a change.
+- **F6:** the "loud" damage reporting was stderr-only — invisible to a
+  desktop GUI; the poller now surfaces store damage as an in-app error.
+- Accepted, documented: only ServerBusy counts as transient in
+  `is_fresh` (F7) — an OOM may be co-residency or model size, and
+  retrying a 50 GB load every calibrate on a guess is the worse
+  default; the Load button remains the manual retry. Hermes cache
+  comments are destroyed on rewrite (B5) — the file is machine-written
+  by Hermes itself; documented as an assumption, backup taken first.

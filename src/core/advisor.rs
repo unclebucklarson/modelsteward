@@ -742,12 +742,20 @@ pub fn build_commands(
 
 /// Run the rebuild, streaming output lines to `progress`. Stops at the
 /// first failing step. Refuses without a repo.
+/// In-process only: `BUILD_LOCK` cannot see another PROCESS building
+/// the same checkout (`--verify-rebuild` racing the GUI stays open —
+/// review F9's cross-process half, accepted and documented).
 pub fn run_rebuild(
     c: &BuildCheck,
     sel: BackendSelection,
     progress: &mut dyn FnMut(String),
 ) -> Result<()> {
     anyhow::ensure!(c.repo.is_some(), "no git checkout to rebuild");
+    // Same-process exclusion with the managed auto-build: two builds in
+    // one checkout corrupt each other (F9).
+    let Some(_guard) = crate::core::managed::try_lock_build() else {
+        anyhow::bail!("a managed build is already running — let it finish first");
+    };
     if let Some(repo) = &c.repo {
         clear_stale_build_cache(repo, progress);
     }

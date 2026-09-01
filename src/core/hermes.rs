@@ -222,7 +222,7 @@ pub fn register_provider_text(
     // A flow-style `custom_providers: [{...}]` is legal YAML that this
     // line-based editor cannot extend. Appending a second
     // `custom_providers:` key would make the API-key-bearing config
-    // unparseable, so refuse instead (review finding C3, 2026-08-31).
+    // unparseable, so refuse instead (review finding C10's flow-style half, 2026-08-31).
     // The caller turns None into an honest error.
     let Some(idx) = config_text
         .lines()
@@ -364,7 +364,7 @@ mod tests {
 
     #[test]
     fn flow_style_custom_providers_is_refused_not_duplicated() {
-        // Review finding C3 (2026-08-31), executed: appending a second
+        // Review finding C10's flow-style half (2026-08-31), executed: appending a second
         // `custom_providers:` key makes the API-key-bearing config
         // unparseable. Refusing is the only safe answer.
         let flow = "model:\n  default: x\ncustom_providers: [{name: mine, base_url: \"http://127.0.0.1:11434/v1\"}]\n";

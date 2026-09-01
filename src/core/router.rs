@@ -250,12 +250,40 @@ fn cmdline_matches(cmdline: &str, preset: &Path) -> bool {
     cmdline.contains("llama-server") && cmdline.contains(&preset.display().to_string())
 }
 
+/// As [`cmdline_matches`], but the process must also be serving THIS
+/// port. Ownership of a port needs both credentials: the C8 fix
+/// compared the marker's port but left this arm port-blind, so our old
+/// router still alive on 18080 vouched for a stranger answering on 8080
+/// after a Settings port change — the most likely moment for the two to
+/// coexist (review finding F2, 2026-09-01). Every spawn path we own
+/// passes `--port` explicitly (start() and the systemd unit both).
+fn cmdline_matches_port(cmdline: &str, preset: &Path, port: u16) -> bool {
+    let want = port.to_string();
+    cmdline_matches(cmdline, preset)
+        && cmdline
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .windows(2)
+            .any(|w| w[0] == "--port" && w[1] == want)
+}
+
 /// Find any process running llama-server with OUR preset file — covers the
 /// systemd-user-unit case, where the marker (written by whichever process
 /// spawned the server) doesn't exist in this app's state. Running our
 /// generated preset is the ownership credential; an arbitrary llama-server
 /// never matches.
 pub fn find_preset_process(preset: &Path) -> Option<u32> {
+    find_preset_process_inner(preset, None)
+}
+
+/// Port-checked variant for OWNERSHIP claims (status). The port-less
+/// variant stays for stop/identity paths, where "runs our preset" is
+/// the right credential regardless of which port config points at now.
+pub fn find_preset_process_on(preset: &Path, port: u16) -> Option<u32> {
+    find_preset_process_inner(preset, Some(port))
+}
+
+fn find_preset_process_inner(preset: &Path, port: Option<u16>) -> Option<u32> {
     let proc = std::fs::read_dir("/proc").ok()?;
     for e in proc.flatten() {
         let name = e.file_name();
@@ -264,7 +292,11 @@ pub fn find_preset_process(preset: &Path) -> Option<u32> {
         };
         if let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) {
             let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
-            if cmdline_matches(&cmdline, preset) {
+            let hit = match port {
+                Some(p) => cmdline_matches_port(&cmdline, preset, p),
+                None => cmdline_matches(&cmdline, preset),
+            };
+            if hit {
                 return Some(pid);
             }
         }
@@ -420,7 +452,7 @@ pub fn status(dir: &Path, cfg: &RouterConfig) -> RouterState {
     // start" rule leaking through a dimension nobody checked (review
     // finding C8, 2026-08-31).
     let ours = read_marker(dir).is_some_and(|m| marker_is_live(&m) && m.port == cfg.port)
-        || find_preset_process(&cfg.preset_path).is_some();
+        || find_preset_process_on(&cfg.preset_path, cfg.port).is_some();
     match fetch_models(cfg.port) {
         Ok(models) if ours => RouterState::Ours { models },
         Ok(models) => RouterState::External {
@@ -1145,6 +1177,28 @@ mod tests_flags {
 mod tests {
     use super::*;
     use crate::core::library::Source;
+
+    #[test]
+    fn port_ownership_needs_both_credentials() {
+        // Review finding F2 (2026-09-01): our old router alive on 18080
+        // must not vouch for a stranger answering on 8080 after a
+        // Settings port change.
+        let preset = Path::new("/home/u/.config/modelsteward/router.ini");
+        let ours_18080 = "/opt/bin/llama-server --models-preset \
+             /home/u/.config/modelsteward/router.ini --host 127.0.0.1 --port 18080";
+        assert!(cmdline_matches(ours_18080, preset), "preset credential holds");
+        assert!(
+            !cmdline_matches_port(ours_18080, preset, 8080),
+            "but it must NOT claim ownership of port 8080"
+        );
+        assert!(cmdline_matches_port(ours_18080, preset, 18080));
+        // A stranger's server never matches either way.
+        assert!(!cmdline_matches_port(
+            "/usr/bin/llama-server -m model.gguf --port 8080",
+            preset,
+            8080
+        ));
+    }
 
     #[test]
     fn transient_failures_are_never_fresh_so_remeasure_actually_remeasures() {

@@ -54,22 +54,28 @@ findings the architecture depends on. Spike results live in `docs/spikes.md`.
 
 ## Architecture (big picture)
 
-Single binary, strictly layered: `src/core/` is a headless, testable engine;
-`src/ui/` is an egui shell over it. Core never depends on egui. Modules:
-`discover` (llama.cpp installs + GPU inventory + install aliases),
-`gguf` (header metadata reader), `library` (unified model registry:
-scan dirs + Ollama blobs + HF cache, split-GGUF aware, deduped by
-inode), `router` (preset-INI generation, llama-server lifecycle,
-measurements), `opencode` (opencode.json diff/apply with backups),
-`ollama` (peer probe), `trial` (measured config A/B harness, verdicts
-with magnitude-scaled guards), `quality` (eval battery + tool +
-agent-loop probes), `bench` (llama-bench baselines), `evidence`
-(router.log miner: cache stats, child ports), `meter` (M9 token
-ledger), `history` (append-only journal + rebuild scorecard),
-`advisor` (build check/rebuild/verify engine), `managed` (app-owned
-llama.cpp checkout + archived builds), `aiadvisor` (grounded one-shot
-AI opinions — NEVER load-bearing), `diagnose`, `report`, `cancel`,
-`settings`, `system`.
+Single binary, strictly layered: `src/core/` is a headless, testable
+engine; `src/ui.rs` (one large file) is an egui shell over it. Core
+never depends on egui. Modules (`src/core.rs` is the authoritative
+list): `discover` (llama.cpp installs + GPU inventory + aliases),
+`gguf` (header metadata reader, incl. the chat-template reasoning
+contract), `library` (unified model registry: scan dirs + Ollama blobs
++ HF cache, split-GGUF aware, inode-deduped), `router` (preset-INI
+generation, llama-server lifecycle, measurements), `rows` (Library row
+assembly + advice levels), `opencode` / `piagent` / `hermes` (agent
+config connectors: diff/apply with backups; opencode.json via the
+comment-preserving `jsonc` editor), `ollama` (peer probe), `trial`
+(measured config A/B harness, verdicts with magnitude-scaled guards),
+`quality` (eval battery + tool + agent-loop probes), `bench`
+(llama-bench baselines), `evidence` (router.log miner: cache stats,
+child ports, parse-coverage drift detection), `meter` (token ledger),
+`energy` (NVML/RAPL joules per token), `history` (append-only journal
++ rebuild scorecard), `advisor` (build check/rebuild/verify engine),
+`managed` (app-owned llama.cpp checkout + archived builds),
+`aiadvisor` (grounded one-shot AI opinions — NEVER load-bearing),
+`reasoning` (per-model template reasoning levels), `safefs` (atomic
+durable writes; Missing-vs-Damaged reads with rescue), `diagnose`,
+`report`, `jsonc`, `cancel`, `settings`, `system`.
 
 Non-obvious constraints that shape the code:
 

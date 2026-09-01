@@ -217,12 +217,18 @@ fn backup_path(path: &Path, n: u32) -> std::path::PathBuf {
 /// Numbered backups, newest = .1, capped at [`BACKUP_DEPTH`]. A sync
 /// followed by a comment-out no longer eats the only recovery point.
 fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
-    // Never write a file a strict JSON parser would reject. Our own
-    // reader is lenient about missing commas, so without this check a
-    // bad splice reports success while OpenCode cannot load the result
-    // (review finding C6, 2026-08-31). It fails BEFORE the backup
-    // rotation, so the user's recovery points stay intact.
-    if let Err(e) = jsonc::strictly_valid(updated) {
+    // Never let an EDIT corrupt the file. Our own reader is lenient
+    // about missing commas, so without this check a bad splice reports
+    // success while OpenCode cannot load the result (finding C6,
+    // 2026-08-31). Refined 2026-09-01 (finding F1, EXECUTED): the gate
+    // fires only when the edit made things WORSE — a file whose OWN
+    // quirks already fail the strict parse (a style our reader accepts)
+    // must not have sync permanently refused with a message blaming the
+    // edit. It fails BEFORE the backup rotation, so the user's recovery
+    // points stay intact.
+    if let Err(e) = jsonc::strictly_valid(updated)
+        && jsonc::strictly_valid(original).is_ok()
+    {
         anyhow::bail!(
             "refusing to write {}: the edit would produce invalid JSON ({e}). \
              Nothing was changed.",
@@ -235,11 +241,19 @@ fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     for n in (1..BACKUP_DEPTH).rev() {
         let _ = std::fs::rename(backup_path(path, n), backup_path(path, n + 1));
     }
-    std::fs::write(backup_path(path, 1), original)
-        .with_context(|| format!("writing backup {}", backup_path(path, 1).display()))?;
-    let tmp = path.with_extension("json.lcc.tmp");
-    std::fs::write(&tmp, updated).with_context(|| format!("writing {}", tmp.display()))?;
-    std::fs::rename(&tmp, path).context("moving new config into place")?;
+    let bak1 = backup_path(path, 1);
+    std::fs::write(&bak1, original)
+        .with_context(|| format!("writing backup {}", bak1.display()))?;
+    // A backup of a 0600 config must not be world-readable.
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(&bak1, meta.permissions());
+    }
+    // The one write path every sync goes through — finding H10
+    // (2026-08-31) was ABOUT this file, and this line is where the fix
+    // belongs: symlinks survive, the mode survives, the write is
+    // atomic and durable.
+    crate::core::safefs::write_atomic(path, updated)?;
     Ok(())
 }
 
@@ -380,6 +394,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_users_quirky_but_readable_style_never_bricks_sync() {
+        // Review finding F1 (2026-09-01, EXECUTED): a trailing comma in
+        // a section sync never touches used to make every future write
+        // refused ("the edit would produce invalid JSON") — permanently,
+        // including no-op syncs. The gate now fires only when the EDIT
+        // made the file worse.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            "{\n  \"mcp\": { \"x\": 1, },\n  \"provider\": {}\n}",
+        )
+        .unwrap();
+        let want = [DesiredModel {
+            id: "qwen".into(),
+            display_name: "qwen".into(),
+            context: 120_000,
+            tool_call: Some(true),
+            vision: false,
+        }];
+        let r = sync_file(&path, "http://127.0.0.1:8080/v1", &want)
+            .expect("sync must succeed despite the user's trailing comma");
+        assert_eq!(r.added, vec!["qwen".to_string()]);
+        let after = std::fs::read_to_string(&path).unwrap();
+        assert!(after.contains("\"mcp\""), "user section survives: {after}");
+        // And the result still passes the gate itself (trailing commas
+        // are blanked as legal JSONC, so this asserts real validity).
+        jsonc::strictly_valid(&after).unwrap();
+    }
+
+    #[test]
     fn commenting_many_ghosts_costs_exactly_one_backup_slot() {
         // Review finding H4 (2026-08-31): one read/rotate/write PER
         // ghost meant a sync with six ghosts rotated the backup ring six
@@ -414,11 +459,15 @@ mod tests {
     }
 
     #[test]
-    fn restore_puts_the_good_config_in_place_before_reusing_the_backup_slot() {
-        // Review finding C3 (2026-08-31): the old order stashed `current`
-        // into the backup slot BEFORE the restore landed, so an
-        // interruption between the two lost the good config from both
-        // places — on the undo path specifically.
+    fn restore_swaps_config_and_backup_and_toggles() {
+        // Pins the END STATE of restore, not its crash-ordering: the
+        // 2026-09-01 audit correctly called the previous version of this
+        // test theater — the buggy order produced the same end state
+        // whenever nothing crashed. The ordering fix (good content lands
+        // via write_atomic BEFORE the slot is reused, finding C3) is
+        // enforced by the code order and its comment; fault-injecting a
+        // crash between two same-directory writes isn't reachable from a
+        // unit test without seams we don't want.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("opencode.json");
         let good = "{\n  \"good\": true\n}";

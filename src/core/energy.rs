@@ -227,6 +227,20 @@ mod tests {
     }
 
     #[test]
+    fn an_unreadable_counter_file_reads_as_none_not_zero() {
+        // The load-bearing half the audit found untested: rapl_read_uj
+        // itself must yield None for a missing/unreadable path.
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("energy_uj");
+        std::fs::write(&good, "123456\n").unwrap();
+        let pkgs = vec![
+            Rapl { energy_path: good, max_range_uj: 1_000_000 },
+            Rapl { energy_path: dir.path().join("missing"), max_range_uj: 1_000_000 },
+        ];
+        assert_eq!(rapl_read_uj(&pkgs), vec![Some(123_456), None]);
+    }
+
+    #[test]
     fn counter_delta_handles_wraparound() {
         assert_eq!(counter_delta(100, 250, 1000), 150);
         // Wrapped: 900 -> top (1000) is 100, plus 50 past zero.

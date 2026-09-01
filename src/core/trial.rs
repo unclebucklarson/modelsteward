@@ -364,7 +364,18 @@ pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
              preset by hand if it persists."
         ));
     }
-    let _ = router::reload(cfg.port);
+    // The reload is half the restoration: the preset on disk is right,
+    // but a router that didn't re-read it keeps SERVING the trial
+    // config. Keep the marker so the next start retries (review finding
+    // F8, 2026-09-01).
+    if let Err(e) = router::reload(cfg.port) {
+        return Some(format!(
+            "the real preset is restored on disk after an interrupted trial \
+             ({model}), but the router could not be told to reload it ({e:#}) — \
+             it may still SERVE the trial's config. Retrying at next start; \
+             restart the router to be sure."
+        ));
+    }
     clear_trial_marker(&dir);
     Some(format!(
         "restored the real preset after an interrupted trial ({model}) — the router \
