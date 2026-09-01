@@ -808,16 +808,26 @@ pub fn calibrate(
     build: Option<u64>,
     force: bool,
     no_tool_probe: &std::collections::HashSet<String>,
+    disabled: &std::collections::HashSet<String>,
     progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
     // Preset models AND the router's own HF cache downloads ("cache" source
     // — e.g. models pulled by `llama-server -hf` or vendor tools). Both are
     // servable through the router, so both deserve measurement; anything
     // else (a future source we don't know) is left alone.
-    let models: Vec<_> = fetch_models(port)?
+    let all: Vec<_> = fetch_models(port)?
         .into_iter()
         .filter(|m| matches!(m.source.as_deref(), Some("preset") | Some("cache")))
         .collect();
+    // Disabled models are never measured. Filtering only in the preset
+    // was not enough: the router also discovers models by itself (the
+    // `cache` source), so those reached calibration however the user had
+    // marked them (live catch 2026-08-31).
+    let skipped = all.iter().filter(|m| disabled.contains(&m.id)).count();
+    let models: Vec<_> = all.into_iter().filter(|m| !disabled.contains(&m.id)).collect();
+    if skipped > 0 {
+        progress(format!("skipping {skipped} disabled model(s)"));
+    }
     if models.is_empty() {
         bail!("router lists no preset or cache models to calibrate");
     }

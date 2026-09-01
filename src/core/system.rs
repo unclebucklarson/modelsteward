@@ -342,6 +342,29 @@ pub fn install_systemd_unit(cfg: &settings::AppConfig) -> Result<PathBuf> {
 }
 
 /// (Re)generate the preset from a scan; returns (path, model count).
+/// Router ids the user has DISABLED.
+///
+/// The disabled list is keyed by file path when we have one and by
+/// router id otherwise, so resolving it needs the model list. Written
+/// 2026-08-31 after Scott noticed "Set Up Everything" measuring dimmed
+/// models: the predicate existed only inside `write_preset`, so
+/// disabling a model removed it from OUR preset but did not stop
+/// calibrate or bench — and the router discovers some models on its own
+/// (its `cache` source), which never pass through our preset at all.
+/// Disabled means: shown, but not measured, benched, raced, or offered.
+pub fn disabled_ids(
+    cfg: &settings::AppConfig,
+    models: &[crate::core::library::ModelFile],
+) -> std::collections::HashSet<String> {
+    let mut out: std::collections::HashSet<String> = cfg.disabled.iter().cloned().collect();
+    for (alias, m, _) in router::default_entries(models) {
+        if cfg.disabled.contains(&m.path.display().to_string()) {
+            out.insert(alias);
+        }
+    }
+    out
+}
+
 pub fn write_preset(
     cfg: &settings::AppConfig,
     extra_dirs: &[PathBuf],
@@ -351,10 +374,8 @@ pub fn write_preset(
     // Disabled models leave the preset — the router stops offering
     // them, calibrate/bench stop acting on them; the Library still
     // SHOWS them (dimmed) so nothing silently vanishes.
-    entries.retain(|(alias, m, _)| {
-        let by_path = cfg.disabled.contains(&m.path.display().to_string());
-        !by_path && !cfg.disabled.contains(alias)
-    });
+    let off = disabled_ids(cfg, &models);
+    entries.retain(|(alias, _, _)| !off.contains(alias));
     // Apply the user's per-model overrides (stored in config.json so preset
     // regeneration keeps them). Overrides keyed to ids that aren't preset
     // aliases (cache models) become bare sections configuring those ids.
@@ -397,6 +418,58 @@ pub fn write_preset(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn disabled_resolves_both_keyings_so_nothing_acts_on_them() {
+        // Scott's definition (2026-08-29): "it's there, but measure,
+        // benchmark and labs don't act on them." Live catch 2026-08-31:
+        // the predicate existed ONLY inside write_preset, so a disabled
+        // model still got measured and benched — the router discovers
+        // some models itself (its `cache` source) and those never pass
+        // through our preset at all.
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("Alpha-7B-Q4_K_M.gguf");
+        let b = dir.path().join("Beta-7B-Q4_K_M.gguf");
+        for p in [&a, &b] {
+            std::fs::write(p, b"x").unwrap();
+        }
+        let mk = |p: &std::path::Path| crate::core::library::ModelFile {
+            path: p.to_path_buf(),
+            file_size: 1,
+            source: crate::core::library::Source::Shelf,
+            // default_entries only aliases models whose header read —
+            // a header-less file never reaches the preset anyway.
+            meta: Some(crate::core::gguf::GgufMeta::default()),
+            mmproj: None,
+        };
+        let models = vec![mk(&a), mk(&b)];
+        let alias_of = |p: &std::path::Path| {
+            router::default_entries(&models)
+                .into_iter()
+                .find(|(_, m, _)| m.path == p)
+                .map(|(alias, _, _)| alias)
+                .expect("model should have an alias")
+        };
+
+        // Keyed by PATH (how the Library disables a shelf model)…
+        let mut cfg = settings::AppConfig {
+            disabled: vec![a.display().to_string()],
+            ..Default::default()
+        };
+        let off = disabled_ids(&cfg, &models);
+        assert!(
+            off.contains(&alias_of(&a)),
+            "a path-keyed disable must resolve to the router id calibrate sees"
+        );
+        assert!(!off.contains(&alias_of(&b)));
+
+        // …and keyed by ROUTER ID (how a cache-only model is disabled,
+        // since it has no path we own).
+        cfg.disabled = vec!["some-cache-id".to_string()];
+        let off = disabled_ids(&cfg, &models);
+        assert!(off.contains("some-cache-id"));
+        assert!(!off.contains(&alias_of(&a)));
+    }
 
     #[test]
     fn build_id_pins_the_exact_software() {

@@ -445,7 +445,8 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
         eprintln!("router reload failed ({e:#}) — measuring what it currently offers");
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &mut |line| {
+    let off = system::disabled_ids(cfg, &system::scan_models(cfg, &[]));
+    let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &off, &mut |line| {
         eprintln!("{line}");
     })?;
     let (mut measured, mut failed) = (0usize, 0usize);

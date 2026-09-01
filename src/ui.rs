@@ -5808,6 +5808,7 @@ fn run_calibration(
         )));
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
+    let off = system::disabled_ids(cfg, &system::scan_models(cfg, &[]));
     let progress_tx = tx.clone();
     router::calibrate(
         &router::state_dir(),
@@ -5816,6 +5817,7 @@ fn run_calibration(
         build,
         force,
         &embed,
+        &off,
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));
         },

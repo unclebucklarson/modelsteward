@@ -122,6 +122,9 @@ pub fn run_baselines(
     }
 
     let mut measurements = router::read_measurements(&dir);
+    // Disabled models are never benched either — same rule as measuring
+    // (live catch 2026-08-31: the predicate lived only in write_preset).
+    let off = system::disabled_ids(cfg, &models);
     let targets: Vec<String> = match target {
         Some(id) => {
             anyhow::ensure!(
@@ -129,10 +132,15 @@ pub fn run_baselines(
                 "unknown model id {id:?} — benching needs an id that maps to a file on disk \
                  (preset alias or hub-cache id)"
             );
+            anyhow::ensure!(
+                !off.contains(&id),
+                "{id} is disabled — enable it on the Library tab first"
+            );
             vec![id]
         }
         None => by_id
             .iter()
+            .filter(|(id, _)| !off.contains(id.as_str()))
             .filter(|(id, file)| {
                 let m = measurements.get(*id);
                 let loadable = m.is_some_and(|m| m.n_ctx.is_some());
