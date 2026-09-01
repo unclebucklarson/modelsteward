@@ -240,3 +240,21 @@ has*, which is a good sign:
   reliability items and are next. Note that C2's crash-safety half IS
   fixed: the meter cursor is now written atomically, so a torn write can
   no longer yield a default cursor that re-credits the entire log.
+
+- 2026-09-01 (second pass, HEAD after 7ba4b52): **C1 CLOSED** — the
+  miner is now a resumable `evidence::LogMiner`; the poller keeps a
+  byte offset and feeds only NEW bytes, cutting at the last complete
+  newline so no line or UTF-8 character is ever split; a shrinking file
+  (router restart) resets the fold; fingerprints read an 8 KB head
+  instead of the whole file. Pinned by a chunking test proving 1-byte
+  feeds equal one-shot parsing, port-reuse attribution included.
+  **C2 CLOSED** — the ledger compacts opportunistically: same-(hour,
+  model) rows fold losslessly once duplication doubles the file, so
+  growth is O(hours × models) instead of O(ticks); pinned by a test
+  asserting reports are identical before and after, ranges included.
+  **M1 CLOSED** earlier the same day by low-impact mode (RouterState
+  and Ollama sends change-gated; nvidia-smi and mining suspended while
+  a turn is in flight — validated live at 0 spawns/60 s during
+  generation, ~94% of the GPU-exclusive bench ceiling).
+  STILL OPEN: H1 (/proc sweep when router down), H2-H5 (per-frame
+  derive-vs-cache; only bites while mousing over the app), M2-M5.

@@ -213,8 +213,9 @@ fn sync_inner(
         return Ok(report);
     }
     if !report.created_file {
-        std::fs::copy(path, backup_path(path))
-            .with_context(|| format!("backing up {}", path.display()))?;
+        // Rotating ring, not a single slot: two syncs used to destroy
+        // the pre-modelsteward original (review H15, closed 2026-09-01).
+        crate::core::safefs::backup_rotated(path, "modelsteward")?;
     }
     doc.as_object_mut()
         .context("models.json root is not an object")?
@@ -228,8 +229,13 @@ fn sync_inner(
     Ok(report)
 }
 
+/// Newest backup slot (ring depth: safefs::BACKUP_DEPTH).
 pub fn backup_path(path: &Path) -> PathBuf {
-    path.with_extension("json.modelsteward.bak")
+    let name = format!(
+        "{}.modelsteward.bak.1",
+        path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+    );
+    path.with_file_name(name)
 }
 
 /// What our provider block currently declares — for the Connections
@@ -355,6 +361,20 @@ mod tests {
         let r2 = sync_file(&path, "http://127.0.0.1:8080/v1", &want).unwrap();
         assert_eq!(r2, PiSyncReport::default(), "{r2:?}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // H15 (closed 2026-09-01): a SECOND differing sync must not
+        // destroy the first backup — the ring rotates instead.
+        let first_backup = std::fs::read_to_string(backup_path(&path)).unwrap();
+        let v2 = [desired("qwen3.8-27b-ud-q4_k_xl", 100_000, false)];
+        let known: std::collections::BTreeSet<String> =
+            v2.iter().map(|d| d.id.clone()).collect();
+        sync_file_with_known(&path, "http://127.0.0.1:8080/v1", &v2, &known).unwrap();
+        let slot2 = path.with_file_name("models.json.modelsteward.bak.2");
+        assert_eq!(
+            std::fs::read_to_string(&slot2).unwrap(),
+            first_backup,
+            "the previous backup survives in slot 2"
+        );
     }
 
     #[test]

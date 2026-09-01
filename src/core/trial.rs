@@ -1315,6 +1315,33 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
     let t = body
         .get("timings")
         .ok_or_else(|| anyhow::anyhow!("response has no timings block"))?;
+    // A reasoning model that burned the whole budget in its thinking
+    // channel returns EMPTY content with a perfectly plausible
+    // tokens/sec — which used to be recorded as a real speed (and a
+    // fidelity of 0.0, producing a confident wrong verdict from a
+    // truncation: review finding H13). Empty output is not a
+    // measurement of anything the config would actually serve.
+    let content = body
+        .pointer("/choices/0/message/content")
+        .and_then(|c| c.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if content.trim().is_empty() {
+        let burned = body
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(|c| c.as_str())
+            .is_some_and(|r| !r.trim().is_empty());
+        anyhow::bail!(
+            "the model produced no answer content{} — its numbers would measure a \
+             truncation, not the config. Lower its reasoning effort (⚙ Tune) or \
+             raise the trial budget.",
+            if burned {
+                " (the whole token budget went to its reasoning channel)"
+            } else {
+                ""
+            }
+        );
+    }
     Ok(GenStats {
         tps: t
             .get("predicted_per_second")
@@ -1327,11 +1354,7 @@ fn timed_generation(port: u16, model: &str, prompt: &str, max_tokens: u32) -> Re
         predicted_n: t.get("predicted_n").and_then(|v| v.as_u64()),
         draft_n: t.get("draft_n").and_then(|v| v.as_u64()),
         draft_accepted: t.get("draft_n_accepted").and_then(|v| v.as_u64()),
-        content: body
-            .pointer("/choices/0/message/content")
-            .and_then(|c| c.as_str())
-            .unwrap_or_default()
-            .to_string(),
+        content,
     })
 }
 

@@ -208,6 +208,14 @@ fn fixed_size(ty: u32) -> Option<u64> {
 }
 
 fn skip_bytes<R: Read>(r: &mut R, mut n: u64) -> Result<()> {
+    // One corrupt length field must not make us stream a 20 GB tensor
+    // blob through this loop before erroring: the MAX_HEADER_BYTES
+    // guard runs BETWEEN values, so it cannot interrupt a single
+    // oversized skip (review finding H14). No legitimate metadata
+    // value exceeds the whole header budget.
+    if n > MAX_HEADER_BYTES {
+        bail!("implausible metadata field of {n} bytes; refusing to skip");
+    }
     let mut buf = [0u8; 8192];
     while n > 0 {
         let take = n.min(buf.len() as u64) as usize;
@@ -301,6 +309,25 @@ fn file_type_name(n: u64) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_corrupt_length_field_errors_instead_of_streaming_the_blob() {
+        // Review finding H14 (2026-08-31): read_string capped declared
+        // lengths, skip_value's string arm did not — one flipped byte
+        // in a length field made read_meta stream the entire model file
+        // through the skip loop (a 20 GB stall per file at scan time)
+        // before erroring. A skip larger than the whole header budget
+        // is refused immediately.
+        let mut r = CountingReader {
+            inner: std::io::BufReader::new(std::io::Cursor::new(vec![0u8; 1024])),
+            read: 0,
+        };
+        let e = skip_bytes(&mut r, u64::MAX).unwrap_err().to_string();
+        assert!(e.contains("implausible"), "{e}");
+        assert!(r.read < 1024, "must refuse BEFORE reading, not after");
+        // Sane skips still work.
+        skip_bytes(&mut r, 512).unwrap();
+    }
     use std::io::Write;
 
     /// Build a tiny synthetic GGUF header for tests.

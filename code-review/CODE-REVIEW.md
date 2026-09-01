@@ -690,3 +690,16 @@ New findings from executing the fixes themselves, all fixed this cycle:
   default; the Load button remains the manual retry. Hermes cache
   comments are destroyed on rewrite (B5) — the file is machine-written
   by Hermes itself; documented as an assumption, backup taken first.
+
+- 2026-09-01 (afternoon): the four ledger items restored that morning
+  are now CLOSED, each test-pinned: **H12** — a transport failure
+  aborts the quality probe with the reason instead of being scored as
+  the model's failure (matching probe_tool_call's own contract);
+  **H13** — a generation whose whole budget went to the reasoning
+  channel is an error naming the fix (⚙ Tune reasoning), in both the
+  trial harness and the quality battery, never a plausible tokens/sec
+  with fidelity 0.0; **H14** — a single corrupt GGUF length field is
+  refused before the skip, not after streaming 20 GB (bounded by the
+  header budget); **H15** — pi and Hermes now use a shared 5-deep
+  rotating backup ring (`safefs::backup_rotated`), so a second sync can
+  no longer destroy the pre-modelsteward original.

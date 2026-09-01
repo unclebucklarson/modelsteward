@@ -160,8 +160,7 @@ pub fn sync_context_cache(
         return Ok(written);
     }
     if path.exists() {
-        std::fs::copy(path, path.with_extension("yaml.modelsteward.bak"))
-            .with_context(|| format!("backing up {}", path.display()))?;
+        crate::core::safefs::backup_rotated(path, "modelsteward")?;
     }
     crate::core::safefs::write_atomic(path, &serde_yaml::to_string(&doc)?)?;
     Ok(written)
@@ -280,8 +279,7 @@ pub fn register_provider(home: &Path, base_url: &str, default_model: &str) -> Re
             path.display()
         )
     })?;
-    std::fs::copy(&path, path.with_extension("yaml.modelsteward.bak"))
-        .with_context(|| format!("backing up {}", path.display()))?;
+    crate::core::safefs::backup_rotated(&path, "modelsteward")?;
     crate::core::safefs::write_atomic(&path, &new)?;
     Ok(())
 }

@@ -212,6 +212,15 @@ pub fn harvest_stats(
             })
             .collect();
         crate::core::history::append_jsonl(&ledger_path(dir), &buckets)?;
+        // C2 (efficiency review, closed 2026-09-01): appends land one
+        // row per model per crediting tick, so an active hour writes
+        // dozens of rows for the same (hour, model). Compact
+        // opportunistically once the file carries meaningful
+        // duplication — folding same-key rows is lossless (Tally
+        // addition), keeps the file O(hours × models) instead of
+        // O(ticks), and the atomic rewrite means a crash keeps the
+        // uncompacted original.
+        maybe_compact(dir)?;
     }
     let credited = new.len();
     // Advance the cursor when anything actually changed (a quiet tick
@@ -238,6 +247,46 @@ pub fn harvest_stats(
 /// Every ledger line, file order.
 pub fn read_all(dir: &Path) -> Vec<Bucket> {
     crate::core::history::read_jsonl(&ledger_path(dir))
+}
+
+/// Fold same-(hour, model) rows into one. Lossless: buckets are sums.
+pub fn compact(buckets: Vec<Bucket>) -> Vec<Bucket> {
+    let mut by_key: std::collections::BTreeMap<(u64, String), Bucket> = Default::default();
+    for b in buckets {
+        let e = by_key.entry((b.when, b.model.clone())).or_insert(Bucket {
+            when: b.when,
+            model: b.model.clone(),
+            turns: 0,
+            prompt: 0,
+            generated: 0,
+            reused: 0,
+        });
+        e.turns += b.turns;
+        e.prompt += b.prompt;
+        e.generated += b.generated;
+        e.reused += b.reused;
+    }
+    by_key.into_values().collect()
+}
+
+/// Rewrite the ledger compacted when it holds ~2x more rows than its
+/// compacted form would. Cheap check (line count vs distinct keys).
+fn maybe_compact(dir: &Path) -> anyhow::Result<()> {
+    let all = read_all(dir);
+    if all.len() < 500 {
+        return Ok(());
+    }
+    let folded = compact(all.clone());
+    if all.len() < folded.len() * 2 {
+        return Ok(());
+    }
+    let mut out = String::new();
+    for b in &folded {
+        out.push_str(&serde_json::to_string(b)?);
+        out.push('\n');
+    }
+    crate::core::safefs::write_atomic(&ledger_path(dir), &out)?;
+    Ok(())
 }
 
 /// The pure-token report over an optional [since, until) range.
@@ -453,6 +502,40 @@ fn fmt_hour(epoch: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn compaction_is_lossless_for_every_report_the_meter_can_produce() {
+        // C2 (efficiency review): the ledger appended one row per model
+        // per 30s crediting tick, growing O(ticks) forever with no
+        // prune while history.jsonl beside it had one. Compaction folds
+        // same-(hour, model) rows; totals, ranges, and busiest-hour
+        // must be IDENTICAL before and after — the meter's numbers are
+        // the product's thesis.
+        let b = |when: u64, model: &str, t: u64, p: u64, g: u64, r: u64| Bucket {
+            when,
+            model: model.into(),
+            turns: t,
+            prompt: p,
+            generated: g,
+            reused: r,
+        };
+        let raw = vec![
+            b(3600, "qwen", 1, 1000, 100, 300),
+            b(3600, "qwen", 2, 2000, 200, 600), // same hour+model: folds
+            b(3600, "glm", 1, 500, 50, 0),
+            b(7200, "qwen", 1, 700, 70, 100), // next hour: stays separate
+        ];
+        let folded = compact(raw.clone());
+        assert_eq!(folded.len(), 3, "{folded:?}");
+        let before = report(&raw, None, None);
+        let after = report(&folded, None, None);
+        assert_eq!(before, after, "reports must be identical");
+        let ranged_b = report(&raw, Some(3600), Some(7200));
+        let ranged_a = report(&folded, Some(3600), Some(7200));
+        assert_eq!(ranged_b, ranged_a, "ranged reports too");
+        assert_eq!(after.fleet.turns, 5);
+        assert_eq!(after.fleet.prompt, 4200);
+    }
 
     #[test]
     fn fingerprinting_a_log_with_multibyte_text_does_not_panic() {

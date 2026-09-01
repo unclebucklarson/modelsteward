@@ -151,11 +151,29 @@ fn ask(port: u16, model: &str, prompt: &str) -> Result<String> {
             "max_tokens": 2048,
         }),
     )?;
-    Ok(body
+    let content = body
         .pointer("/choices/0/message/content")
         .and_then(|c| c.as_str())
         .unwrap_or_default()
-        .to_string())
+        .to_string();
+    // Empty content with a reasoning channel = the budget went to
+    // thinking, not an answer. Scoring that as "wrong" wrote a real-
+    // looking 0.0 into measurements.json and demoted the model in
+    // advisor selection over a truncation (review finding H13's
+    // quality half). Inconclusive aborts, like every transport error.
+    if content.trim().is_empty()
+        && body
+            .pointer("/choices/0/message/reasoning_content")
+            .and_then(|c| c.as_str())
+            .is_some_and(|r| !r.trim().is_empty())
+    {
+        anyhow::bail!(
+            "the model spent its whole budget in the reasoning channel and gave no \
+             answer — lower its reasoning effort (⚙ Tune) and re-run; scoring this \
+             would grade a truncation, not the model"
+        );
+    }
+    Ok(content)
 }
 
 /// One agent-loop shot (M8->MoE reliability path, built 2026-08-28):
@@ -265,11 +283,24 @@ pub fn run_quality(
     let battery = eval_battery();
     let total = battery.len() as u32;
     let mut passed = 0u32;
+    // An HTTP/transport failure is INCONCLUSIVE, never "the model got
+    // it wrong" — probe_tool_call's own contract, which this function
+    // ignored: one connection reset used to permanently lower a
+    // model's recorded quality and demote it in advisor selection
+    // (review finding H12). Errors abort the probe honestly instead of
+    // being scored; a run that records numbers is a run where every
+    // shot actually reached the model.
     for (i, item) in battery.iter().enumerate() {
         cancel.check()?;
-        let ok = ask(port, model, item.prompt)
-            .map(|r| score_response(&item.check, &r))
-            .unwrap_or(false);
+        let reply = ask(port, model, item.prompt).with_context(|| {
+            format!(
+                "eval {}/{} could not reach the model — aborting rather than \
+                 recording a failure the model never had",
+                i + 1,
+                total
+            )
+        })?;
+        let ok = score_response(&item.check, &reply);
         if ok {
             passed += 1;
         }
@@ -283,7 +314,13 @@ pub fn run_quality(
     let mut tool_ok = 0u32;
     for i in 0..tool_shots {
         cancel.check()?;
-        let ok = router::probe_tool_call(port, model).unwrap_or(false);
+        let ok = router::probe_tool_call(port, model).with_context(|| {
+            format!(
+                "tool probe {}/{tool_shots} could not reach the model — aborting \
+                 rather than recording a failure the model never had",
+                i + 1
+            )
+        })?;
         if ok {
             tool_ok += 1;
         }

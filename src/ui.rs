@@ -554,6 +554,14 @@ impl App {
             let mut last_activity_len: u64 = 0;
             let mut drift_warned = false;
             let mut damage_warned = false;
+            // Incremental log miner (efficiency C1, closed 2026-09-01):
+            // fold state survives across ticks and only NEW bytes are
+            // read — the old full re-read+re-parse every 30s was
+            // unbounded in router uptime (a month-old router meant a
+            // ~200 MB allocation twice a minute). A shrinking file
+            // (router restart truncates) resets the fold.
+            let mut miner = evidence::LogMiner::default();
+            let mut mined_offset: u64 = 0;
             let mut quiet_ticks: u32 = 0;
             let mut last_mine = std::time::Instant::now() - std::time::Duration::from_secs(60);
             let cfg_path = system::config_file();
@@ -690,13 +698,38 @@ impl App {
                 {
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
-                    if let Ok(text) = std::fs::read_to_string(&log_path) {
-                        // One parse serves both the monitor and the meter
-                        // (the log was parsed twice per tick — review
-                        // catch), and the ledger + summary only rewrite
-                        // when something was actually credited.
-                        let (stats, coverage) =
-                            evidence::cache_effectiveness_with_coverage(&text);
+                    if log_len < mined_offset {
+                        // Truncated/rotated (router restart): start over.
+                        miner = evidence::LogMiner::default();
+                        mined_offset = 0;
+                    }
+                    // Read ONLY the new bytes, consume up to the last
+                    // complete line (a chunk boundary must not split a
+                    // line — or a UTF-8 character — in half).
+                    let fed = (|| -> Option<()> {
+                        use std::io::{Read, Seek, SeekFrom};
+                        let mut f = std::fs::File::open(&log_path).ok()?;
+                        f.seek(SeekFrom::Start(mined_offset)).ok()?;
+                        let mut new_bytes = Vec::new();
+                        f.read_to_end(&mut new_bytes).ok()?;
+                        let cut = new_bytes.iter().rposition(|b| *b == b'\n')? + 1;
+                        miner.feed(&String::from_utf8_lossy(&new_bytes[..cut]));
+                        mined_offset += cut as u64;
+                        Some(())
+                    })()
+                    .is_some();
+                    if fed {
+                        // Fingerprints only need the head of the file.
+                        let head = (|| -> Option<String> {
+                            use std::io::Read;
+                            let f = std::fs::File::open(&log_path).ok()?;
+                            let mut buf = String::new();
+                            let _ = f.take(8192).read_to_string(&mut buf).ok()?;
+                            Some(buf)
+                        })()
+                        .unwrap_or_default();
+                        let (stats, coverage) = miner.results();
+                        let text = head;
                         // Say so ONCE when the log stops parsing, rather
                         // than reporting zero usage as fact (finding H11).
                         if let Some(note) = coverage.note()

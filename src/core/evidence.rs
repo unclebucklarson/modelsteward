@@ -228,28 +228,65 @@ pub fn cache_effectiveness(log: &str) -> Vec<ModelCacheStats> {
 
 /// As [`cache_effectiveness`], plus how much of the log was readable.
 pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Coverage) {
-    #[derive(Default)]
-    struct Task {
-        model: Option<String>,
-        prompt: Option<u64>,
-        generated: Option<u64>,
-        release: Option<u64>,
-    }
-    let mut coverage = Coverage::default();
-    let mut port_model: BTreeMap<u32, String> = BTreeMap::new();
-    // Ports get REUSED within one router lifetime, and a new child
-    // restarts task ids at 0 — so tasks are keyed by (port, spawn
-    // generation, task) and bound to the model active WHEN FIRST SEEN,
-    // not the port's final tenant. This used to be monitor-grade
-    // ("final mapping is close enough"); the meter's permanent ledger
-    // sits on these numbers now (review catch 2026-08-28), so
-    // attribution is exact.
-    let mut port_gen: BTreeMap<u32, u32> = BTreeMap::new();
-    let mut disabled_ports: std::collections::BTreeSet<u32> = Default::default();
-    let mut context_ports: std::collections::BTreeSet<u32> = Default::default();
-    let mut tasks: BTreeMap<(u32, u32, u64), Task> = BTreeMap::new();
+    let mut m = LogMiner::default();
+    m.feed(log);
+    m.results()
+}
 
-    for line in log.lines() {
+#[derive(Default, Debug, Clone)]
+struct Task {
+    model: Option<String>,
+    prompt: Option<u64>,
+    generated: Option<u64>,
+    release: Option<u64>,
+}
+
+/// Resumable log miner (efficiency finding C1, closed 2026-09-01):
+/// the poller used to re-read and re-parse the WHOLE router.log every
+/// 30 seconds — unbounded in router uptime (6.5 MB/day, truncated only
+/// at router start, and router mode is designed to run for weeks). The
+/// miner now keeps its fold state across ticks and is fed only the NEW
+/// bytes; a truncated/rotated log resets it (the caller watches the
+/// length go backwards).
+///
+/// Ports get REUSED within one router lifetime, and a new child
+/// restarts task ids at 0 — tasks are keyed by (port, spawn
+/// generation, task) and bound to the model active WHEN FIRST SEEN,
+/// not the port's final tenant: the meter's permanent ledger sits on
+/// these numbers (review catch 2026-08-28), so attribution is exact.
+#[derive(Default, Debug, Clone)]
+pub struct LogMiner {
+    coverage: Coverage,
+    port_model: BTreeMap<u32, String>,
+    port_gen: BTreeMap<u32, u32>,
+    disabled_ports: std::collections::BTreeSet<u32>,
+    context_ports: std::collections::BTreeSet<u32>,
+    tasks: BTreeMap<(u32, u32, u64), Task>,
+    /// Tail of the last feed that didn't end in a newline — a chunk
+    /// boundary must never split a line in half.
+    partial: String,
+}
+
+impl LogMiner {
+    /// Feed the next chunk of log bytes (any split; lines may straddle
+    /// chunks).
+    pub fn feed(&mut self, chunk: &str) {
+        let buf = format!("{}{}", self.partial, chunk);
+        let complete_end = buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
+        self.partial = buf[complete_end..].to_string();
+        for line in buf[..complete_end].lines() {
+            self.feed_line(line);
+        }
+    }
+
+    fn feed_line(&mut self, line: &str) {
+        let coverage = &mut self.coverage;
+        let port_model = &mut self.port_model;
+        let port_gen = &mut self.port_gen;
+        let disabled_ports = &mut self.disabled_ports;
+        let context_ports = &mut self.context_ports;
+        let tasks = &mut self.tasks;
+        {
         if let Some(idx) = line.find("spawning server instance with name=") {
             let rest = &line[idx + "spawning server instance with name=".len()..];
             if let Some((name, port_part)) = rest.split_once(" on port ") {
@@ -258,19 +295,19 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
                     *port_gen.entry(port).or_default() += 1;
                 }
             }
-            continue;
+            return;
         }
         let Some((port, body)) = port_prefix(line) else {
-            continue;
+            return;
         };
         if body.contains("cache_reuse is not supported") {
             disabled_ports.insert(port);
             if body.contains("not supported by this context") {
                 context_ports.insert(port);
             }
-            continue;
+            return;
         }
-        let Some(task) = task_id(body) else { continue };
+        let Some(task) = task_id(body) else { return };
         let generation = port_gen.get(&port).copied().unwrap_or(0);
         let t = tasks.entry((port, generation, task)).or_default();
         if t.model.is_none() {
@@ -294,10 +331,19 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
             coverage.finished += 1;
             t.release = field_u64(body, "n_tokens");
         }
+        }
     }
 
+    /// The stats accumulated so far. Cheap relative to the fold: it
+    /// walks the task table, not the log.
+    pub fn results(&self) -> (Vec<ModelCacheStats>, Coverage) {
+        let mut coverage = self.coverage.clone();
+        let port_model = &self.port_model;
+        let disabled_ports = &self.disabled_ports;
+        let context_ports = &self.context_ports;
+        let tasks = &self.tasks;
     let mut per_model: BTreeMap<String, ModelCacheStats> = BTreeMap::new();
-    for ((port, _, _), t) in &tasks {
+    for ((port, _, _), t) in tasks {
         // Bound-at-first-sight; final mapping only as a fallback for
         // tasks whose lines preceded any spawn line we saw.
         let Some(model) = t.model.as_ref().or_else(|| port_model.get(port)) else {
@@ -328,7 +374,7 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
         s.reused_tokens += reused;
         s.generated_tokens += generated;
     }
-    for port in &disabled_ports {
+    for port in disabled_ports {
         if let Some(model) = port_model.get(port)
             && let Some(s) = per_model.get_mut(model)
         {
@@ -337,7 +383,7 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
         }
     }
     // Also surface disabled models that had no complete turns yet.
-    for port in &disabled_ports {
+    for port in disabled_ports {
         if let Some(model) = port_model.get(port) {
             per_model
                 .entry(model.clone())
@@ -359,11 +405,63 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
             .collect(),
         coverage,
     )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn incremental_feeding_equals_one_shot_regardless_of_chunking() {
+        // Efficiency C1 (closed 2026-09-01): the miner is now resumable
+        // so the poller feeds only NEW bytes. The contract: any
+        // chunking — including splits mid-line and mid-token — yields
+        // byte-identical results to parsing the whole log at once.
+        let log = "\
+1.0 I srv load: spawning server instance with name=coder on port 40001\n\
+[40001] 0.05 I slot print_timing: id 0 | task 7 | prompt eval time = 100.0 ms /  1844 tokens ( 1.4 ms per token, 714.45 tokens per second)\n\
+[40001] 0.06 I slot print_timing: id 0 | task 7 |  eval time = 200.0 ms /   221 tokens ( 32.9 ms per token, 30.44 tokens per second)\n\
+[40001] 0.07 I slot release: id 0 | task 7 | stop processing: n_tokens = 2065, truncated = 0\n\
+1.5 I srv load: spawning server instance with name=vision on port 40001\n\
+[40001] 0.03 W srv load_model: cache_reuse is not supported by multimodal, it will be disabled\n\
+[40001] 0.05 I slot print_timing: id 0 | task 7 | prompt eval time = 50.0 ms /   500 tokens ( 1.0 ms per token, 1000.0 tokens per second)\n\
+[40001] 0.06 I slot print_timing: id 0 | task 7 |  eval time = 90.0 ms /   100 tokens ( 0.9 ms per token, 111.0 tokens per second)\n\
+[40001] 0.07 I slot release: id 0 | task 7 | stop processing: n_tokens = 600, truncated = 0\n";
+        let oneshot = cache_effectiveness_with_coverage(log);
+        // Feed in pathological chunk sizes: 1 byte, 7 bytes, 64 bytes.
+        for chunk in [1usize, 7, 64] {
+            let mut m = LogMiner::default();
+            let bytes = log.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                let end = (i + chunk).min(bytes.len());
+                // Split only at char boundaries for the &str API; the
+                // poller guarantees this by cutting at newlines.
+                let mut e = end;
+                while !log.is_char_boundary(e) {
+                    e += 1;
+                }
+                m.feed(&log[i..e]);
+                i = e;
+            }
+            assert_eq!(
+                m.results(),
+                oneshot,
+                "chunk size {chunk} must equal one-shot parsing"
+            );
+        }
+        // And the port-reuse attribution survived: two models, exact
+        // split (the port_gen keying the ledger depends on).
+        let (stats, cov) = oneshot;
+        assert_eq!(cov.finished, 2);
+        assert_eq!(cov.credited, 2);
+        let coder = stats.iter().find(|s| s.model == "coder").unwrap();
+        assert_eq!(coder.generated_tokens, 221);
+        let vision = stats.iter().find(|s| s.model == "vision").unwrap();
+        assert_eq!(vision.generated_tokens, 100);
+        assert!(vision.reuse_disabled);
+    }
 
     #[test]
     fn coverage_distinguishes_no_usage_from_an_unreadable_log() {

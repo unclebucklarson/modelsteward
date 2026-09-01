@@ -131,6 +131,35 @@ fn resolve_write_target(path: &Path) -> std::path::PathBuf {
     cur
 }
 
+/// Rotating backup: `<file>.<tag>.bak.1` (newest) … `.bak.N`. One user
+/// action costs one slot; the oldest falls off the end. Written
+/// 2026-09-01 for review finding H15's open half: pi and Hermes each
+/// had a single fixed slot that the SECOND sync overwrote — two syncs
+/// destroyed the user's pre-modelsteward original, which is exactly
+/// the recovery point backups exist for. The mode of the source is
+/// carried onto the backup so a 0600 file's copies stay 0600.
+pub const BACKUP_DEPTH: u32 = 5;
+
+pub fn backup_rotated(path: &Path, tag: &str) -> Result<()> {
+    let slot = |n: u32| {
+        let name = format!(
+            "{}.{tag}.bak.{n}",
+            path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()
+        );
+        path.with_file_name(name)
+    };
+    for n in (1..BACKUP_DEPTH).rev() {
+        let _ = std::fs::rename(slot(n), slot(n + 1));
+    }
+    std::fs::copy(path, slot(1))
+        .with_context(|| format!("backing up {}", path.display()))?;
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::metadata(path) {
+        let _ = std::fs::set_permissions(slot(1), meta.permissions());
+    }
+    Ok(())
+}
+
 /// What a read of a state file found.
 #[derive(Debug, PartialEq)]
 pub enum Loaded<T> {
