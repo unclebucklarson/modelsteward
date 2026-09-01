@@ -562,6 +562,17 @@ impl App {
             // A release the auto-build wants but couldn't start because the
             // machine was busy — retried each tick until quiet.
             let mut pending_autobuild: Option<u64> = None;
+            // Low-impact mode (Scott's report, 2026-09-01: inference in
+            // OpenCode was measurably slower with the GUI open, faster
+            // the moment it closed): while a turn is IN FLIGHT the
+            // poller must not touch the GPU. nvidia-smi is an NVML
+            // query that serializes against a busy CUDA context, and
+            // every repaint composites on the same card that is
+            // generating tokens. The instrument must not perturb the
+            // thing it measures.
+            let mut turn_in_flight = false;
+            let mut last_state_sent: Option<router::RouterState> = None;
+            let mut last_ollama_sent: Option<ollama::OllamaStatus> = None;
             // When the router last showed generation activity. Starts at
             // \"now\": a fresh app assumes recent activity until proven quiet.
             let mut last_activity_epoch: u64 = advisor::now_epoch();
@@ -582,11 +593,27 @@ impl App {
                     &router::state_dir(),
                     rcfg.as_ref().expect("set above"),
                 );
-                if tx.send(Msg::RouterState(state.clone())).is_err() {
-                    return;
+                // Send only CHANGES: the unconditional send made the GUI
+                // rebuild every row every 2s regardless (efficiency
+                // finding M1) — and each message forces a repaint, i.e.
+                // a GPU frame, during inference.
+                if last_state_sent.as_ref() != Some(&state) {
+                    if tx.send(Msg::RouterState(state.clone())).is_err() {
+                        return;
+                    }
+                    last_state_sent = Some(state.clone());
                 }
-                let _ = tx.send(Msg::Ollama(ollama::probe(cfg.ollama_port)));
-                let _ = tx.send(Msg::Vram(discover::nvidia_vram_mib()));
+                let peer = ollama::probe(cfg.ollama_port);
+                if last_ollama_sent.as_ref() != Some(&peer) {
+                    let _ = tx.send(Msg::Ollama(peer.clone()));
+                    last_ollama_sent = Some(peer);
+                }
+                // VRAM costs an nvidia-smi spawn — a driver query that
+                // contends with a busy CUDA context. Never during a
+                // turn; the meter resumes (and catches up) on quiet.
+                if !turn_in_flight {
+                    let _ = tx.send(Msg::Vram(discover::nvidia_vram_mib()));
+                }
                 // Reload measurements when the file changes on disk (e.g. a
                 // CLI calibration ran) — the OpenCode/Library tabs must
                 // never show stale numbers.
@@ -647,15 +674,20 @@ impl App {
                         // A completed turn means quiet again — no claim.
                         evidence::Activity::TurnFinished { .. } => None,
                     });
+                    turn_in_flight = text.is_some();
                     let _ = tx.send(Msg::Activity(text));
                 } else {
                     quiet_ticks += 1;
                     if quiet_ticks == 3 {
                         // ~6s of silence: whatever we claimed is stale.
+                        turn_in_flight = false;
                         let _ = tx.send(Msg::Activity(None));
                     }
                 }
-                if log_len != last_log_len && last_mine.elapsed().as_secs() >= 30 {
+                if !turn_in_flight
+                    && log_len != last_log_len
+                    && last_mine.elapsed().as_secs() >= 30
+                {
                     last_log_len = log_len;
                     last_mine = std::time::Instant::now();
                     if let Ok(text) = std::fs::read_to_string(&log_path) {
@@ -5790,11 +5822,19 @@ impl App {
                 // old "{free} / {total} MiB free" read as a used/total
                 // meter and looked wildly wrong (user report 2026-08-30;
                 // the NUMBER was correct, the label lied).
+                let paused = self.live_activity.is_some();
                 ui.label(format!(
-                    "VRAM: {} / {total} MiB used · {free} free",
-                    total.saturating_sub(free)
+                    "VRAM: {} / {total} MiB used · {free} free{}",
+                    total.saturating_sub(free),
+                    if paused { " ⏸" } else { "" }
                 ))
-                .on_hover_text("Live from nvidia-smi, whole card (all processes), ~2s refresh.");
+                .on_hover_text(if paused {
+                    "Paused while a generation is in flight — polling the GPU driver \
+                     during inference slows YOUR tokens (measured 2026-09-01). \
+                     Resumes when the turn ends."
+                } else {
+                    "Live from nvidia-smi, whole card (all processes), ~2s refresh."
+                });
                 ui.separator();
             }
             if let Some(scan) = &self.scan {
