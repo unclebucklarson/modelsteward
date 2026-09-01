@@ -593,9 +593,18 @@ impl Measurement {
     /// A success without a tool-call verdict counts as stale (pre-tool-probe
     /// data) so the next calibration upgrades it.
     pub fn is_fresh(&self, current_args_fp: Option<&str>, env_fp: &str) -> bool {
+        // A failure diagnosed as TRANSIENT (the server was busy) is
+        // never fresh: its own advice says "re-measure when idle", and
+        // treating it as fresh made calibrate refuse to follow that
+        // advice (live catch 2026-09-01). Permanent failures stay
+        // fresh so a broken conversion isn't re-loaded every run.
+        let transient = self.error.as_deref().is_some_and(|e| {
+            crate::core::diagnose::classify(e) == crate::core::diagnose::Cause::ServerBusy
+        });
         let complete =
             self.error.is_some() || (self.n_ctx.is_some() && self.tool_call.is_some());
-        complete
+        !transient
+            && complete
             && self.env_fp.as_deref() == Some(env_fp)
             && self.args_fp.as_deref() == current_args_fp
             && current_args_fp.is_some()
@@ -1136,6 +1145,40 @@ mod tests_flags {
 mod tests {
     use super::*;
     use crate::core::library::Source;
+
+    #[test]
+    fn transient_failures_are_never_fresh_so_remeasure_actually_remeasures() {
+        // Live catch 2026-09-01 (Scott): a model failed with the
+        // ServerBusy signature, its advice said "re-measure when idle",
+        // and calibrate then skipped it as "fresh (known load failure)"
+        // — the app refusing to follow its own instruction. A stored
+        // failure DOES count as fresh when it is permanent (an
+        // Ollama-only conversion must not re-load 20 GB every run), but
+        // a failure diagnosed as transient must always be retried.
+        let busy = Measurement {
+            // A REAL stored shape: the router 500s a load while another
+            // session holds the slot; classify() maps it to ServerBusy.
+            error: Some("load failed: /models/load: status code 500".into()),
+            args_fp: Some("aaaa".into()),
+            env_fp: Some("eeee".into()),
+            ..Default::default()
+        };
+        assert!(
+            !busy.is_fresh(Some("aaaa"), "eeee"),
+            "a ServerBusy failure must be stale so the promised re-measure happens"
+        );
+        // A permanent failure under the same fingerprints stays fresh.
+        let broken = Measurement {
+            error: Some("unknown model architecture 'qwen3.5-ollama'".into()),
+            args_fp: Some("aaaa".into()),
+            env_fp: Some("eeee".into()),
+            ..Default::default()
+        };
+        assert!(
+            broken.is_fresh(Some("aaaa"), "eeee"),
+            "a permanent failure is not re-tried on every calibrate"
+        );
+    }
 
     #[test]
     fn a_truncated_measurements_file_is_rescued_not_read_as_empty() {
