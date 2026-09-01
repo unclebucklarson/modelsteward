@@ -2293,6 +2293,15 @@ impl App {
         };
         if disabled {
             ui.weak("disabled — not measured, benched, offered, or raced (Enable below resumes)");
+            if r.server_status.as_deref() == Some("loaded") {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    "…but it is still LOADED and holding VRAM — it was resident when \
+                     you disabled it. Unload below to free the card; nothing is \
+                     unloaded automatically, because that would interrupt whatever \
+                     is using it.",
+                );
+            }
         } else {
             ui.colored_label(color, &r.advice);
         }
@@ -2301,16 +2310,22 @@ impl App {
             // In-OpenCode toggle — the whole make-it-usable flow.
             let mut checked = r.in_opencode;
             let can_act = if r.in_opencode {
+                // Removing is always allowed — including for a disabled
+                // model, since that is how you clean one up.
                 r.router_id.is_some()
             } else {
-                router_up && r.router_id.is_some() && r.server_status.is_some()
+                // Adding a disabled model would advertise something the
+                // router no longer offers.
+                !disabled && router_up && r.router_id.is_some() && r.server_status.is_some()
             };
             let cb = ui
                 .add_enabled(can_act, egui::Checkbox::new(&mut checked, "In OpenCode"))
-                .on_disabled_hover_text(
+                .on_disabled_hover_text(if disabled {
+                    "this model is disabled — Enable it below to offer it again"
+                } else {
                     "needs the router up and this model servable — start the router \
-                     / check the Server column",
-                )
+                     / check the Server column"
+                })
                 .on_hover_text(
                     "Checked = in opencode.json. Checking an unmeasured model loads \
                      it briefly to measure the real context first.",
@@ -2331,9 +2346,17 @@ impl App {
                     }
                 }
                 (Some(id), Some("unloaded")) => {
+                    // Loading is the app ACTING on a model, so a disabled
+                    // one is refused (Scott, 2026-08-31). It would fail
+                    // anyway now that disabled models leave the preset —
+                    // better an honest reason than a confusing error.
                     if ui
-                        .add_enabled(router_up, egui::Button::new("Load"))
-                        .on_disabled_hover_text("router is down — Start Router first (top of the tab)")
+                        .add_enabled(router_up && !disabled, egui::Button::new("Load"))
+                        .on_disabled_hover_text(if disabled {
+                            "this model is disabled — Enable it below first"
+                        } else {
+                            "router is down — Start Router first (top of the tab)"
+                        })
                         .on_hover_text(
                             "Loads now, measures the real context, and adds it to \
                              OpenCode automatically.",
