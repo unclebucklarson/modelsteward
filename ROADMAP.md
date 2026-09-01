@@ -283,12 +283,40 @@ after it. All four validate code that is already live.
 
 ### Phase 1 — Act on the review findings (blocks everything structural)
 
-- **Triage `code-review/`** (correctness, robustness, structure,
-  efficiency — written 2026-08-31 by four independent reviewers).
-  CRITICAL and HIGH first; the rest becomes ordinary backlog.
-- Rationale for going first: every feature below is built on this
-  code, and reliability/stability is the stated priority. Fixing a
-  foundation after stacking features on it costs multiples.
+- ✔ MOSTLY DONE across 2026-08-31/09-01: every CRITICAL data-loss
+  finding fixed (v0.6.75), then a second review cycle took apart the
+  fixes themselves — six overstated claims completed at their remaining
+  doors, one regression (strict gate vs legal JSONC) killed, ledger
+  corrected. STILL OPEN from the ledger: H12 (quality scores HTTP
+  failure as model failure), H13 (truncated generations look
+  plausible), H14 (gguf unbounded skip), H15-half (pi/hermes single
+  backup slot), H8/H9 (need Phase-2 extraction), and the EFFICIENCY doc
+  (C1 unbounded log re-read, C2 unpruned ledger, H2-H5 per-frame
+  caching; M1 closed 2026-09-01 by low-impact mode).
+
+### Phase 1.5 — Second-machine validation (NEW 2026-09-01: Scott has a
+Dell G15, RTX 3070 Ti mobile, 8 GB VRAM)
+
+The single highest-leverage Scott-action on the board, because one
+afternoon compounds four queued items on genuinely foreign hardware:
+
+1. **Install from the real artifacts** (`cargo install modelsteward`
+   or the release tarball) — first-ever validation of the published
+   install path on a machine that isn't the dev box.
+2. **Walk docs/GUIDE.md end to end there**, noting EVERY place the app
+   left you unsure what to do next. That walk simultaneously: (a) runs
+   the release checklist's fresh-eyes pass on real user-#2 hardware,
+   (b) validates the guide itself, (c) produces the pre-flight rule
+   list (Phase 2 item, currently BLOCKED on exactly this), and
+   (d) exercises the whole 8 GB story — model advice, --fit, and the
+   Hermes 64k floor behave very differently when most of the fleet
+   doesn't fit. 8-12 GB is what most users have; this app has only
+   ever been measured on 24 GB.
+3. Report back the rough-edge list + the G15's measured numbers (they
+   become the second row of every "measured on this machine" claim,
+   and showcase material).
+
+NOT unblocked by the laptop: multi-GPU work (it is still one GPU).
 
 ### Phase 2 — Foundations other work needs (do before the features that use them)
 
