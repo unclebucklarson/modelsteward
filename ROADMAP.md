@@ -268,6 +268,11 @@ built twice. Everything below is open; finished work moved to the
 dated sections further down. Phases are ordered; items inside a phase
 are not.
 
+> Scott's step-by-step instructions for Phases 0 and 1.5 — with what
+> to record and how — live in
+> [docs/qa/manual_tasks_qa_etc.md](docs/qa/manual_tasks_qa_etc.md)
+> (written 2026-09-02 for a multi-day handoff).
+
 ### Phase 0 — Validate what just shipped (Scott, cheap, do first)
 
 These are minutes of clicking, and a failure here reorders everything
