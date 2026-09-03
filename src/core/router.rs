@@ -570,7 +570,10 @@ pub fn stop(dir: &Path, preset: &Path) -> Result<()> {
 /// failure (`error`), stamped with fingerprints so staleness is detectable.
 /// Old measurement files (bare `{"n_ctx": N}`) still parse; their missing
 /// fingerprints read as "stale", which re-measures them — the right thing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// Default is DERIVED, not hand-written: every field is an Option, and a
+// hand-maintained impl is pure risk — a new measured field silently
+// missing from it (review finding M4, 2026-08-31).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Measurement {
     /// The context `--fit` settled on. `None` = the load failed.
@@ -617,28 +620,6 @@ pub struct Measurement {
     /// Multi-hop agent-loop completion rate (quality probe): a model
     /// can ace single tool calls yet quit mid-loop — the MoE lesson.
     pub loop_reliability: Option<f64>,
-}
-
-impl Default for Measurement {
-    fn default() -> Self {
-        Self {
-            n_ctx: None,
-            tool_call: None,
-            error: None,
-            args_fp: None,
-            env_fp: None,
-            pp_tps: None,
-            tg_tps: None,
-            tg_deep_tps: None,
-            tg_depth: None,
-            free_vram_mib: None,
-            gpu_tenant: None,
-            bench_build: None,
-            eval_score: None,
-            tool_reliability: None,
-            loop_reliability: None,
-        }
-    }
 }
 
 impl Measurement {
@@ -868,21 +849,41 @@ fn urlencode(s: &str) -> String {
 /// build/devices) are skipped — including remembered *failures*, so a model
 /// this build can't load doesn't re-fail on every run. `force` re-measures
 /// everything. `progress` narrates each decision.
+/// Everything a calibration run needs to know, bundled so the argument
+/// list stays readable as conditions accumulate.
+pub struct CalibrateJob<'a> {
+    pub dir: &'a Path,
+    pub port: u16,
+    /// Environment fingerprint (build + devices) stamped on results.
+    pub env_fp: &'a str,
+    pub build: Option<u64>,
+    /// Re-measure everything, ignoring freshness.
+    pub force: bool,
+    /// Embedding models: measured, but never tool-probed.
+    pub no_tool_probe: &'a std::collections::HashSet<String>,
+    /// Disabled models: not measured at all.
+    pub disabled: &'a std::collections::HashSet<String>,
+    /// Free VRAM + any other GPU tenant, sampled by the CALLER (nvidia-smi
+    /// is worker territory). Recorded on every measurement: `--fit` sizes
+    /// against free memory, so this is the condition that explains why a
+    /// settled context moves between runs.
+    pub conditions: &'a dyn Fn() -> (Option<u64>, Option<String>),
+}
+
 pub fn calibrate(
-    dir: &Path,
-    port: u16,
-    env_fp: &str,
-    build: Option<u64>,
-    force: bool,
-    no_tool_probe: &std::collections::HashSet<String>,
-    disabled: &std::collections::HashSet<String>,
-    // Free VRAM + any other GPU tenant, sampled by the caller (nvidia-smi
-    // is worker territory). Recorded on every measurement: `--fit` sizes
-    // against free memory, so this is the condition that explains why a
-    // settled context moves between runs.
-    conditions: &dyn Fn() -> (Option<u64>, Option<String>),
+    job: &CalibrateJob<'_>,
     progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
+    let CalibrateJob {
+        dir,
+        port,
+        env_fp,
+        build,
+        force,
+        no_tool_probe,
+        disabled,
+        conditions,
+    } = *job;
     // Preset models AND the router's own HF cache downloads ("cache" source
     // — e.g. models pulled by `llama-server -hf` or vendor tools). Both are
     // servable through the router, so both deserve measurement; anything

@@ -5971,14 +5971,16 @@ fn run_calibration(
     let off = system::disabled_ids(cfg, &report.models);
     let progress_tx = tx.clone();
     router::calibrate(
-        &router::state_dir(),
-        cfg.port,
-        &env_fp,
-        build,
-        force,
-        &embed,
-        &off,
-        &|| system::gpu_conditions(cfg),
+        &router::CalibrateJob {
+            dir: &router::state_dir(),
+            port: cfg.port,
+            env_fp: &env_fp,
+            build,
+            force,
+            no_tool_probe: &embed,
+            disabled: &off,
+            conditions: &|| system::gpu_conditions(cfg),
+        },
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));
         },
