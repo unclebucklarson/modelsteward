@@ -40,6 +40,28 @@ Run against a scratch config so first-run paths get exercised:
 - [ ] `--calibrate` with a known-bad model exits 3 and prints the
       diagnosis line.
 
+## Measurement honesty (any release that touches measuring)
+
+Added 2026-09-02 after the modellab handoff found a headline number
+overstated by 24%. These are cheap to check and expensive to get wrong,
+because a bad number is written into `measurements.json` and then into
+the user's agent configs and the shareable report.
+
+- [ ] **Benchmarks state their conditions.** Any tokens/sec the app
+      shows or exports says whether it is empty-cache or at depth, and
+      which. No bare "38 t/s".
+- [ ] **Preconditions are enforced, not documented.** Before anything
+      writes a measurement: our router's models unloaded, no Ollama
+      residency, no managed build running. Verify by starting a bench
+      with `ollama run <model>` resident — it must REFUSE and name the
+      tenant, not produce a number.
+- [ ] **Projections are labelled as projections.** `settled ctx` is
+      llama.cpp's `--fit` output, not a measured ceiling; the report and
+      any user-facing text must not call it "measured … not estimated".
+- [ ] **`--report` renders without ragged rows** and its preamble
+      matches what the columns actually contain (`cargo test report::`
+      pins both, but read one real report before a tag).
+
 ## Pre-tag review (larger releases)
 
 - [ ] A fresh adversarial session reviews the diff since the last tag

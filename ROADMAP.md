@@ -908,6 +908,62 @@ Boundary: **warden owns storage truth; this app owns serving + OpenCode.**
 Consequence here: roadmap item 7 (HF downloads) moves to modelwarden —
 acquisition is storage-side.
 
+## Sibling project: modellab (`~/src2/modellab`)
+
+A standalone measurement lab: it puts a model through its paces under a
+**bare `llama-server` it owns** and records what it does — computed fit
+from the GGUF header, then settled context, throughput, quality, energy.
+It promises experimentation, never optimization: named profiles with
+visible trade-offs, no verdict, no Apply.
+
+**Boundary — three tools, three truths:** warden owns *storage* truth,
+this app owns *serving* truth (router, presets, agents, opencode.json),
+modellab owns *measurement in isolation*. File contracts only; no tool
+touches another's config. **Verdicts stay here** — modellab publishes
+the measured matrix, deciding and applying is ours.
+
+**Two answers to two questions, and both are right.** Our in-app Lab
+measures under the router with the user's presets; modellab measures a
+bare server in isolation. The numbers differ for legitimate reasons and
+every modellab result records its conditions. Say this before users file
+"the numbers disagree" bugs.
+
+Channel: modellab appends to its own `docs/handoff-shepard.md`; we read
+it **read-only** and record adoptions here. We never edit its repo.
+(It calls this app "ModelShepard"; on disk we are `modelsteward`.)
+
+### Adopted from the 2026-09-02 handoff (see commit fc964b8)
+
+- ✔ **llama-bench now passes `-d`** at a fixed depth rung, so generation
+  is reported at a realistic KV occupancy as well as empty. modellab
+  measured 38.25 t/s empty vs 28.99 at our own settled context on a 27B
+  — we were overstating by 24%. `tg_tps` keeps its empty-cache meaning
+  (stored baselines and the rebuild scorecard are denominated in it);
+  `tg_deep_tps` + `tg_depth` are the honest headline.
+- ✔ **Free VRAM and any other GPU tenant are recorded** at calibration,
+  and `bench.rs` now enforces the no-other-tenant precondition its own
+  header always demanded. This is the mechanism behind the same model
+  settling between 105,472 and 118,016 tokens across 28 calibrations.
+- ✔ **The findings report stopped overclaiming**: settled ctx is named
+  as llama.cpp's `--fit` projection, and the two generation figures are
+  separate columns.
+- **Not adopted (product decision, parked):** a "maximum context" mode
+  that probes with `-ngl` explicit to bypass `--fit`'s 1024 MiB margin.
+  modellab measured 151,808 tokens loading and generating where we
+  report 110,080 — roughly 40k tokens left on the table. The margin is
+  *correct for serving*; offering an explicit "run at the edge" mode is
+  a feature with real failure modes (OOM mid-session), and modellab will
+  publish the ceiling in its results file either way. Decide with Scott.
+- **Parked, cheap and useful:** `llama-fit-params --fit-print` (ships in
+  b10672) projects the context a `--fit` run would choose **without
+  loading the model and with the GPU occupied** — the advice column
+  could quote llama.cpp's own number instead of a file-size heuristic.
+  Worker territory (it initializes CUDA).
+- **Parked:** consume modellab's results file once its schema v1 freezes
+  (its M5); and the option, agreed in principle, of depending on the
+  `modellab` crate for measurement code rather than keeping three
+  drifting copies of `bench`/`energy`/`quality` across the family.
+
 ## Parked / ideas
 
 - ✔ SHIPPED 2026-08-27/28 (see M8 #5 + Managed llama.cpp in the Build

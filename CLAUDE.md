@@ -106,6 +106,18 @@ Non-obvious constraints that shape the code:
 - **Selection vs production**: Settings is the ONE surface that selects
   the serving binary; the Build Advisor makes builds and never selects.
   Managed builds/archives serve only when explicitly chosen.
+- **Two speed numbers, and they mean different things.** `tg_tps` is
+  generation from an EMPTY KV cache (llama-bench's default); `tg_deep_tps`
+  is generation with `tg_depth` tokens resident, which is what a user
+  gets mid-session and runs ~20-30% lower. Never present the empty-cache
+  figure as "the speed". Likewise `n_ctx` is llama.cpp's `--fit`
+  *projection* against free VRAM less a 1024 MiB margin — sound, but not
+  the largest context the card can serve, and it moves with whatever
+  else holds the GPU (hence `free_vram_mib` / `gpu_tenant`).
+- **A contended measurement is a wrong measurement, not a slow one.**
+  Anything that writes to `measurements.json` must establish its
+  preconditions first (router idle, no Ollama residency) and refuse
+  rather than record contention.
 - **Log grammars drift** — evidence.rs speaks both the pre- and
   post-b10672 dialects; when the meter reads zero while tokens flow,
   suspect a new dialect before suspecting the code.

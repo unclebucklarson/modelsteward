@@ -159,6 +159,31 @@ Nothing is too small: "I didn't know which tab to go to" is a finding.
 
 ---
 
+## Task 2.5 — Re-bench the fleet once (NEW 2026-09-02, desktop, ~30-45 min unattended)
+
+Why: benchmarks now also measure generation **at a realistic KV depth**,
+not just from an empty cache. Every stored baseline predates that, so
+every Speed number in your Library is currently the optimistic
+empty-cache figure. One re-bench replaces them with the honest pair.
+
+**Preconditions the app now enforces** (it will refuse and tell you):
+nothing else may hold the GPU. So: stop OpenCode, and if Ollama has a
+model resident run `ollama stop <model>` (or wait out its keep-alive).
+
+1. `modelsteward --bench force 2>&1 | tee docs/qa/rebench.log`
+   (or Server → Bench in the GUI). It takes longer than before —
+   the deep pass has to prefill 32k tokens per model.
+2. **Record**: the log. I specifically want, per model, the pair
+   `tg X t/s (empty cache), tg Y t/s at N depth`. The gap between them
+   is the thing modellab measured at 24% on the 27B; I want to know
+   whether that holds across quant sizes and MoE models on your card.
+3. **Also record**: did it refuse when something held the GPU? Was the
+   message clear enough to act on?
+
+If the deep pass makes benching unbearably slow on the G15's 8 GB
+(likely — 32k of prefill on a mobile 3070 Ti is not fast), say so; the
+rung ladder can be made configurable.
+
 ## Task 3 — Finish the Minecraft showcase
 
 `docs/showcase/minecraft-clone.md` is live with day-one receipts and
