@@ -390,9 +390,19 @@ modellab's handoff plus an external research survey: benchmarking
 generation at a realistic KV depth, recording free VRAM and GPU tenancy
 as measurement conditions, enforcing the no-other-tenant precondition
 before benching, equalizing page-cache state in load trials, and
-removing the context-plus-speed conflation from both the findings report
-and the README. Documented in `code-review/` and
+removing the context-plus-speed conflation from the findings report, the
+README and the project brief. Documented in `code-review/` and
 `docs/research/local-llm-optimization.md`.
+
+Also 2026-09-03: reconciled the practitioner guide Scott had dropped in
+`docs/human_research/` (it had been swept into a commit unread). It
+confirms six of our decisions independently, corrected a false claim in
+our own `moe` menu comment (`--threads` is count, not affinity), and
+opened the one category we had no coverage of — **host** conditions
+(RAM speed, governor/EPP, core placement, swap) as measurement
+preconditions, with measured effects of 20–30% and worse. This
+desktop's state is recorded in §8 of the research doc; the backlog is
+in "From the supplied practitioner guide" below.
 
 ### Older status (2026-08-29, 165 tests — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 
@@ -1028,6 +1038,90 @@ they stop being unexamined instincts). Open items:
 - **Never re-enable context shift** to paper over context exhaustion —
   ggerganov disabled it by default because it corrupts chat-template
   structure. For agents, failing loudly is correct.
+
+## From the supplied practitioner guide (`docs/human_research/`, reconciled 2026-09-03)
+
+Scott dropped a 1,193-line guide (carteakey.dev / l3ms, RTX 4070 +
+i5-12600K, self-graded *Tested here* / *Upstream behavior* / *Needs
+testing*) into the repo; it was swept into a commit unread and is now
+reconciled in §7 of the research doc, with this desktop measured
+against its checklist in §8. It confirmed six of our decisions from an
+independent direction and opened one whole category we had missed.
+
+- ⭐ **Record HOST conditions, not just GPU conditions** (§7.2 — the
+  headline item). `system::gpu_conditions` exists because an unrecorded
+  *GPU* condition was reordering results. The same argument one layer
+  down, with that guide's measured effects: RAM below rated XMP speed
+  (**MoE generation at roughly one-third**), E-cores inside the thread
+  set (**20–30%**), and `power-profiles-daemon` degrading HWP (**20–30%
+  between boots — while every sysfs value still reads `performance`**,
+  which is the dangerous shape: a confound that survives the obvious
+  check). Proposal: extend the measurement-conditions record with
+  governor, EPP, configured vs rated RAM speed, P/E topology, and
+  swap-activity delta; gate benching the way GPU tenancy now gates it.
+  Cheap — all sysfs and one `dmidecode`.
+- **`taskset` / `sched_setaffinity` for P-core pinning** (§7.3).
+  `--threads` sets thread COUNT; the kernel still places those threads
+  on any core, E-cores included. Our `moe` menu's `cpu-moe-t8` /
+  `cpu-moe-t24` pair therefore races counts, not placement — the
+  comment claiming otherwise was corrected 2026-09-03. Real pinning is
+  a new knob, and on this desktop (i9-12900K: P = cpu0–15, E =
+  cpu16–23) it is worth a menu. **Do not hardcode a core range** — the
+  guide's `0-11` is its 12600K; derive P-cores from
+  `cpufreq/cpuinfo_max_freq` tiers (`cpu_capacity` reads a uniform 1024
+  on this kernel and is useless for it).
+- **The `kv` menu's goal is single-axis where the mechanism has two**
+  (§7.3). `Goal::Context` asks "did the settled context grow?" — right
+  on a VRAM-starved model. But the guide's measured payoff is that
+  freed KV VRAM lets fit keep **1–2 more GPU layers**, i.e. it buys
+  **generation speed**, confirmed on Qwen3-Coder-Next. On a model
+  already at its full trained context (Scott's 80B settles at all
+  262,144) extra VRAM cannot buy context, so a real TG win scores as
+  **zero improvement**. Either the goal becomes "context OR layers", or
+  the menu reports both axes.
+- **`--mlock` is filed under the wrong goal** (§7.3). We only score it
+  in the `load` menu against `Goal::LoadTime`. Its documented purpose is
+  preventing a mid-session swap event from stalling generation — this
+  desktop swaps 3.6 GiB with 23 GiB free (§8). Judged on load time it
+  can lose while being the right setting. Needs a stability goal, or at
+  minimum advice text that says what it is actually for.
+- **Guard the `spec` × `kv` interaction** (§7.3). `-ctk/-ctv` set the
+  TARGET cache, `-ctkd/-ctvd` the DRAFT's. Quantizing the *target* to
+  `q8_0` drove Gemma 4 MTP acceptance *"close to zero"*; `f16` kept it
+  above 70% and won overall. Our two menus race and apply
+  independently, so a `kv` winner applied after a `spec` winner could
+  silently destroy it. At minimum: ordering advice and a re-measure
+  prompt; better, a guard that re-checks acceptance after a KV change.
+- **`--fit-target` is a testable question, not a settled 1024** (§7.4).
+  That guide's tested values: 512 MiB text on 12 GB, 512–768 on 24 GB,
+  2048 for vision. An independent outside data point for the
+  max-context question modellab raised (151,808 vs our 110,080) — and
+  it supplies the mechanism our margin defends: *"CUDA's VMM pool grows
+  as context fills. A 128 MiB target survived short benches and later
+  failed."* The failure mode is **mid-session OOM, not load-time OOM**,
+  so any test of a smaller margin must be a long session. This is the
+  missing half of the max-context product decision.
+- **Surface QAT builds in the Library** (§7.4). The largest speed
+  result in that document by a wide margin: Gemma 4 26B 38.5 →
+  **100.6 t/s** (2.6×) from quantization-aware training plus MTP
+  speculation, partly because QAT dropped the file 18 GB → 14.2 GB so
+  the layers fit at all. That is model-selection advice, which is our
+  territory — "a QAT build of this model exists" is a row hint, and it
+  pairs with modelwarden's download ownership.
+- **Reroute the display, don't just prompt for persistence** (§7.4,
+  resolves §6.1 constructively). Display-on-the-NVIDIA-card is the same
+  root fact that makes persistence mode a near no-op AND costs
+  500–1000 MB of VRAM to desktop composition. One honest prompt
+  replaces a misleading one: route the display to the motherboard
+  output and you free VRAM *and* make persistence mode mean something.
+- **Audit the Build Advisor's flags** (§7.4) against `GGML_LTO=ON`,
+  `GGML_CUDA_FA_ALL_QUANTS=ON`, and `CMAKE_CUDA_ARCHITECTURES` matched
+  to the card (86 for Scott's 3090 Ti) rather than a default fan-out.
+  Also **do not** add `GGML_CUDA_FORCE_CUBLAS`: tested and closed
+  upstream-adjacent — ~45 t/s PP regression, no TG gain, because GGML's
+  MMQ kernels are tuned for consumer decode batch sizes.
+- **`llama-sweep-bench`** exists as an upstream sweep binary; we
+  hand-roll sweeps. Worth an evaluation before building more of ours.
 
 ## Parked / ideas
 

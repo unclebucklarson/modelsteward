@@ -55,6 +55,15 @@ the user's agent configs and the shareable report.
       residency, no managed build running. Verify by starting a bench
       with `ollama run <model>` resident — it must REFUSE and name the
       tenant, not produce a number.
+- [ ] **Host conditions unchanged since the last baseline** (added
+      2026-09-03 from the practitioner guide, `docs/research/…` §7.2).
+      Not yet enforced in code, so check by hand before a release whose
+      numbers matter: RAM at rated XMP speed (`sudo dmidecode -t memory
+      | grep Configured` — below rated took that author's MoE
+      generation to a third), CPU governor and EPP, and no swap growth
+      during the run (`grep pswpout /proc/vmstat` before and after).
+      A number taken under different host conditions is not comparable
+      to a stored one, and none of these appear in the output.
 - [ ] **Projections are labelled as projections.** `settled ctx` is
       llama.cpp's `--fit` output, not a measured ceiling; the report and
       any user-facing text must not call it "measured … not estimated".

@@ -187,8 +187,12 @@ pub fn moe_variants() -> Vec<Variant> {
     };
     vec![
         mk("cpu-moe", vec![("cpu-moe", "true")]),
-        // P-cores only vs all threads: E-core scheduling can hurt or help
-        // expert matmuls — measured, not assumed (i9-12900K: 8P+8E/24T).
+        // Thread COUNT, not placement: --threads sets how many threads
+        // llama.cpp spawns, and the kernel still schedules them onto any
+        // core, E-cores included. So this races "fewer threads" against
+        // "one per logical CPU" (i9-12900K: 8P+8E, 24 threads) — it does
+        // NOT isolate P-cores. Pinning needs taskset/sched_setaffinity,
+        // which we do not do yet; see ROADMAP (host conditions).
         mk("cpu-moe-t8", vec![("cpu-moe", "true"), ("threads", "8")]),
         mk("cpu-moe-t24", vec![("cpu-moe", "true"), ("threads", "24")]),
         mk("ncpu-moe-40", vec![("n-cpu-moe", "40")]),

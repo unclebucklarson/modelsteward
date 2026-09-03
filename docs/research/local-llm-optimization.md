@@ -10,6 +10,14 @@ view we built the tool without. It is not a style guide: several
 popular tips turn out to be unsupported, and those are called out as
 loudly as the good ones.)*
 
+**Two sources, one document.** §§1–6 are the web survey. §7 reconciles
+the practitioner guide Scott supplied himself
+([`docs/human_research/`](../human_research/)) — better organised than
+this one, and the source of an entire category we had missed: the
+**host** layer (RAM speed, CPU governor, core placement, swap) as a
+measurement precondition. §8 records where this desktop actually sits
+against that checklist. Read §9 first if you want only the actions.
+
 ## How to read this
 
 Every claim carries a source grade. This matters more than usual here,
@@ -24,6 +32,7 @@ measured:
 | **[VENDOR]** | Self-reported by the party publishing the artifact |
 | **[FOLKLORE]** | Widely repeated, no traceable study |
 | **[OURS]** | Measured on this machine by modelsteward or modellab |
+| **[FIELD]** | A practitioner's own measurements on one named machine — real numbers, one hardware sample (see §7) |
 
 **Standing warning:** several llama.cpp defaults moved within the last
 12 months (context shift, `-sps`, `--spec-draft-n-max`,
@@ -544,12 +553,219 @@ measured on the G15:
 
 ---
 
-## 7. What this changes for us — summary
+## 7. The source Scott supplied, reconciled
+
+Found in the repo on 2026-09-03 at
+[`docs/human_research/`](../human_research/): a 1,193-line guide,
+*Local LLM Inference Optimization — The Complete Guide*, beside a
+`urls_to_look_at.txt` naming its origin
+([carteakey.dev](https://carteakey.dev/blog/local-inference/local-llm-optimization/),
+backed by the author's [l3ms](https://github.com/carteakey/l3ms) homelab
+toolkit). It had been swept into a commit unread; this section is the
+reconciliation it should have had. **It is the better-organised document
+of the two** — symptom-first, and it grades its own claims *Tested here*
+/ *Upstream behavior* / *Needs testing*, which is why it can be used at
+all. Its numbers come from one node: RTX 4070 12 GB, i5-12600K,
+DDR5-6000, CachyOS, CUDA.
+
+### 7.1 Where it independently confirms this survey
+
+Two documents compiled from different sources agreeing is worth more
+than either alone. It reaches the same conclusions on:
+
+- **KV precision** — `q8_0` as the text baseline, `f16` when validating
+  a model, `q4_0` "only after an acceptance or quality check." Arrived
+  at from VRAM budgeting rather than §1.1's KL-divergence route.
+- **Bench at the context you serve.** *"At short bench contexts (512
+  tokens), the KV cache is tiny and this effect is near-zero. Always
+  test at your real serving context length."* — independent arrival at
+  modellab's depth finding (§3), from the placement side.
+- **`--poll`: do not tune it.** *"Confirmed across multiple sweeps —
+  within noise at all poll levels."* We don't.
+- **`--numa`: skip on single-socket.** We don't touch it.
+- **`--flash-attn auto`, not forced** (§2). Same reading of upstream.
+- **`--parallel 1` for a single user** — each slot carries its own KV
+  cache; on gpt-oss-120b, 4→1 freed ~540 MiB, one more GPU layer,
+  +1 t/s. Our `--models-max 1` reasoning, measured.
+- **Fit is a projection, `llama-fit-params` makes it reproducible**
+  (§4.3) — and it names the binary we hadn't got round to quoting.
+- **`GGML_CUDA_FORCE_CUBLAS`: tested and closed** — ~45 t/s PP
+  *regression* on mxfp4/Q4, no TG gain, because GGML's MMQ kernels are
+  tuned for consumer decode batch sizes (1–16) and cuBLAS for
+  datacenter batches. Do not add it as a build option.
+
+### 7.2 What it adds that this survey missed — the host layer
+
+This is the real contribution, and it is a whole category we had no
+coverage of. We built `system::gpu_conditions` because modellab showed
+an unrecorded *GPU* condition was moving results. The same argument
+applies one layer down, and this document has the measurements:
+
+| **[FIELD]** finding | Effect on that node | We record it? |
+|---|---|---|
+| RAM not at rated XMP/EXPO speed | MoE TG at **roughly one-third** | No |
+| `power-profiles-daemon` degrading HWP | TG varies **20–30% between boots**, *while every sysfs value reads `performance`* | No |
+| E-cores inside the inference thread set | TG **20–30%** lower | No |
+| `vm.swappiness` + model near the RAM ceiling | TG **stalls mid-session** | No |
+| CPU governor / EPP not `performance` | Sustained clocks below boost | No |
+
+The second row is the dangerous one: a confound that **survives the
+obvious check**. That is the same shape as the free-VRAM finding — a
+condition that varies between runs, is invisible in the output, and
+silently reorders a scorecard. For an MoE-heavy fleet whose crowned
+config puts 32 layers of experts on the CPU, the first and third rows
+are not marginal. §8 records where this desktop actually sits.
+
+Its diagnostic checklist (§24 of that document: `dmidecode` memory
+speed, governor, EPP, P-core frequency, free VRAM, thermals, CPU hogs,
+`pswpin`/`pswpout`, PCIe link speed, `tuned-adm active`) is a
+ready-made pre-flight gate, and every item is cheap.
+
+### 7.3 What it found in our own code
+
+**`--threads` is not affinity.** *"Most reliable way to keep inference
+off E-cores … `taskset -c 0-11`."* Thread **count** and thread
+**placement** are different knobs: the kernel schedules `--threads 8`
+onto any core it likes, E-cores included. Our `moe` menu's comment
+claimed its `cpu-moe-t8` / `cpu-moe-t24` pair raced "P-cores only vs
+all threads". It does not — it races *fewer threads* against *one per
+logical CPU*. **Comment corrected today**; real pinning needs
+`taskset`/`sched_setaffinity` and is now a ROADMAP item. Note the
+guide's `0-11` is *its* 12600K; this desktop's P-cores are `0-15`
+(§8) — a range nobody should copy between machines.
+
+**Our `kv` menu may measure the smaller half of the effect.**
+**[FIELD]** *"switching f16 → q8_0 KV frees ~2 GB. That 2 GB lets
+`llama-fit-params` keep one to two additional GPU layers — translating
+directly to higher TG. Confirmed on Qwen3-Coder-Next: q8_0 KV at 64k
+unlocked 2 extra GPU layers and added ~2 t/s TG."* Our `kv` menu's goal
+is `Goal::Context` — *"a bigger settled context for the same VRAM."*
+That is the right axis on a VRAM-starved model. But on a model already
+at its full trained context — Scott's 80B settles at all 262,144 — the
+freed VRAM **cannot** buy more context, so it buys layers instead, and
+a Context goal scores that real TG win as **zero improvement**. The
+menu isn't wrong; its goal is single-axis where the mechanism has two.
+
+**`--mlock` is filed under the wrong goal.** We only ever score it in
+the `load` menu against `Goal::LoadTime`. Its documented purpose is not
+load speed — it is preventing a mid-session swap event from stalling
+TG. Judged on load time it can lose while still being the right setting
+for a machine that swaps (§8).
+
+**Target and draft KV caches are one decision, not two.** **[FIELD]**
+`-ctk/-ctv` set the target model's cache, `-ctkd/-ctvd` the draft's —
+and quantizing the *target* to `q8_0` drove Gemma 4 MTP draft
+acceptance *"close to zero"*, where `f16` kept it above 70% and was
+much faster overall. Our `spec` and `kv` menus race independently and
+apply independently. This is direct evidence those two knobs interact
+violently on MTP models, so a `kv` winner applied after a `spec` winner
+could silently destroy it. Worth a guard, or at least ordering advice.
+
+### 7.4 Leads worth testing, not adopting
+
+- **`--fit-target`.** Its tested values: **512 MiB** for text on 12 GB,
+  **512–768** on 24 GB, **2048** for vision. We hardcode **1024**. An
+  independent outside data point for the max-context question modellab
+  raised (151,808 vs our 110,080) — *and* it supplies the mechanism our
+  conservatism is really defending: **[FIELD]** *"CUDA's VMM pool grows
+  as context fills. A 128 MiB target survived short benches and later
+  failed."* The failure mode is **mid-session OOM, not load-time OOM**,
+  which is exactly why a bench-validated small margin is a trap. So:
+  1024 may cost Scott context, but the test has to be a long session,
+  not a load.
+- **QAT + MTP — the largest speed result in the document.** Gemma 4 26B
+  38.5 → **100.6 t/s** (2.6×); 12B → 120.8 t/s (2.0×). Partly
+  quantization-aware training (a 26B dropping 18 GB → 14.2 GB, so the
+  layers land in VRAM at all) and partly multi-token-prediction
+  speculation. This is **model-selection** advice, which is Library and
+  advice territory rather than a flag: "a QAT build of this model
+  exists" is a thing we could surface.
+- **iGPU display routing frees 500–1000 MB VRAM** — and it resolves
+  §6.1 into something constructive. Display-on-the-NVIDIA-card is the
+  *same* root fact that makes persistence mode a near no-op there. One
+  honest prompt replaces a misleading one: route the display to the
+  motherboard output, and you free VRAM *and* make persistence mode
+  mean something.
+- **Build flags** we may not set: `GGML_LTO=ON`, `GGML_CUDA_FA_ALL_QUANTS=ON`,
+  and `CMAKE_CUDA_ARCHITECTURES` matched to the card (89 for Ada, 86 for
+  Scott's 3090 Ti) rather than a default fan-out. Worth auditing the
+  Build Advisor against.
+- **`llama-sweep-bench`** exists as an upstream binary for parameter
+  sweeps. We hand-roll sweeps; worth a look.
+- **THP**: its node runs `[always]`, ours `[madvise]`. Explicitly a
+  "test both" in the source, so: untested lead.
+
+### 7.5 Where not to follow it
+
+One node, one CPU vendor, 12 GB of VRAM. Its `taskset -c 0-11`,
+`--fit-target 512`, batch/ubatch profiles, MTP draft lengths (2 for
+26B, 4 for 12B, against an upstream default of 3) and *"Linux was
+15–20% faster than the Windows configuration I compared"* are all
+single-sample results, and the author says so plainly. The
+`tuned-ppd` fix is a diagnosis for a symptom, *"not a blanket desktop
+recommendation"* — and this desktop does not have that symptom (§8).
+Its "how throughput feels" table is subjective calibration, not data.
+
+---
+
+## 8. This desktop's host state, measured 2026-09-03
+
+Ran §24's checklist against Scott's machine while it was otherwise
+idle. **[OURS]**, and the point of recording it is that these are
+conditions under which every number in `measurements.json` was taken.
+
+| Check | Reading | Verdict |
+|---|---|---|
+| CPU | i9-12900K — **8 P-cores (cpu0–15, 5.1–5.2 GHz) + 8 E-cores (cpu16–23, 3.9 GHz)** | **Hybrid — §7.2 row 3 applies** |
+| `scaling_governor` | `powersave` (all 24) | Not `performance` |
+| `energy_performance_preference` | `balance_performance` | **Not `performance`** |
+| `scaling_driver` | `intel_pstate`, `no_turbo=0` | HWP active, turbo enabled |
+| `power-profiles-daemon` | **inactive** | The 20–30% ppd bug does not apply |
+| `tuned` | inactive | Nothing is setting a profile either |
+| RAM | 62 GiB total, 23 GiB free, 30 GiB cache | Ample |
+| Swap | **3.6 GiB in use** of 8 GiB, `swappiness=60` | In use *with 23 GiB free* |
+| `pswpout` / `pswpin` | 2,164,370 / 552,251 pages ≈ **8.3 GiB out, 2.1 GiB in** over 27 h uptime | Real swap traffic |
+| THP | `[madvise]` | Source's node uses `always`; untested |
+| RAM speed (XMP) | **UNKNOWN** — `dmidecode` needs sudo | ⚠️ **the #1 MoE culprit, unverified** |
+
+**Reading this honestly.** Nothing here is proof that a stored
+measurement is wrong. Three things are worth Scott's attention:
+
+1. **RAM speed is unverified and it is the single highest-stakes item**
+   in the guide — XMP off took *its* MoE generation to about a third.
+   Scott's fleet is MoE-heavy and his crowned config
+   (`ncpu-moe-32`) puts 32 layers of expert weights in system RAM,
+   where RAM bandwidth *is* the generation bottleneck. One sudo command
+   settles it; it is Task 2.7.
+2. **Neither governor nor EPP is `performance`.** This is the stock
+   desktop default, not a misconfiguration, and on `intel_pstate` with
+   HWP `powersave` still boosts — so this is a lever to *measure*, not
+   a bug to panic about. But it is the same knob in both directions:
+   whatever it is worth, every stored measurement was taken at
+   `balance_performance`.
+3. **The machine is swapping while 23 GiB sits free** — that is
+   `swappiness=60` being eager, not memory pressure. Harmless for most
+   work; the guide's documented failure mode is precisely a swap event
+   evicting RAM-resident expert weights mid-session, which presents as
+   generation *stalling* rather than running slow. If Scott has ever
+   seen an inexplicable mid-session pause on a big MoE model, this is
+   the first suspect, and `--mlock` is the documented answer (§7.3).
+
+The E-core question is **not** settled by this table: our `moe` menu
+already races thread counts, so there may be data in `trials.json`
+already — but per §7.3 it raced counts, not placement, so it cannot
+answer it. That needs `taskset`.
+
+---
+
+## 9. What this changes for us — summary
 
 **Already right, now defended:** K/V asymmetry direction, `--models-max 1`,
 never forcing `-fa`, context shift off, measuring `--cache-reuse`
 instead of trusting 256, fresh process per trial variant, treating
-acceptance rate as a diagnostic.
+acceptance rate as a diagnostic. §7.1 adds independent confirmation of
+six of these from a second, unrelated source — including "bench at the
+context you serve", reached from the placement side rather than ours.
 
 **Already fixed because of the parallel modellab work:** benching at
 realistic KV depth (`-d`), recording free VRAM as a measurement
@@ -574,6 +790,29 @@ presenting a no-op as a fix.
 
 **The honest gap:** 8 GB-class guidance (§6.6). Partly derivable from
 the last-layer cliff and bandwidth arithmetic; the rest needs the G15.
+
+**The category we were missing entirely (§7.2).** Every measurement
+condition we record is a *GPU* condition. The host — RAM at rated
+speed, CPU governor and EPP, which cores the inference threads land on,
+whether the machine is swapping — is unrecorded, and the supplied
+source has measured effects there of 20–30% and worse, including one
+confound that reads `performance` in every sysfs file while costing
+20–30% between boots. This is the same argument that produced
+`gpu_conditions`, one layer down.
+
+**Found in our own code by reading it (§7.3):** the `moe` menu's
+comment claimed to race "P-cores only vs all threads" when `--threads`
+sets count, not affinity — corrected today. Two more, logged not fixed:
+the `kv` menu's `Goal::Context` scores a real TG win as zero on a model
+already at full context, because there the freed VRAM buys *layers*;
+and `--mlock` is scored on load time when its documented purpose is
+stopping mid-session swap stalls.
+
+**This desktop, measured (§8):** hybrid CPU (so the E-core finding
+applies), governor `powersave` / EPP `balance_performance` (stock, but
+every stored number was taken there), swapping 3.6 GiB while 23 GiB
+sits free — and **RAM speed unverified**, which is the guide's
+single highest-stakes check and needs one sudo command from Scott.
 
 **The meta-lesson.** Most of this field's tuning advice is folklore
 with invented decimals. The defensible parts are (a) llama.cpp's own

@@ -119,10 +119,13 @@ it is a personal-scale project — one machine, one primary user — not yet
 hardened by a wider install base.
 
 The lab's most striking demonstration: models far larger than the GPU
-are usable — an 80-billion-parameter mixture-of-experts coding model ran
-at its full 262k context at 52 tokens/sec (partial expert offload) on a single consumer 24GB
-card, with expert weights in system RAM and placement chosen by
-measurement rather than folklore.
+are usable — an 80-billion-parameter mixture-of-experts coding model
+settled at its full 262k context on a single consumer 24 GB card, with
+expert weights in system RAM and placement chosen by measurement rather
+than folklore. It generates at 52 tokens/sec on the ~3.5k-token prompts
+the trial harness uses; generation slows as the cache fills, which is
+why the app now reports speed with its measured depth attached rather
+than as one headline number.
 
 The performance lab is delivering: every servable model carries a
 measured speed baseline, and the generalized trial harness A/Bs any

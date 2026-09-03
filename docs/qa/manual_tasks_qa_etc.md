@@ -7,8 +7,10 @@ steps, what you should see, and what to write down. Pick it up whenever
 — nothing here goes stale except the "current state" numbers.
 
 **New since you last read this:** Tasks **2.5** (re-bench the fleet —
-Speed numbers changed meaning) and **2.6** (two G15 measurements that
-answer questions no public benchmark does). Everything else is
+Speed numbers changed meaning), **2.6** (two G15 measurements that
+answer questions no public benchmark does), and **2.7** (three sudo
+commands on the desktop — one of them is the highest-stakes check in
+the whole research pass, and it takes two minutes). Everything else is
 unchanged.
 
 ## How to record and report back
@@ -225,6 +227,75 @@ can produce the first data points, and each is a single command:
 3. **Is the new deep-depth bench pass tolerable at 8 GB?** It prefills
    32k tokens per model. If it's painfully slow, say so — the rung
    ladder can be made configurable.
+
+## Task 2.7 — Three sudo commands, and one of them is the highest-stakes check in the whole research pass (NEW 2026-09-03, desktop, 2 minutes)
+
+**Why this jumped the queue.** The research guide you dropped in
+`docs/human_research/` names one check as the most common cause of MoE
+generation underperforming, and reports it took *its* author's
+generation **from roughly one-third speed back to normal**: whether
+system RAM is actually running at its rated XMP/EXPO speed. Your fleet
+is MoE-heavy, and your crowned config — `ncpu-moe-32` — deliberately
+puts 32 layers of expert weights into system RAM, where RAM bandwidth
+*is* the generation bottleneck.
+
+I ran the rest of that checklist on your desktop while you were away
+(recorded in `docs/research/local-llm-optimization.md` §8). **This one
+item needs sudo, so it needs you.**
+
+```bash
+sudo dmidecode -t memory | grep -E "Speed|Configured|Part Number"
+```
+
+**What to look for:** `Speed:` is the rated speed printed on the
+module. `Configured Memory Speed:` is what it is *actually* running at.
+
+- **They match** → good, close this task, tell me "RAM at rated speed"
+  and I will record it as a verified condition.
+- **Configured is lower** (a classic tell: rated 6000 MT/s, configured
+  4800) → XMP/EXPO is off in BIOS. Enable it, reboot, re-run. Then
+  **every MoE measurement in `measurements.json` was taken slow**, and
+  Task 2.5's re-bench becomes mandatory rather than merely wise.
+
+While you have the sudo prompt open, two cheap extras from the same
+checklist:
+
+```bash
+# PCIe link — expect Gen 3 or 4, not Gen 1
+nvidia-smi -q | grep -A3 "PCIe Generation"
+
+# Any tuned profile active? (I found neither tuned nor ppd running)
+sudo tuned-adm active 2>/dev/null || echo "tuned not installed — fine"
+```
+
+**Record:** the `Speed` / `Configured Memory Speed` pair verbatim, and
+the PCIe generation. Three lines.
+
+### The two other host findings, for your awareness (no action needed)
+
+Both are recorded in §8 of the research doc. Neither is a
+misconfiguration; both are conditions under which all your stored
+numbers were taken.
+
+1. **Your CPU governor is `powersave` and EPP is `balance_performance`,
+   not `performance`.** That is the stock Linux desktop default, and on
+   `intel_pstate` with HWP `powersave` still boosts — so this is a lever
+   to measure, not a fire to put out. I did *not* change it: changing a
+   system-wide power setting is yours to decide, and doing it silently
+   would have invalidated the very baselines we are trying to compare
+   against. If you want it measured properly, that is a trial and I
+   should build it.
+2. **The machine is swapping (3.6 GiB used) while 23 GiB of RAM sits
+   free** — that is `swappiness=60` being eager, not memory pressure.
+   Mostly harmless, but the guide's documented failure mode is a swap
+   event evicting RAM-resident expert weights mid-session, which
+   presents as generation **stalling** rather than running slow. So:
+   **have you ever seen an unexplained mid-session pause on a big MoE
+   model?** If yes, say so — that is a real bug with a known fix
+   (`--mlock`), and right now we only ever score `--mlock` on load
+   time, which is the wrong axis for it.
+
+---
 
 ## Task 3 — Finish the Minecraft showcase
 

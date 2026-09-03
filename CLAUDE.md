@@ -118,6 +118,17 @@ Non-obvious constraints that shape the code:
   Anything that writes to `measurements.json` must establish its
   preconditions first (router idle, no Ollama residency) and refuse
   rather than record contention.
+- **Thread count is not thread placement.** `--threads N` sets how many
+  threads llama.cpp spawns; the kernel still schedules them onto any
+  core, E-cores included. Only `taskset`/`sched_setaffinity` pins. Never
+  describe a `--threads` variant as testing "P-cores" (this desktop is
+  an i9-12900K: P = cpu0–15, E = cpu16–23, and P/E must be derived from
+  `cpufreq/cpuinfo_max_freq` tiers — `cpu_capacity` reads a uniform
+  1024 here).
+- **`docs/research/` is ours; `docs/human_research/` is supplied.** The
+  latter is material Scott provides (with its source URL beside it) —
+  quote and grade it like any external source, and never silently edit
+  it to match our conclusions. Reconciliation belongs in our doc.
 - **Log grammars drift** — evidence.rs speaks both the pre- and
   post-b10672 dialects; when the meter reads zero while tokens flow,
   suspect a new dialect before suspecting the code.
