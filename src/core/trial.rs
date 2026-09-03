@@ -1741,6 +1741,32 @@ pub fn run_trial(
     let _ = arm_trial_marker(&dir, model);
     let body = (|| -> Result<TrialReport> {
         cancel.check()?;
+        // PAGE-CACHE WARMUP, for menus judged on load time.
+        //
+        // Rounds run in order: baseline first, variants after. The
+        // baseline therefore loads from whatever page-cache state the
+        // machine happened to be in, while every variant loads with the
+        // weights already cached by the round before it. Measured
+        // externally, that difference is 20.8s cold vs 4.5s warm on an
+        // 85 GB model — a 4.6x swing that swamps any real difference
+        // between load modes, biased systematically in favour of
+        // whatever ran last (research 2026-09-03,
+        // docs/research/local-llm-optimization.md §6).
+        //
+        // One discarded load equalizes it: from here on every round is
+        // measured warm, which is also the state our router actually
+        // runs in — it is long-lived and reloads models repeatedly.
+        // (Direct I/O deliberately bypasses the page cache, so it will
+        // legitimately lose under warm comparison. That is the right
+        // answer for a hot-swapping router, and now it is measured
+        // rather than accidental.)
+        if goal == Goal::LoadTime {
+            progress(format!(
+                "{model}: warming the page cache with one discarded load, so every \
+                 round's load time is measured under the same conditions…"
+            ));
+            let _ = round(0, "warmup (discarded)", &[], None, progress);
+        }
         let baseline = round(1, BASELINE, &[], None, progress)?;
         all.entry(model.to_string())
             .or_default()

@@ -311,11 +311,236 @@ at Q4_K_M and above.
 
 ---
 
-## 6. System layer (hardware, thermals, VRAM)
+## 6. System layer — GPU, memory, thermals
 
-*Pending: a second research pass covering GPU system tuning, VRAM
-contention, thermals, and the 8 GB-class question for the G15. Will be
-appended here when it completes; the sections above stand on their own.*
+Researched 2026-09-03. Two sub-surveys completed and their content
+recovered; the parent agent died to a 529 while summarizing, so the
+**8 GB-class question is the one genuine gap** (§6.6).
+
+### 6.1 ⚠️ Persistence mode — we shipped advice that is wrong for this desktop
+
+**[DOC]** ([Driver Persistence](https://docs.nvidia.com/deploy/driver-persistence/overview.html)),
+verbatim: *"Under Linux systems where X runs by default on the target
+GPU, the kernel mode driver will generally be initalized and kept alive
+from machine startup to shutdown, **courtesy of the X process**."*
+
+**This inverts the blanket "always `nvidia-smi -pm 1`" tip — and we
+built a first-run prompt around it on 2026-08-30.** Where the display
+server runs on the NVIDIA GPU (Scott's desktop), persistence mode is
+close to a no-op: the display stack already pins the driver. It earns
+its keep when the dGPU is effectively headless — iGPU-drives-display,
+a second card with no monitor, or `multi-user.target`.
+
+NVIDIA's only quantified figure for the cost it avoids is *"order of
+**1-3 second** ... due to **ECC scrubbing behavior**"* — and consumer
+GeForce has no ECC, so even that component doesn't apply. The widely
+quoted "500 ms–2 s per CUDA init" numbers are **[FOLKLORE]**; the one
+source publishing them labels them "illustrative".
+
+**[BENCH]** Throughput effect: none measured — persistence *"did not
+produce a noticeable difference in steady-state kernel timing"*. It is
+a startup-latency feature.
+
+**Where it does matter in 2026 [DOC]:** the **open kernel modules**
+README lists *"GPU initialization is slower. One possible mitigation is
+to use **nvidia-persistenced**"* — and Blackwell+ is open-only. So the
+advice is becoming *more* right on newer stacks, for a different
+reason than the folklore gives.
+
+**Action (logged):** our prompt should say what it actually buys on
+*this* machine — and on a desktop with X on the NVIDIA card, that is
+honestly "very little". It should not present a no-op as a fix. It also
+correctly prefers `nvidia-persistenced` over `-pm`, which **[DOC]**
+confirms: *"NVIDIA encourages customers to shift to this daemon
+approach"* and calls `-pm` "near end-of-life".
+
+### 6.2 Power limits: the number everyone quotes is a gaming benchmark
+
+**pp is compute-bound, tg is memory-bandwidth-bound**, so a power cap
+hits them completely differently. Any "% tokens/s lost" figure is
+meaningless without saying which.
+
+**[BENCH]** ([discussion #15013](https://github.com/ggml-org/llama.cpp/discussions/15013))
+RTX 5090, 400 W vs 600 W: **pp512 +16.0%**, **tg128 +1.4%**. Backwards:
+dropping 33% of power costs 13.8% of prefill and 1.4% of decode.
+
+**[BENCH]** ([RTX 3090 sweep, Apr 2026](https://jeanfbrito.github.io/posts/rtx-3090-power-limit-sweet-spot/))
+— Qwen 3.6 27B, nearly Scott's rig: 350 W → 32.0 t/s; 300 W → 33.0;
+250 W → 31.7; **200 W → 20.6 (−36%)**; 150 W → 8.3. Plateau, then
+cliff. 350→250 W is inside measurement noise.
+
+🚩 **The famous "cap to 70%, lose 3%" line is a Tom's Hardware
+*ray-traced gaming* result, relabelled as tokens/s.** For llama.cpp
+decode the honest number is ~1%; for prefill ~14%; for batched serving
+~12% (**[BENCH]** 4×3090 vLLM).
+
+**[BENCH — academic]** ([arXiv 2605.11999](https://arxiv.org/html/2605.11999),
+Erlangen, May 2026) on an H200 measured decode drawing **137–300 W under
+even the lowest 280 W cap** — the cap never engaged, throughput spread
+0.3–2.8%, tensor cores idle >88%. **Clock locking Pareto-dominates
+power capping: 24–32% decode energy saved for <1% throughput.**
+⚠️ Do not over-generalize: on a 350 W 3090 the cap *does* bind below
+250 W. Correct rule: **a cap costs throughput only once it engages, and
+the engagement point is hardware-specific.**
+
+### 6.3 ⭐ Throttle counters — a measurement-validity check we can actually build
+
+**[DOC, verified on a consumer GeForce]**
+`nvidia-smi --query-gpu=clocks_event_reasons_counters.sw_power_cap,...`
+returns **cumulative microseconds per throttle reason**. Diff it before
+and after a benchmark and you know exactly how long the card spent
+throttled, with no sampling race. This works on GeForce, which the
+per-sample `.active` bits make awkward.
+
+Severity model that matters for not crying wolf:
+
+| Reason | Meaning |
+|---|---|
+| `sw_power_cap` (0x4) | **Normal.** A card at its power limit is working correctly. |
+| `sw_thermal_slowdown` (0x20) | Above max operating temp — **includes memory temperature** |
+| `hw_thermal_slowdown` (0x40) | ≥2× clock cut. Emergency. |
+| `hw_power_brake_slowdown` (0x80) | ≥2× cut, external power brake |
+
+**[OURS]** Lifetime counters on Scott's 3090 Ti (driver 595.84):
+`sw_power_cap` ≈ **1.9 hours accumulated**, and **every thermal counter
+exactly zero across the card's entire history.** On a well-cooled
+desktop the binding constraint is the power cap, never temperature —
+which is why a "thermal" warning here would be noise, and why the
+laptop's counters will be the interesting comparison.
+
+⭐ **The one inference worth encoding:** `sw_thermal_slowdown` set
+**while `temperature.gpu` reads fine** means the *memory junction*
+tripped it — and that is **not readable on GeForce** (NVML exposes only
+`NVML_TEMPERATURE_GPU`; no `nvidia` hwmon device exists). So the honest
+message is *"VRAM thermal limit suspected, not readable on this GPU"*,
+never "no thermal issue". Also read `GPU Slowdown Temp` / `GPU Max
+Operating Temp` **per device** — Ada/Blackwell report *margins*
+(`GPU Current T.Limit Temp`) instead of absolutes, a real telemetry
+grammar drift of the kind we already know to expect from logs.
+
+⚠️ GDDR6X's **EDR** (error-detection-and-replay) degrades *effective*
+bandwidth while clocks, power, temperature and every throttle bit read
+nominal. A tg regression with entirely clean telemetry on a hot GDDR6X
+card is therefore a real and otherwise-invisible hypothesis, not noise.
+
+### 6.4 Page cache dominates load time — and it confounded one of our menus
+
+**[BENCH]** (PR #7420, Ryzen 9 7950X + PCIe-5 NVMe, 85 GB Mixtral):
+
+| Mode | Load |
+|---|---|
+| `--no-mmap`, cold | 47.3 s |
+| mmap, cold | 20.8 s |
+| direct I/O | 7.3 s |
+| **mmap, warm** | **4.5 s** |
+
+**[OURS] — this found a bug in our `load` trial menu, fixed today.**
+Our rounds run baseline first, variants after, so the baseline loaded
+from whatever cache state the machine was in while every variant loaded
+warm from the round before — a systematic bias toward whatever ran
+last, of a magnitude (4.6×) that swamps any genuine load-mode
+difference. `run_trial` now spends one **discarded** load warming the
+cache before the first measured round, so every round is compared warm
+— which is also the state our router genuinely runs in, being
+long-lived and reloading models repeatedly.
+
+Two related notes:
+- **`--mlock`, `--mmap`/`--no-mmap` and `-dio` were deprecated in
+  July 2026** in favour of `-lm/--load-mode`, and mixing old and new
+  emits *"only the last flag on the command line will take effect"*.
+  **[OURS]** We already emit only `load-mode` (`trial.rs:119`) — no
+  action, and a live example of why reading `--help` beats copying
+  blog examples.
+- **[FOLKLORE, refuted]** *"mmap makes a 30B model need only 5.8 GB of
+  RAM"* was debunked in the thread that produced it: *"Almost the
+  entire model is needed for inference, so mmap doesn't reduce RAM usage
+  at all. It's purely a measurement artifact."*
+- For a **hot-swapping router, warm mmap beats direct I/O** — DIO
+  bypasses the page cache, so repeated loads are ~10× slower. DIO wins
+  cold loads only.
+
+### 6.5 VRAM is not all yours, and `memory.free` lies in two directions
+
+- **The compositor takes real memory.** Working figures: 1080p
+  ≈ 150–400 MB; 4K/multi-monitor ≈ 700 MB–1.5 GB. ⚠️ And there is a
+  **NVIDIA+Wayland retention bug** — a compositor grows until it holds
+  roughly **10% of total VRAM** and does not release it (reproduced on
+  KWin, Sway, Weston, GNOME Shell across several 5xx drivers; **not
+  reproducible on AMD**). On a 24 GB card that is ~2.4 GB gone.
+- **⭐ Your own CUDA context costs 200–600 MB** that `memory.free`
+  reported before it existed. So free-memory readings are optimistic by
+  at least a context.
+- **[VENDOR — NVIDIA staff]** totals ≠ sum of per-process: *"the GPU has
+  overheads ... not directly associated with a particular user
+  process"*. **Never** compute free as `total − Σ(per-process)`.
+- **Consequence for `--fit`'s 1024 MiB margin:** on a 24 GB desktop
+  losing ~2.4 GB to a long-lived Wayland compositor, a 1 GB margin is
+  not enough — llama.cpp issue #18390 asks for per-device margins for
+  exactly this reason. This is the *other* half of why `measured_ctx`
+  moves between runs, alongside the Ollama residency modellab found.
+- **⭐ Neither tool can evict the other — a CUDA-level fact.** A process
+  cannot free another process's device allocations. Both llama.cpp and
+  Ollama can only measure free memory and leave a margin, and **that
+  measurement is inherently racy**. Ollama's own default is
+  `OLLAMA_MAX_LOADED_MODELS = 3 × GPU count` — **three models resident
+  by default**, not one, which is worth knowing before blaming us for
+  a failed fit.
+- **⚠️ Linux has no silent system-memory fallback.** Windows spills to
+  system RAM (driver 536.40+, with a Control Panel toggle); on Linux
+  over-allocation gives you `cudaMalloc failed: out of memory`. The
+  strongest evidence is that llama.cpp built the workaround *because* of
+  it: `GGML_CUDA_ENABLE_UNIFIED_MEMORY=1` exists to *"allow swapping to
+  system RAM instead of crashing"* — opt-in, off by default, and
+  measured ~20× slower on prefill, with the maintainer concluding *"I
+  don't think this would ever be worth using."* **Design for hard OOM.**
+
+### 6.6 ⚠️ The 8 GB question — the genuine gap, and how to close it
+
+The sub-survey covering 8 GB-class GPUs specifically did not complete
+(529). Rather than fill it with plausible-sounding numbers, here is what
+the *other* findings let us say with a source, and what must be
+measured on the G15:
+
+**Derivable now:**
+- **The last-layer cliff [DOC]** — llama-bench's own README, llama 7B
+  Q4_0 on CUDA: `ngl 34` gives 881 pp / 71.8 tg; `ngl 35` (all layers)
+  gives **2400 pp / 131.7 tg**. **One layer short of full offload costs
+  63% of prefill and 45% of generation.** On 8 GB this is the dominant
+  effect: a model that *almost* fits is not "a bit slower", it falls off
+  a cliff. Our advice column should say that.
+- **RAM-bandwidth ceiling** — `max tok/s ≈ bandwidth ÷ bytes-read-per-token`,
+  with 60–80% realized. DDR5-6000 dual channel ≈ 96 GB/s theoretical, so
+  a 17 GB dense Q4 spilling to CPU tops out near **5.6 t/s** and lands
+  at 3.4–4.5. That is why dense mid-size models are not viable once they
+  spill, and why MoE offload changes the picture (it reads *active*
+  params).
+- **⚠️ But MoE is not automatically the answer on small/unified
+  hardware [BENCH]** — arXiv 2606.21428 measured MoE **10% slower than
+  same-active dense on an M2 Pro and 31% slower on a Jetson**, at 2.1×
+  energy/token, concluding *"on bandwidth-bound edge hardware, inference
+  cost tracks total parameters, not active ones."* And **[BENCH]** on a
+  UMA Jetson, `--cpu-moe` gave ~6 t/s vs ~23 t/s GPU-only — a **4×
+  slowdown**, because on unified memory there is no transfer to save.
+  The G15 has discrete VRAM so this doesn't apply to it, but it means
+  our MoE-offload advice must be **discrete-GPU-only**.
+- **Laptop TGP is not implied by the GPU name [BENCH]** — an RTX 4090
+  laptop at 80 W performs ~30% worse than the same silicon at 150 W. So
+  `power.limit` / `enforced.power.limit` must be recorded alongside any
+  G15 measurement, or it is not comparable to anything.
+
+**Must be measured on the G15 (added to the QA task list):**
+- Mobile clock-decay curve and time-to-throttle — **[GAP]** no sourced
+  data found. The `clocks_event_reasons_counters` diff (§6.3) answers it
+  directly, and Scott's desktop already provides the contrast case
+  (zero thermal microseconds, ever).
+- Whether `platform_profile` (`/sys/firmware/acpi/platform_profile` —
+  **six** possible values, always read `platform_profile_choices`)
+  measurably changes sustained pp/tg. **[GAP]** — no credible public
+  benchmark of laptop CPU/GPU power-budget sharing versus sustained
+  decode exists. The G15 harness would produce the first one I could
+  find.
+- Whether the deep-depth bench pass (added 2026-09-02) is tolerable at
+  8 GB, or whether the rung ladder needs to be configurable.
 
 ---
 
@@ -336,6 +561,19 @@ overclaim.
 prompt-cache health more prominently (§4.2). The reasoning-kwarg
 deprecation (§4.1) was checked and does not apply — kept as a worked
 example of verifying before acting.
+
+**Fixed today because the research found it:** our `load` trial menu
+compared load times across rounds without controlling page-cache state,
+a 4.6× confound biased toward whatever ran last (§6.4).
+
+**Advice we shipped that the research contradicts:** the GPU-persistence
+prompt (§6.1). On a desktop with X on the NVIDIA card, persistence mode
+buys close to nothing — NVIDIA's own documentation says the display
+server already keeps the driver alive. The prompt needs to stop
+presenting a no-op as a fix.
+
+**The honest gap:** 8 GB-class guidance (§6.6). Partly derivable from
+the last-layer cliff and bandwidth arithmetic; the rest needs the G15.
 
 **The meta-lesson.** Most of this field's tuning advice is folklore
 with invented decimals. The defensible parts are (a) llama.cpp's own
