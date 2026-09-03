@@ -184,6 +184,43 @@ If the deep pass makes benching unbearably slow on the G15's 8 GB
 (likely — 32k of prefill on a mobile 3070 Ti is not fast), say so; the
 rung ladder can be made configurable.
 
+## Task 2.6 — G15 measurements that close a real research gap (NEW 2026-09-03)
+
+While researching (`docs/research/local-llm-optimization.md`) two
+questions came up that **no credible public benchmark answers**. The G15
+can produce the first data points, and each is a single command:
+
+1. **Does a laptop actually throttle thermally, and when?**
+   Before and after a bench run:
+   ```
+   nvidia-smi --query-gpu=clocks_event_reasons_counters.sw_power_cap,\
+   clocks_event_reasons_counters.sw_thermal_slowdown,\
+   clocks_event_reasons_counters.hw_thermal_slowdown \
+   --format=csv
+   ```
+   These are **cumulative microseconds**, so the difference tells you
+   exactly how long the card spent throttled. **Record both readings.**
+   Your desktop's lifetime numbers are the contrast case: ~1.9 hours of
+   power-cap and **zero** thermal microseconds ever. If the laptop shows
+   thermal microseconds during a bench, that invalidates the numbers —
+   and tells us we need this check in the app.
+2. **Does the platform power profile change sustained speed?**
+   ```
+   cat /sys/firmware/acpi/platform_profile_choices   # read, don't assume
+   cat /sys/firmware/acpi/platform_profile
+   ```
+   Then run the same bench under two profiles (e.g. `balanced` then
+   `performance`, via `powerprofilesctl set …`) and record pp and tg for
+   each, plus `nvidia-smi --query-gpu=power.limit,enforced.power.limit
+   --format=csv`. **Prediction to test:** prefill should move a lot and
+   generation barely, because prefill is compute-bound and generation is
+   bandwidth-bound. Also worth knowing: the same laptop GPU at 80 W vs
+   150 W measured ~30% apart on identical silicon, so the power limit
+   must be recorded or the numbers aren't comparable to anything.
+3. **Is the new deep-depth bench pass tolerable at 8 GB?** It prefills
+   32k tokens per model. If it's painfully slow, say so — the rung
+   ladder can be made configurable.
+
 ## Task 3 — Finish the Minecraft showcase
 
 `docs/showcase/minecraft-clone.md` is live with day-one receipts and

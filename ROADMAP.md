@@ -994,6 +994,23 @@ they stop being unexamined instincts). Open items:
   token counts rather than log markers (which our child verbosity
   filters). A sustained drop in that number is the symptom; worth
   making visible rather than buried.
+- **Fix the GPU-persistence prompt's claim** (§6.1). NVIDIA documents
+  that where X runs on the target GPU the driver is kept alive by the X
+  process, so on Scott's desktop our prompt offers a near no-op. It
+  should say what it buys on THIS machine (detect whether the display
+  runs on the NVIDIA card), and drop the implied throughput benefit —
+  the one benchmark found none. Still genuinely useful for
+  iGPU-display/headless rigs and for open kernel modules, which is
+  where the text should point.
+- **Throttle-reason counters as a measurement-validity gate** (§6.3).
+  `clocks_event_reasons_counters.*` gives cumulative microseconds per
+  throttle reason and works on consumer GeForce; diffing it around a
+  bench tells us whether the numbers are valid, with no sampling race.
+  Rules: `sw_power_cap` is NORMAL (Scott's card has 1.9h of it and zero
+  thermal, ever) — only thermal/power-brake microseconds invalidate a
+  run; and `sw_thermal_slowdown` with a nominal GPU temperature means
+  the unreadable memory junction tripped it, so say "VRAM thermal limit
+  suspected", never "no thermal issue".
 - **Never re-enable context shift** to paper over context exhaustion —
   ggerganov disabled it by default because it corrupts chat-template
   structure. For agents, failing loudly is correct.
