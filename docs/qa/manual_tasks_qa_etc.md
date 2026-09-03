@@ -1,10 +1,15 @@
 # Scott's manual task list — QA, validations, and what to record
 
-Written 2026-09-02 at HEAD `70e8a80` (v0.6.75 + 11 commits of post-tag
-fixes; 217 unit + 4 integration tests green). This is everything that
-is waiting on *you*, in priority order, with exact steps, what you
-should see, and what to write down. Pick it up whenever — nothing here
-goes stale except the "current state" numbers.
+Written 2026-09-02, last updated 2026-09-03 (v0.6.75 + 20 commits of
+post-tag work; 220 unit + 4 integration tests green). This is
+everything that is waiting on *you*, in priority order, with exact
+steps, what you should see, and what to write down. Pick it up whenever
+— nothing here goes stale except the "current state" numbers.
+
+**New since you last read this:** Tasks **2.5** (re-bench the fleet —
+Speed numbers changed meaning) and **2.6** (two G15 measurements that
+answer questions no public benchmark does). Everything else is
+unchanged.
 
 ## How to record and report back
 
@@ -265,8 +270,27 @@ resolution; I'll wire it in.
 
 ## Current state, for orientation when you return
 
-- HEAD `70e8a80`, main, all pushed; 217 unit + 4 integration tests,
-  zero warnings. Published: v0.6.75 on crates.io + GH (behind main).
+- `main`, all pushed; **220 unit + 4 integration tests**, zero build
+  warnings. Published: v0.6.75 on crates.io + GH (now ~20 commits
+  behind main — see the tag question in Task 6).
+- **What changed 2026-09-03**, from a sibling project's handoff plus a
+  research survey (both documented):
+  - **Benchmarks now measure generation at a realistic KV depth**, not
+    just from an empty cache. The old number read ~24% optimistic. Your
+    stored baselines all predate this → Task 2.5.
+  - **Free VRAM and any other GPU tenant are recorded** at calibration,
+    and benching now *refuses* while Ollama holds the card. This
+    explains why one model's settled context ranged 105,472–118,016
+    across 28 runs — never noise, just an unrecorded condition.
+  - **The shareable report and the README stopped conflating** a
+    context number with a speed measured at a different depth.
+  - **A page-cache confound in the `load` trial menu is fixed** — the
+    baseline ran first (cold) and variants after (warm), a 4.6× bias.
+    If you ever kept a load-mode winner, it is worth re-racing.
+  - **The GPU-persistence prompt is known to overclaim** on this
+    desktop (NVIDIA's docs: X already keeps the driver alive when the
+    display runs on the NVIDIA card). Logged, not yet reworded — so
+    ignore that prompt's advice for now on the desktop.
 - The code-review ledger is **empty of open findings** except: H1
   (/proc sweep while router down), H2–H5 (per-frame caching; only
   bites while mousing over the app), H8/H9 (await the Phase-2 core
@@ -275,6 +299,10 @@ resolution; I'll wire it in.
 - Low-impact mode is live and validated: the GUI no longer perturbs
   inference (0 GPU-driver queries during a turn; ~94% of the
   GPU-exclusive ceiling with the app open).
+- **Reading, if you want it:**
+  `docs/research/local-llm-optimization.md` is the outside view, graded
+  by evidence strength — including several popular tips that turn out
+  to be folklore, and two of our own decisions it validated.
 - What I can do next without you: Phase-2 foundations (Connector
-  trait, thinking/latency instrument), H1/H2–H5, Help → First Run.
-  Say "keep going" if you want any of that done while you're busy.
+  trait, thinking/latency instrument), the persistence-prompt rewording,
+  H1/H2–H5, Help → First Run. Say "keep going" any time.

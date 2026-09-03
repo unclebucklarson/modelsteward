@@ -380,7 +380,21 @@ NOT unblocked by the laptop: multi-GPU work (it is still one GPU).
   automation; measured a solid negative on b10630, watch upstream.
 - **Community dataset (Tier 2)** — needs a home to exist first.
 
-## Where things stand (2026-08-29, 165 tests green — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
+## Where things stand (2026-09-03, 220 unit + 4 integration tests green)
+
+Since the v0.6.75 tag: two review cycles (findings fixed, then the
+FIXES reviewed — six overstated claims completed, one regression
+killed), low-impact mode so the GUI stops perturbing the inference it
+measures, and on 2026-09-03 the measurement-honesty pass driven by
+modellab's handoff plus an external research survey: benchmarking
+generation at a realistic KV depth, recording free VRAM and GPU tenancy
+as measurement conditions, enforcing the no-other-tenant precondition
+before benching, equalizing page-cache state in load trials, and
+removing the context-plus-speed conflation from both the findings report
+and the README. Documented in `code-review/` and
+`docs/research/local-llm-optimization.md`.
+
+### Older status (2026-08-29, 165 tests — v0.5.0 shipped; M9 closed; advisor finished; usability P0-P2 fixed)
 
 v0.4.0 shipped after an 8-angle pre-tag review (13 findings fixed).
 Since the tag: the llama.cpp management intent-split (Settings selects,

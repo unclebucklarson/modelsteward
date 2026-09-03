@@ -85,7 +85,10 @@ and why — that's fine.
 
 Key columns: **Measured ctx** is the context window `--fit` actually
 settled on for *your* VRAM — not the model card's number. **Speed** is
-measured pp/tg (read/write tokens per second).
+measured pp/tg (read/write tokens per second). Generation is shown at a
+realistic conversation depth when one has been benchmarked — hover the
+value to see the depth and the empty-cache figure, which reads about
+25% optimistic because attention costs grow as the cache fills.
 
 ## 5 · Your first Lab run
 

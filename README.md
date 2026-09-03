@@ -15,12 +15,17 @@ downstream from those measurements.
 - **Runs models bigger than your GPU.** The headline nobody tells
   novices: a Mixture-of-Experts model several times your VRAM can run
   *well* with most experts in system RAM — measured here, an 80B A3B
-  coder hit its full 262,144-token context at 52 tokens/sec generation
-  and 303 t/s prefill on a single 24GB card (partial offload,
-  `--n-cpu-moe 32`), 100% quality-gate fidelity and 100% multi-hop
-  agent-loop reliability. The honest caveat is also measured: cold
-  prefill costs ~30s per 10k prompt tokens, so the first turn of a big
-  agent session takes a beat. The Library flags oversized MoE models
+  coder settled at its full **262,144-token** context on a single 24GB
+  card (partial offload, `--n-cpu-moe 32`), with 100% quality-gate
+  fidelity and 100% multi-hop agent-loop reliability. Speed, with its
+  conditions stated because they matter: **52 tokens/sec generation on
+  a ~3.5k-token prompt** and **303 t/s prefill** over an ~11k-token
+  probe. Two honest caveats, both measured: generation slows as the
+  conversation fills the cache (each token attends over everything
+  already there), so the figure above is not what you get 100k tokens
+  deep — the app now benchmarks that depth separately and reports both;
+  and cold prefill costs ~30s per 10k prompt tokens, so the first turn
+  of a big agent session takes a beat. The Library flags oversized MoE models
   automatically and the Lab's MoE-offload trial races full and partial
   placements to find the one your card affords.
 - **Meters real usage** — a continuous token ledger (turns, prompt vs
@@ -159,7 +164,9 @@ cargo run --release            # GUI; CLI: cargo run --release -- --help
 how compressed the weights are — smaller = less VRAM, some quality cost ·
 **context** how many tokens a conversation can hold · **KV cache** the
 memory holding that conversation (its precision is tunable) · **pp / tg**
-prompt-processing / token-generation speed, tokens per second · **prefill**
+prompt-processing / token-generation speed, tokens per second — tg is
+reported both from an empty cache and at a realistic conversation
+depth, because the second is 20-30% lower and is what you actually get · **prefill**
 reading your prompt before the first output token · **MoE / A3B** a
 Mixture-of-Experts model; "A3B" = 3B parameters active per token — these
 can run well even when far bigger than your VRAM · **mmproj** a model's
