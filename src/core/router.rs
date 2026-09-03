@@ -588,6 +588,23 @@ pub struct Measurement {
     pub pp_tps: Option<f64>,
     /// Baseline generation tokens/sec (llama-bench tg128).
     pub tg_tps: Option<f64>,
+    /// Generation with `tg_depth` tokens already in the KV cache — what
+    /// a user gets mid-conversation, as opposed to `tg_tps`'s
+    /// empty-cache figure (modellab handoff 2026-09-02: 24% apart on a
+    /// 27B at its own settled context).
+    #[serde(default)]
+    pub tg_deep_tps: Option<f64>,
+    #[serde(default)]
+    pub tg_depth: Option<u64>,
+    /// Free device memory (MiB) when this measurement was taken, and
+    /// what else held the GPU. `--fit` sizes the context against free
+    /// VRAM, so the same model legitimately settles at different
+    /// contexts on different days; without this the spread looks like
+    /// noise rather than a recorded condition.
+    #[serde(default)]
+    pub free_vram_mib: Option<u64>,
+    #[serde(default)]
+    pub gpu_tenant: Option<String>,
     /// llama.cpp build the bench numbers came from — a rebuild shifts
     /// throughput without touching any model file, so this is the bench
     /// half's staleness signal.
@@ -612,6 +629,10 @@ impl Default for Measurement {
             env_fp: None,
             pp_tps: None,
             tg_tps: None,
+            tg_deep_tps: None,
+            tg_depth: None,
+            free_vram_mib: None,
+            gpu_tenant: None,
             bench_build: None,
             eval_score: None,
             tool_reliability: None,
@@ -717,6 +738,11 @@ pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) 
     {
         m.pp_tps = old.pp_tps;
         m.tg_tps = old.tg_tps;
+        // Every measured field must be listed here or a re-measure
+        // silently wipes it (review finding M4, and the reason this
+        // list is tested).
+        m.tg_deep_tps = old.tg_deep_tps;
+        m.tg_depth = old.tg_depth;
         m.bench_build = old.bench_build;
         m.eval_score = old.eval_score;
         m.tool_reliability = old.tool_reliability;
@@ -850,6 +876,11 @@ pub fn calibrate(
     force: bool,
     no_tool_probe: &std::collections::HashSet<String>,
     disabled: &std::collections::HashSet<String>,
+    // Free VRAM + any other GPU tenant, sampled by the caller (nvidia-smi
+    // is worker territory). Recorded on every measurement: `--fit` sizes
+    // against free memory, so this is the condition that explains why a
+    // settled context moves between runs.
+    conditions: &dyn Fn() -> (Option<u64>, Option<String>),
     progress: &mut dyn FnMut(String),
 ) -> Result<Measurements> {
     // Preset models AND the router's own HF cache downloads ("cache" source
@@ -887,6 +918,15 @@ pub fn calibrate(
             };
             progress(format!("[{n}/{total}] {} — fresh ({what}), skipping", m.id));
             continue;
+        }
+        // Sample BEFORE the load: this is the free memory `--fit` will
+        // size the context against.
+        let (free_vram_mib, gpu_tenant) = conditions();
+        if let Some(t) = &gpu_tenant {
+            progress(format!(
+                "[{n}/{total}] note: {t} is holding VRAM — the context --fit picks \
+                 will be smaller than on an idle card"
+            ));
         }
         progress(format!("[{n}/{total}] measuring {} (loads the model)…", m.id));
         // First failure gets one retry after a settle: unloads are async,
@@ -933,6 +973,8 @@ pub fn calibrate(
                     error: None,
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
+                    free_vram_mib,
+                    gpu_tenant: gpu_tenant.clone(),
                     ..Default::default()
                 }
             }

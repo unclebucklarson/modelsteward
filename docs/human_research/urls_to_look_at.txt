@@ -1,0 +1,2 @@
+https://carteakey.dev/blog/local-inference/local-llm-optimization/
+

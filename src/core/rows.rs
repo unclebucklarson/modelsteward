@@ -64,6 +64,11 @@ pub struct Row {
     /// generation tokens/sec, when benched on this machine.
     pub pp_tps: Option<f64>,
     pub tg_tps: Option<f64>,
+    /// Generation with a real conversation already in the cache, and at
+    /// what depth. This is what the user gets mid-session; `tg_tps` is
+    /// the empty-cache figure and reads ~25% optimistic.
+    pub tg_deep_tps: Option<f64>,
+    pub tg_depth: Option<u64>,
     /// Quality gate v2 scores, when the Quality probe has run.
     pub eval_score: Option<f64>,
     pub tool_reliability: Option<f64>,
@@ -331,6 +336,10 @@ pub fn assemble(
             measurement.and_then(|mm| mm.pp_tps),
             measurement.and_then(|mm| mm.tg_tps),
         );
+        let (tg_deep_tps, tg_depth) = (
+            measurement.and_then(|mm| mm.tg_deep_tps),
+            measurement.and_then(|mm| mm.tg_depth),
+        );
         let (eval_score, tool_reliability) = (
             measurement.and_then(|mm| mm.eval_score),
             measurement.and_then(|mm| mm.tool_reliability),
@@ -427,6 +436,8 @@ pub fn assemble(
             embedding,
             pp_tps,
             tg_tps,
+            tg_deep_tps,
+            tg_depth,
             eval_score,
             tool_reliability,
         });
@@ -444,6 +455,10 @@ pub fn assemble(
         let (pp_tps, tg_tps) = (
             measurement.and_then(|mm| mm.pp_tps),
             measurement.and_then(|mm| mm.tg_tps),
+        );
+        let (tg_deep_tps, tg_depth) = (
+            measurement.and_then(|mm| mm.tg_deep_tps),
+            measurement.and_then(|mm| mm.tg_depth),
         );
         let (eval_score, tool_reliability) = (
             measurement.and_then(|mm| mm.eval_score),
@@ -508,6 +523,8 @@ pub fn assemble(
             embedding: false,
             pp_tps,
             tg_tps,
+            tg_deep_tps,
+            tg_depth,
             eval_score,
             tool_reliability,
         });

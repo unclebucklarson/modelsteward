@@ -446,7 +446,8 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let off = system::disabled_ids(cfg, &report.models);
-    let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &off, &mut |line| {
+    let conditions = || system::gpu_conditions(cfg);
+    let results = router::calibrate(&dir, cfg.port, &env_fp, build, force, &embed, &off, &conditions, &mut |line| {
         eprintln!("{line}");
     })?;
     let (mut measured, mut failed) = (0usize, 0usize);

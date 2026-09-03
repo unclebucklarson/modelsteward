@@ -15,9 +15,38 @@ use std::path::{Path, PathBuf};
 /// rebuild can shift throughput without touching any model file).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Baseline {
+    /// Prompt processing at depth 0. Barely affected by occupancy
+    /// (measured 1063 -> 944 t/s at 32k, ~11%), so one number is honest.
     pub pp_tps: Option<f64>,
+    /// Generation from an EMPTY cache. Kept because every stored
+    /// baseline and the rebuild scorecard are denominated in it — but
+    /// it is NOT what a user gets mid-conversation; see `tg_deep_tps`.
     pub tg_tps: Option<f64>,
+    /// Generation with `tg_depth` tokens already in the cache: the
+    /// number that describes real agent work. Attention costs grow with
+    /// occupancy, so this is materially lower (measured 38.25 -> 28.99
+    /// t/s at 110k on a 27B; modellab handoff 2026-09-02).
+    pub tg_deep_tps: Option<f64>,
+    pub tg_depth: Option<u64>,
     pub build: Option<u64>,
+}
+
+/// KV depth to bench generation at, from the model's settled context.
+///
+/// A FIXED ladder, not a fraction of the settled context: settled
+/// context itself moves between calibrations (105,472–118,016 across 28
+/// runs of one model, because `--fit` sizes against whatever VRAM was
+/// free), and a moving depth would silently compare two different tests
+/// in the rebuild scorecard. Returns 0 when there is no room for the
+/// probe (512 prompt + 128 generation) on top of the depth.
+pub fn depth_rung(settled_ctx: Option<u64>) -> u64 {
+    match settled_ctx {
+        Some(c) if c >= 65_536 => 32_768,
+        Some(c) if c >= 32_768 => 16_384,
+        Some(c) if c >= 16_384 => 8_192,
+        Some(c) if c >= 8_192 => 4_096,
+        _ => 0,
+    }
 }
 
 /// llama-bench sits next to llama-server in every install layout we know.
@@ -32,6 +61,8 @@ pub fn parse_output(body: &serde_json::Value) -> Baseline {
     let mut out = Baseline {
         pp_tps: None,
         tg_tps: None,
+        tg_deep_tps: None,
+        tg_depth: None,
         build: None,
     };
     let Some(tests) = body.as_array() else {
@@ -40,14 +71,23 @@ pub fn parse_output(body: &serde_json::Value) -> Baseline {
     for t in tests {
         let n_prompt = t.get("n_prompt").and_then(|v| v.as_u64()).unwrap_or(0);
         let n_gen = t.get("n_gen").and_then(|v| v.as_u64()).unwrap_or(0);
+        // Absent on pre-`-d` builds and on legacy stored output: treated
+        // as depth 0, which is what those runs actually measured.
+        let depth = t.get("n_depth").and_then(|v| v.as_u64()).unwrap_or(0);
         if out.build.is_none() {
             out.build = t.get("build_number").and_then(|v| v.as_u64());
         }
         let avg = t.get("avg_ts").and_then(|v| v.as_f64());
-        match (n_prompt > 0, n_gen > 0) {
-            (true, false) => out.pp_tps = avg,
-            (false, true) => out.tg_tps = avg,
-            _ => {} // mixed pp+tg tests aren't part of the baseline
+        match (n_prompt > 0, n_gen > 0, depth) {
+            (true, false, 0) => out.pp_tps = avg,
+            (false, true, 0) => out.tg_tps = avg,
+            // Deepest reported generation wins, so a multi-rung sweep
+            // still yields one honest headline.
+            (false, true, d) if out.tg_depth.is_none_or(|prev| d >= prev) => {
+                out.tg_deep_tps = avg;
+                out.tg_depth = Some(d);
+            }
+            _ => {} // pp-at-depth and mixed tests aren't part of the baseline
         }
     }
     out
@@ -56,14 +96,28 @@ pub fn parse_output(body: &serde_json::Value) -> Baseline {
 /// Run the standard baseline (pp512 + tg128, 3 repetitions) for one model
 /// file. `extra_args` mirrors the model's serving config (KV cache types,
 /// ubatch, …). Blocks for the duration — a 27B runs about a minute.
-pub fn run(bench: &Path, model: &Path, extra_args: &[String]) -> Result<Baseline> {
+pub fn run(
+    bench: &Path,
+    model: &Path,
+    extra_args: &[String],
+    depth: u64,
+) -> Result<Baseline> {
     anyhow::ensure!(
         bench.is_file(),
         "llama-bench not found at {} — it builds alongside llama-server (Build Advisor -> rebuild)",
         bench.display()
     );
+    // `-d 0,N` measures BOTH the empty cache (historical baseline, and
+    // what the rebuild scorecard compares) and a realistic occupancy in
+    // one model load. Depth 0 alone overstates generation by ~24% at a
+    // 27B's own settled context (modellab handoff 2026-09-02).
+    let depths = if depth > 0 {
+        format!("0,{depth}")
+    } else {
+        "0".to_string()
+    };
     let output = std::process::Command::new(bench)
-        .args(["-o", "json", "-r", "3", "-p", "512", "-n", "128"])
+        .args(["-o", "json", "-r", "3", "-p", "512", "-n", "128", "-d", &depths])
         .arg("-m")
         .arg(model)
         .args(extra_args)
@@ -187,6 +241,21 @@ pub fn run_baselines(
         ),
     }
 
+    // This module's header has always said callers must make sure
+    // nothing else holds the GPU — but nothing enforced it, and the
+    // Ollama peer is the tenant we can see and never checked
+    // (modellab handoff 2026-09-02, issue 4). A contended baseline is
+    // not a slower number, it is a WRONG one, and it gets written into
+    // measurements.json as if it were the model's speed. Refuse.
+    let (free_vram_mib, tenant) = system::gpu_conditions(cfg);
+    if let Some(t) = &tenant {
+        anyhow::bail!(
+            "{t} is holding the GPU — a baseline measured against that would \
+             record the contention, not the model. Free the card (e.g. `ollama \
+             stop <model>`, or wait for its keep-alive to expire) and bench again."
+        );
+    }
+
     let total = targets.len();
     let mut benched = 0;
     let mut failed = 0;
@@ -212,21 +281,40 @@ pub fn run_baselines(
                 extra.extend(["-ncmoe".to_string(), "999".to_string()]);
             }
         }
+        // Bench generation at a realistic KV depth as well as empty.
+        let depth = depth_rung(measurements.get(id).and_then(|m| m.n_ctx));
         progress(format!(
-            "[{n}/{total}] benching {id} (pp512 + tg128 ×3 — a 27B takes about a minute)…"
+            "[{n}/{total}] benching {id} (pp512 + tg128 ×3{})…",
+            if depth > 0 {
+                format!(
+                    ", plus generation with {depth} tokens already in cache — \
+                     the speed you actually get mid-conversation, at the cost \
+                     of that extra prefill"
+                )
+            } else {
+                " — a 27B takes about a minute".to_string()
+            }
         ));
-        match run(&bin, &file.path, &extra) {
+        match run(&bin, &file.path, &extra, depth) {
             Ok(b) => {
                 let fmt = |v: Option<f64>| v.map(|t| format!("{t:.1}")).unwrap_or("?".into());
                 progress(format!(
-                    "[{n}/{total}] {id}: pp {} t/s, tg {} t/s",
+                    "[{n}/{total}] {id}: pp {} t/s, tg {} t/s (empty cache){}",
                     fmt(b.pp_tps),
-                    fmt(b.tg_tps)
+                    fmt(b.tg_tps),
+                    match (b.tg_deep_tps, b.tg_depth) {
+                        (Some(t), Some(d)) => format!(", tg {t:.1} t/s at {d} depth"),
+                        _ => String::new(),
+                    }
                 ));
                 let mut entry = measurements.get(id).cloned().unwrap_or_default();
                 entry.pp_tps = b.pp_tps;
                 entry.tg_tps = b.tg_tps;
+                entry.tg_deep_tps = b.tg_deep_tps;
+                entry.tg_depth = b.tg_depth;
                 entry.bench_build = b.build;
+                // The condition the numbers were taken under.
+                entry.free_vram_mib = free_vram_mib;
                 measurements.insert(id.clone(), entry);
                 router::write_measurements(&dir, &measurements)?; // persist per model
                 let _ = crate::core::history::record(
@@ -263,6 +351,65 @@ mod tests {
     use super::*;
 
     #[test]
+    fn depth_rung_is_a_fixed_ladder_that_leaves_room_for_the_probe() {
+        // A generation benchmark from an EMPTY cache overstates what a
+        // user gets: modellab measured this model at 38.25 t/s empty
+        // and 28.99 t/s at its own settled context — 24% less
+        // (handoff 2026-09-02). We now also bench at depth. The rung is
+        // FIXED rather than "settled_ctx / 2" because settled context
+        // itself varies run to run (105,472–118,016 across 28
+        // calibrations on the same model), and a moving depth would
+        // make the rebuild scorecard compare two different tests.
+        assert_eq!(depth_rung(Some(131_072)), 32_768);
+        assert_eq!(depth_rung(Some(65_536)), 32_768);
+        assert_eq!(depth_rung(Some(65_535)), 16_384, "just under the rung");
+        assert_eq!(depth_rung(Some(32_768)), 16_384);
+        assert_eq!(depth_rung(Some(16_384)), 8_192);
+        assert_eq!(depth_rung(Some(9_000)), 4_096);
+        // Small or unknown contexts get no deep pass: the probe itself
+        // needs 512 prompt + 128 gen of headroom on top of the depth.
+        assert_eq!(depth_rung(Some(8_000)), 0);
+        assert_eq!(depth_rung(None), 0);
+        // Every rung must fit its own probe inside the context.
+        for ctx in [8_192u64, 16_384, 32_768, 65_536, 131_072, 262_144] {
+            let d = depth_rung(Some(ctx));
+            assert!(d + 512 + 128 < ctx, "rung {d} does not fit in {ctx}");
+        }
+    }
+
+    #[test]
+    fn parse_output_separates_the_empty_cache_run_from_the_deep_one() {
+        // llama-bench emits one row per (test, depth); the JSON carries
+        // n_depth (verified in tools/llama-bench/llama-bench.cpp).
+        let body = serde_json::json!([
+            {"n_prompt": 512, "n_gen": 0, "n_depth": 0, "avg_ts": 1063.0, "build_number": 10760},
+            {"n_prompt": 0, "n_gen": 128, "n_depth": 0, "avg_ts": 38.25, "build_number": 10760},
+            {"n_prompt": 512, "n_gen": 0, "n_depth": 32768, "avg_ts": 944.0, "build_number": 10760},
+            {"n_prompt": 0, "n_gen": 128, "n_depth": 32768, "avg_ts": 30.10, "build_number": 10760},
+        ]);
+        let b = parse_output(&body);
+        // Depth-0 keeps its historical meaning so old baselines and the
+        // rebuild scorecard stay comparable.
+        assert_eq!(b.pp_tps, Some(1063.0));
+        assert_eq!(b.tg_tps, Some(38.25));
+        // The honest headline: generation at a depth users actually run.
+        assert_eq!(b.tg_deep_tps, Some(30.10));
+        assert_eq!(b.tg_depth, Some(32_768));
+        assert_eq!(b.build, Some(10760));
+
+        // A legacy single-depth run (no n_depth field) still parses,
+        // and claims no deep number rather than inventing one.
+        let legacy = serde_json::json!([
+            {"n_prompt": 512, "n_gen": 0, "avg_ts": 1000.0, "build_number": 10454},
+            {"n_prompt": 0, "n_gen": 128, "avg_ts": 40.0, "build_number": 10454},
+        ]);
+        let b = parse_output(&legacy);
+        assert_eq!(b.tg_tps, Some(40.0));
+        assert_eq!(b.tg_deep_tps, None);
+        assert_eq!(b.tg_depth, None);
+    }
+
+    #[test]
     fn parses_pp_and_tg_from_real_shape() {
         // Trimmed from a live run (build 10454).
         let body: serde_json::Value = serde_json::from_str(
@@ -283,11 +430,23 @@ mod tests {
     fn tolerates_junk() {
         assert_eq!(
             parse_output(&serde_json::json!({"not": "an array"})),
-            Baseline { pp_tps: None, tg_tps: None, build: None }
+            Baseline {
+                pp_tps: None,
+                tg_tps: None,
+                tg_deep_tps: None,
+                tg_depth: None,
+                build: None
+            }
         );
         assert_eq!(
             parse_output(&serde_json::json!([])),
-            Baseline { pp_tps: None, tg_tps: None, build: None }
+            Baseline {
+                pp_tps: None,
+                tg_tps: None,
+                tg_deep_tps: None,
+                tg_depth: None,
+                build: None
+            }
         );
     }
 

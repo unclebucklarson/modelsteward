@@ -398,6 +398,33 @@ pub fn fleet_known_ids(
     known
 }
 
+/// The GPU conditions a measurement was taken under: free device
+/// memory (MiB) and any other tenant holding the card.
+///
+/// `--fit` sizes the context against free VRAM, so the same model
+/// legitimately settles at different contexts on different days —
+/// modellab's Spike 1 found one model spanning 105,472–118,016 tokens
+/// across 28 calibrations, one run implying an Ollama model was
+/// resident. Recording the condition turns that spread from unexplained
+/// noise into data (modellab handoff 2026-09-02, item 2).
+///
+/// Spawns nvidia-smi: worker territory, never a render or poll path.
+pub fn gpu_conditions(cfg: &settings::AppConfig) -> (Option<u64>, Option<String>) {
+    let free = crate::core::discover::nvidia_vram_mib().map(|(free, _)| free);
+    let peer = crate::core::ollama::probe(cfg.ollama_port);
+    let tenant = (!peer.loaded.is_empty()).then(|| {
+        format!(
+            "ollama: {}",
+            peer.loaded
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    (free, tenant)
+}
+
 pub fn write_preset(
     cfg: &settings::AppConfig,
     extra_dirs: &[PathBuf],

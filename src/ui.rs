@@ -2278,7 +2278,7 @@ impl App {
                     ] {
                         ui.strong(h).on_hover_text(match h {
                             "Measured ctx" => "The context window --fit actually settled on when this model was measured on THIS machine (hover a value for its history).",
-                            "Speed" => "Measured baseline: prompt-processing / generation tokens per second (hover for history).",
+                            "Speed" => "Measured baseline: prompt-processing / generation tokens per second. Generation is shown at a realistic KV depth when one has been benched — the empty-cache number reads ~25% optimistic. Hover a value for history and depth.",
                             "OC" => "✔ = in opencode.json. Toggle in the detail panel below.",
                             _ => "Click a model to see its advice, actions, quality, and history below.",
                         });
@@ -2323,13 +2323,39 @@ impl App {
                             let fmt = |v: Option<f64>| {
                                 v.map(|t| format!("{t:.0}")).unwrap_or_else(|| "?".into())
                             };
-                            let text = match (r.pp_tps, r.tg_tps) {
+                            // Show the DEEP generation number when we
+                            // have one: the empty-cache figure reads
+                            // ~25% optimistic against real sessions
+                            // (modellab handoff 2026-09-02).
+                            let text = match (r.pp_tps, r.tg_deep_tps.or(r.tg_tps)) {
                                 (None, None) => "—".to_string(),
                                 (pp, tg) => format!("{}/{}", fmt(pp), fmt(tg)),
                             };
                             let resp = ui.label(text);
-                            if let Some(t) = trail {
-                                resp.on_hover_text(t);
+                            let depth_note = match (r.tg_deep_tps, r.tg_depth, r.tg_tps) {
+                                (Some(_), Some(d), Some(empty)) => format!(
+                                    "\n\nGeneration shown is with {d} tokens already in \
+                                     the cache — what you get mid-conversation. From an \
+                                     empty cache it benches {empty:.0} t/s; attention \
+                                     costs grow with occupancy."
+                                ),
+                                (None, _, Some(_)) => "\n\nGeneration is from an EMPTY \
+                                     cache (no depth pass recorded yet) — expect roughly \
+                                     20-30% less mid-conversation. Re-bench to measure it."
+                                    .to_string(),
+                                _ => String::new(),
+                            };
+                            match (trail, depth_note.is_empty()) {
+                                (Some(t), false) => {
+                                    resp.on_hover_text(format!("{t}{depth_note}"));
+                                }
+                                (Some(t), true) => {
+                                    resp.on_hover_text(t);
+                                }
+                                (None, false) => {
+                                    resp.on_hover_text(depth_note);
+                                }
+                                (None, true) => {}
                             }
                         }
                         ui.label(r.server_status.as_deref().unwrap_or("—"));
@@ -5952,6 +5978,7 @@ fn run_calibration(
         force,
         &embed,
         &off,
+        &|| system::gpu_conditions(cfg),
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));
         },
