@@ -964,6 +964,39 @@ it **read-only** and record adoptions here. We never edit its repo.
   `modellab` crate for measurement code rather than keeping three
   drifting copies of `bench`/`energy`/`quality` across the family.
 
+## From the 2026-09-03 research survey (`docs/research/local-llm-optimization.md`)
+
+Graded external survey of llama.cpp tuning practice, checked against
+our code. Most of it validated existing decisions (recorded there so
+they stop being unexamined instincts). Open items:
+
+- **Reasoning-kwarg deprecation** — builds ≥ b8322 warn that
+  `enable_thinking` via `--chat-template-kwargs` is deprecated in
+  favour of `--reasoning on|off`. Our `aiadvisor` sends both kwargs;
+  branch on build version or move. Also noted: `--reasoning` is a
+  server-startup flag with no per-request toggle, so thinking and
+  non-thinking from one model needs two preset entries.
+- **Quote `llama-fit-params` in the advice column** — projects the
+  context a `--fit` run would choose WITHOUT loading the model and with
+  the GPU occupied. Worker territory (initializes CUDA). Same tool
+  modellab flagged; `--fit` is a projection, not a guarantee
+  (llama.cpp #18066), so anything built on it must verify the server
+  came up — `fetch_settled_ctx` already does.
+- **Settle `-ncmoe`'s counting direction** before ever explaining the
+  flag in the UI: llama.cpp's docs say the FIRST N layers, a
+  practitioner guide says the HIGHEST-numbered. Our measured verdict is
+  safe either way; the explanation would not be.
+- **Surface prompt-cache health more prominently.** The field's
+  highest-leverage agent lever is prefix stability (a changing prompt
+  HEAD turns every turn into a full prefill). We already compute the
+  equivalent signal — the meter's % of prompt served from cache — via
+  token counts rather than log markers (which our child verbosity
+  filters). A sustained drop in that number is the symptom; worth
+  making visible rather than buried.
+- **Never re-enable context shift** to paper over context exhaustion —
+  ggerganov disabled it by default because it corrupts chat-template
+  structure. For agents, failing loudly is correct.
+
 ## Parked / ideas
 
 - ✔ SHIPPED 2026-08-27/28 (see M8 #5 + Managed llama.cpp in the Build
