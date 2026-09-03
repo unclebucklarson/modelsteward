@@ -970,12 +970,13 @@ Graded external survey of llama.cpp tuning practice, checked against
 our code. Most of it validated existing decisions (recorded there so
 they stop being unexamined instincts). Open items:
 
-- **Reasoning-kwarg deprecation** — builds ≥ b8322 warn that
-  `enable_thinking` via `--chat-template-kwargs` is deprecated in
-  favour of `--reasoning on|off`. Our `aiadvisor` sends both kwargs;
-  branch on build version or move. Also noted: `--reasoning` is a
-  server-startup flag with no per-request toggle, so thinking and
-  non-thinking from one model needs two preset entries.
+- ~~Reasoning-kwarg deprecation~~ — **checked 2026-09-03, does not
+  apply.** The b8322 deprecation targets the `--chat-template-kwargs`
+  SERVER FLAG; our presets use the dedicated `reasoning-effort` key and
+  the advisor sends per-request `chat_template_kwargs` in the request
+  body. Zero deprecation lines in a 1 MB b10760 log. Surviving note:
+  `--reasoning` has no per-request toggle, so thinking and
+  non-thinking from one model would need two preset entries.
 - **Quote `llama-fit-params` in the advice column** — projects the
   context a `--fit` run would choose WITHOUT loading the model and with
   the GPU occupied. Worker territory (initializes CUDA). Same tool

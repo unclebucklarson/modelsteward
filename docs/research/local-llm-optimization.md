@@ -197,21 +197,32 @@ invented. Same for the quantization speed/PPL deltas in §5.
 
 Ranked by value; none are urgent, all are cheap. Logged to ROADMAP.
 
-### 4.1 The reasoning-kwarg deprecation (version-sensitive, affects us now)
+### 4.1 The reasoning-kwarg deprecation — checked, and it does NOT apply to us
 
 **[ISSUE]** ([#23351](https://github.com/ggml-org/llama.cpp/discussions/23351))
 builds **≥ b8322** emit: *"Setting 'enable_thinking' via
 `--chat-template-kwargs` is deprecated. Use `--reasoning on` /
-`--reasoning off` instead."*
+`--reasoning off` instead."* Our builds are well past that, so this
+looked like an action item.
 
-We currently send **both** `enable_thinking` and `reasoning_effort` as
-chat-template kwargs from `aiadvisor`, and write `reasoning-effort` into
-presets. The preset route is fine (**[DOC]** still shows it), but the
-advisor's kwarg route will start warning. **Action:** branch on build
-version, or move to `--reasoning`. Note the structural limit while
-we're here: **`--reasoning` is a server-startup flag with no
-per-request toggle**, so serving thinking and non-thinking from one
-model needs two preset entries — relevant if we ever offer that.
+**[OURS] — it isn't, and the check took one command.** The deprecation
+targets the **`--chat-template-kwargs` server flag**. We don't use it:
+presets carry the dedicated `reasoning-effort` key (**[DOC]**, current),
+and `aiadvisor` sends `chat_template_kwargs` as a **per-request JSON
+field** in the chat-completions body — a different mechanism the
+deprecation doesn't touch. Confirmed empirically: **zero** deprecation
+lines in a 1 MB router.log from b10760.
+
+*Left in this document deliberately, as a worked example of the
+discipline it preaches: a plausible, well-sourced, version-matched
+finding that still turned out not to apply. Grep before you refactor.*
+
+Two real notes survive from it: **`--reasoning` is a server-startup
+flag with no per-request toggle**, so serving thinking and non-thinking
+from one model would need two preset entries; and the kwarg names
+themselves are template-specific (we read ours from each model's own
+chat template — see `core/reasoning.rs`), which is the right way to
+avoid this whole class of problem.
 
 ### 4.2 Prompt-prefix stability is the highest-leverage agent lever
 
@@ -320,10 +331,11 @@ realistic KV depth (`-d`), recording free VRAM as a measurement
 condition, and dropping the report's "measured … not estimated"
 overclaim.
 
-**Worth doing:** the reasoning-kwarg deprecation branch (§4.1), quoting
-`llama-fit-params` in advice (§4.3), settling `-ncmoe`'s direction
-before explaining it (§4.4), and surfacing prompt-cache health more
-prominently (§4.2).
+**Worth doing:** quoting `llama-fit-params` in advice (§4.3), settling
+`-ncmoe`'s direction before explaining it (§4.4), and surfacing
+prompt-cache health more prominently (§4.2). The reasoning-kwarg
+deprecation (§4.1) was checked and does not apply — kept as a worked
+example of verifying before acting.
 
 **The meta-lesson.** Most of this field's tuning advice is folklore
 with invented decimals. The defensible parts are (a) llama.cpp's own
