@@ -659,7 +659,15 @@ fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
                 std::io::stdout().flush().ok();
             }
             println!();
-            anyhow::ensure!(up, "router did not come up within 30s — see router.log");
+            if !up {
+                anyhow::bail!(
+                    "{}",
+                    router::failure_reason_from_log(&dir).map_or_else(
+                        || "router did not come up within 30s — see router.log".to_string(),
+                        |why| format!("router failed to start: {why}")
+                    )
+                );
+            }
         }
         other => anyhow::bail!("port {} is not ours to set up: {other}", cfg.port),
     }

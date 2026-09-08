@@ -129,6 +129,19 @@ Non-obvious constraints that shape the code:
   latter is material Scott provides (with its source URL beside it) —
   quote and grade it like any external source, and never silently edit
   it to match our conclusions. Reconciliation belongs in our doc.
+- **Every spawn must be reaped.** `std::process::Child` does not wait on
+  drop, so a `.spawn()` whose handle is dropped leaves a `<defunct>`
+  child for the life of the GUI (four llama-servers in one session,
+  2026-09-07). Route long-lived spawns through
+  `system::reap_in_background`; `.status()`/`.output()` already reap and
+  must not be. `system::zombie_children()` is the canary and the
+  Connections tab shows it.
+- **"Is the port free?" is a TCP question, not an HTTP one.**
+  `fetch_models` answers "is a llama.cpp router there?", so every other
+  kind of server reads as an empty port — which is how we spawned onto a
+  port another app held and then blamed a 30s timeout on the log file.
+  Use `router::port_in_use` before binding; keep `fetch_models` for
+  ownership.
 - **Log grammars drift** — evidence.rs speaks both the pre- and
   post-b10672 dialects; when the meter reads zero while tokens flow,
   suspect a new dialect before suspecting the code.

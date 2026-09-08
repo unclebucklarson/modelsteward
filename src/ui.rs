@@ -140,6 +140,9 @@ struct App {
     edit_server_bin: String,
     edit_ollama_port: String,
     edit_models_max: String,
+    /// Connections-tab port draft, separate from the Settings buffer so
+    /// the two panes don't overwrite each other mid-edit.
+    conn_port: String,
 
     activity: Vec<String>,
     busy: Option<String>,
@@ -364,6 +367,7 @@ impl App {
             live_vram: None,
             edit_scan_dirs: String::new(),
             edit_port: String::new(),
+            conn_port: String::new(),
             edit_server_bin: String::new(),
             edit_ollama_port: String::new(),
             edit_models_max: String::new(),
@@ -413,6 +417,7 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         self.edit_port = self.cfg.port.to_string();
+        self.conn_port = self.cfg.port.to_string();
         self.edit_server_bin = self
             .cfg
             .server_bin
@@ -1059,6 +1064,38 @@ impl App {
                     Err(e) => Msg::Error(format!("stop: {e:#}")),
                 },
             );
+        });
+    }
+
+    /// Kill llama-servers running our preset that ordinary Stop cannot
+    /// reach — no marker, wrong port, or a start that half-failed.
+    fn action_kill_strays(&mut self) {
+        let preset = system::preset_path();
+        let found = router::preset_processes(&preset);
+        if found.is_empty() {
+            let zombies = system::zombie_children();
+            self.log(if zombies.is_empty() {
+                "no stray llama-server processes running our preset".to_string()
+            } else {
+                format!(
+                    "no LIVE strays; {} already-exited child(ren) remain ({}) — \
+                     these are reaped automatically now and clear on restart",
+                    zombies.len(),
+                    zombies.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                )
+            });
+            return;
+        }
+        self.spawn("cleaning up stray servers", move |tx| {
+            let _ = tx.send(match router::kill_strays(&preset) {
+                Ok(pids) if pids.is_empty() => Msg::Error("found strays but none could be signalled".into()),
+                Ok(pids) => Msg::Finished(format!(
+                    "SIGTERMed {} stray server(s): {}",
+                    pids.len(),
+                    pids.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+                )),
+                Err(e) => Msg::Error(format!("cleanup: {e:#}")),
+            });
         });
     }
 
@@ -2061,6 +2098,24 @@ impl App {
                 open_path = Some(router::state_dir().join("router.log"));
                 ui.close();
             }
+            // The escape hatch for "Stop says there is nothing to stop,
+            // but something is clearly still holding the port". Stop
+            // works through the marker; this works through the preset,
+            // so it also catches servers this app did not start THIS
+            // run (2026-09-07).
+            if ui
+                .button("Clean Up Stray Servers…")
+                .on_hover_text(
+                    "SIGTERMs every llama-server running OUR preset file, whatever \
+                     port it is on and whether or not we have a record of starting \
+                     it. Servers you started yourself are never touched — running \
+                     our generated preset is the credential.",
+                )
+                .clicked()
+            {
+                self.action_kill_strays();
+                ui.close();
+            }
             ui.separator();
             if ui
                 .button("Export Findings Report…")
@@ -2079,7 +2134,9 @@ impl App {
                         Ok(path) => {
                             // Open only after the file exists — review is
                             // the whole point.
-                            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+                            if let Ok(c) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                                system::reap_in_background(c);
+                            }
                             Msg::Finished(format!(
                                 "findings report written and opened: {} — review it, then \
                                  share it wherever you choose",
@@ -2093,7 +2150,10 @@ impl App {
             }
             if let Some(path) = open_path {
                 match std::process::Command::new("xdg-open").arg(&path).spawn() {
-                    Ok(_) => self.log(format!("opened {}", path.display())),
+                    Ok(c) => {
+                        system::reap_in_background(c);
+                        self.log(format!("opened {}", path.display()));
+                    }
                     Err(e) => self.log(format!("ERROR opening {}: {e}", path.display())),
                 }
             }
@@ -3520,14 +3580,88 @@ impl App {
         // The base URL is the identity of this whole tab — one line,
         // always visible above the sub-tabs.
         let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
+        if self.conn_port.is_empty() {
+            self.conn_port = self.cfg.port.to_string();
+        }
+        // The port is editable HERE, where the base URL lives, because
+        // this is where people come when another app needs a different
+        // one. It used to be only in Settings, and a typed-but-unsaved
+        // value looked exactly like a live one — Scott changed the port
+        // to 8181, watched this line keep saying 8080, and spent a
+        // session debugging a router that was still binding the old port
+        // (2026-09-07). An unapplied edit now says so in the line itself.
+        let typed = self.conn_port.trim().parse::<u16>().ok();
+        let pending = typed.is_some_and(|p| p != self.cfg.port);
         ui.horizontal(|ui| {
             ui.label("Base URL:");
-            ui.monospace(&base_url);
+            ui.monospace("http://127.0.0.1:");
+            let w = ui.add(
+                egui::TextEdit::singleline(&mut self.conn_port)
+                    .desired_width(56.0)
+                    .font(egui::TextStyle::Monospace),
+            );
+            w.on_hover_text(
+                "The port llama-server binds. Changing it restarts the router \
+                 and re-syncs every connector's base URL.",
+            );
+            ui.monospace("/v1");
             if ui.small_button("copy").clicked() {
                 ui.ctx().copy_text(base_url.clone());
                 self.log("base URL copied");
             }
+            match typed {
+                None => {
+                    ui.colored_label(
+                        egui::Color32::from_rgb(220, 60, 60),
+                        format!("⚠ {:?} is not a port", self.conn_port.trim()),
+                    );
+                }
+                Some(p) if pending => {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("⚠ not applied — still serving on {}", self.cfg.port),
+                    );
+                    let busy = self.busy.is_some();
+                    if ui
+                        .add_enabled(!busy, egui::Button::new(format!("Apply :{p}")))
+                        .on_disabled_hover_text("another operation is running")
+                        .on_hover_text(
+                            "Saves the port, restarts the router on it, and re-syncs \
+                             OpenCode/pi/Hermes so their base URLs follow.",
+                        )
+                        .clicked()
+                    {
+                        self.apply_port_change(p);
+                    }
+                }
+                Some(_) => {}
+            }
         });
+        // Zombie children are ours by definition, so this is never noise
+        // about someone else's processes. It should always be empty now
+        // that every spawn is reaped; if it isn't, a spawn path forgot.
+        let zombies = system::zombie_children();
+        if !zombies.is_empty() {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!(
+                        "⚠ {} exited server process(es) not cleaned up: {}",
+                        zombies.len(),
+                        zombies
+                            .iter()
+                            .map(u32::to_string)
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                )
+                .on_hover_text(
+                    "Children that exited but were never reaped. They hold a PID \
+                     table entry and nothing else. Restarting modelsteward clears \
+                     them; new starts are reaped automatically.",
+                );
+            });
+        }
         ui.horizontal(|ui| {
             let pi_here = piagent::pi_present(&piagent::default_models_path());
             let hermes_here = hermes::hermes_present(&hermes::default_home());
@@ -3890,7 +4024,10 @@ impl App {
                 .clicked()
             {
                 match std::process::Command::new("xdg-open").arg(&path).spawn() {
-                    Ok(_) => self.log(format!("opened {}", path.display())),
+                    Ok(c) => {
+                        system::reap_in_background(c);
+                        self.log(format!("opened {}", path.display()));
+                    }
                     Err(e) => self.log(format!("ERROR opening {}: {e}", path.display())),
                 }
             }
@@ -4310,6 +4447,40 @@ impl App {
     /// Review G12: the one-click follow-through after router settings
     /// change — stop, regen preset, start, sync. What the log used to
     /// tell the user to go do by hand.
+    /// Change the router port from the Connections tab and make it
+    /// real: persist it, then run the same restart+resync the Settings
+    /// pane's "Apply now" runs. Saving without restarting is what made
+    /// the old flow so confusing — the config said one thing and the
+    /// running server another (2026-09-07).
+    fn apply_port_change(&mut self, port: u16) {
+        if port == self.cfg.port {
+            return;
+        }
+        // Refuse before restarting rather than after: stopping a working
+        // router to find the new port occupied is a strictly worse
+        // outcome than declining the change.
+        if router::port_in_use(port) {
+            self.log(format!(
+                "ERROR: port {port} is already in use by another process — \
+                 the router was left on {}",
+                self.cfg.port
+            ));
+            self.conn_port = self.cfg.port.to_string();
+            return;
+        }
+        let old = self.cfg.port;
+        self.cfg.port = port;
+        if let Err(e) = self.cfg.save(&system::config_file()) {
+            self.cfg.port = old;
+            self.log(format!("ERROR saving port: {e:#}"));
+            return;
+        }
+        // Keep the Settings buffer honest — it renders the same value.
+        self.edit_port = port.to_string();
+        self.log(format!("router port {old} -> {port}; restarting"));
+        self.action_apply_settings();
+    }
+
     fn action_apply_settings(&mut self) {
         if let Some(msg) =
             self.serving_disruption("Applying settings (a full router restart)")
@@ -5405,7 +5576,9 @@ impl App {
         }
         if show_log {
             let path = router::state_dir().join("router.log");
-            let _ = std::process::Command::new("xdg-open").arg(&path).spawn();
+            if let Ok(c) = std::process::Command::new("xdg-open").arg(&path).spawn() {
+                                system::reap_in_background(c);
+                            }
             self.log(format!("opened {}", path.display()));
         }
         if ask_ai {
@@ -6266,9 +6439,12 @@ fn start_router_and_wait(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
             return true;
         }
     }
-    let _ = tx.send(Msg::Error(
-        "router did not come up within 30s — see router.log".into(),
-    ));
+    // llama-server's own log knows exactly why; say so instead of
+    // sending the user to open a file (2026-09-07).
+    let _ = tx.send(Msg::Error(match router::failure_reason_from_log(&dir) {
+        Some(why) => format!("router failed to start: {why}"),
+        None => "router did not come up within 30s — see router.log".into(),
+    }));
     false
 }
 

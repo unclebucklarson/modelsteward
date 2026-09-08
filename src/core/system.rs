@@ -475,6 +475,61 @@ pub fn write_preset(
     Ok((preset_path(), entries.len()))
 }
 
+/// Wait on a spawned child in a detached thread so it can never become
+/// a zombie.
+///
+/// `std::process::Child` does **not** reap on drop — the docs are
+/// explicit that dropping the handle leaves the child running and, once
+/// it exits, `<defunct>` until someone waits on it. In a short-lived CLI
+/// that never matters (init inherits and reaps at exit); in a GUI that
+/// runs for days it is a slow leak of PID-table entries. Scott's session
+/// on 2026-09-07 had four `[llama-server] <defunct>` children, one per
+/// failed router start.
+///
+/// Use this for every spawn whose exit we do not otherwise wait on.
+/// Commands run through `.status()` or `.output()` already reap
+/// themselves and must NOT be routed through here.
+pub fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
+/// Zombie children of THIS process: pids whose parent is us and whose
+/// `/proc` state is `Z`. Should always be empty now that spawns are
+/// reaped — which is exactly why it is worth showing in the UI, as a
+/// canary for a spawn path that forgot.
+pub fn zombie_children() -> Vec<u32> {
+    let me = std::process::id();
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+            continue;
+        };
+        // Fields after the LAST ')': a comm can contain parens and
+        // spaces, so splitting from the left is wrong. state = [0],
+        // ppid = [1].
+        let Some((_, after)) = stat.rsplit_once(')') else {
+            continue;
+        };
+        let mut f = after.split_whitespace();
+        let (Some(state), Some(ppid)) = (f.next(), f.next()) else {
+            continue;
+        };
+        if state == "Z" && ppid.parse::<u32>() == Ok(me) {
+            out.push(pid);
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -483,6 +483,17 @@ pub fn start(dir: &Path, cfg: &RouterConfig) -> Result<u32> {
             cfg.port
         );
     }
+    // Not a llama.cpp server, but SOMETHING holds the socket. Without
+    // this the spawn "succeeds", llama-server dies on bind ~200ms later,
+    // and the caller waits the full 30s before pointing at a log file
+    // (live failure 2026-09-07: Project NOMAD on 8080).
+    if port_in_use(cfg.port) {
+        bail!(
+            "port {} is already in use by another process (not a llama.cpp server) — \
+             change the router port on the Connections tab",
+            cfg.port
+        );
+    }
     std::fs::create_dir_all(dir)?;
     let log = std::fs::File::create(dir.join("router.log")).context("creating router.log")?;
     let child = std::process::Command::new(&cfg.server_bin)
@@ -500,6 +511,11 @@ pub fn start(dir: &Path, cfg: &RouterConfig) -> Result<u32> {
         .spawn()
         .with_context(|| format!("spawning {}", cfg.server_bin.display()))?;
     let pid = child.id();
+    // Reap it. std's Child does not wait on drop, so before this every
+    // exited llama-server stayed <defunct> under the GUI — four of them
+    // in one session on 2026-09-07. Owning the handle here also means a
+    // router that dies on bind is cleaned up the instant it dies.
+    crate::core::system::reap_in_background(child);
     write_marker(
         dir,
         &Marker {
@@ -1178,6 +1194,247 @@ pub fn reload(port: u16) -> Result<Vec<RouterModel>> {
         .context("router reload failed")?
         .into_json()?;
     Ok(parse_models_response(&body))
+}
+
+// ─── start-failure diagnosis ─────────────────────────────────────────────────
+
+/// Is anything at all listening on this port? A TCP bind probe — the
+/// same question llama-server will ask a moment later.
+///
+/// [`fetch_models`] cannot answer this. It asks "is a llama.cpp ROUTER
+/// there?", so every other kind of server reads as an empty port. On
+/// 2026-09-07 Project NOMAD held 8080, our `/models` probe failed, we
+/// declared the port free, spawned, and llama-server died on bind —
+/// which the user experienced as a 30-second wait, a "see router.log",
+/// and a zombie. Ownership questions still belong to `fetch_models`
+/// (a *llama.cpp* server there may be ours); this one is only ever
+/// "can we bind at all".
+///
+/// Inherently racy — the port can be taken between the probe and the
+/// spawn — but it converts the overwhelmingly common case from a
+/// timeout into an instant, accurate refusal, and the log-tail path
+/// below still catches the race.
+pub fn port_in_use(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_err()
+}
+
+/// Why did the router die? Reads llama-server's own log, which knows
+/// exactly, instead of making the user open it.
+///
+/// Deliberately not keyed to the ` E srv ` column layout: log grammars
+/// drift (CLAUDE.md), so this matches on the *words* a failure uses and
+/// strips whatever timestamp/severity decoration precedes them.
+/// Returns `None` for a healthy log — "no reason found" must stay
+/// distinguishable from "here is the reason".
+pub fn failure_reason(log: &str) -> Option<String> {
+    let is_error = |l: &str| {
+        let low = l.to_lowercase();
+        low.contains("couldn't")
+            || low.contains("could not")
+            || low.contains("cannot")
+            || low.contains("failed")
+            || low.contains("unable")
+            || low.contains("[error]")
+            || low.split_whitespace().any(|t| t == "E")
+    };
+    let last = log.lines().rfind(|l| is_error(l))?;
+
+    // A bind failure is the one we can put in plain language, and the
+    // one most likely to be a user's own doing.
+    if last.to_lowercase().contains("bind")
+        && let Some(port) = last
+            .rsplit_once("port:")
+            .and_then(|(_, t)| t.trim().split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()))
+    {
+        return Some(format!(
+            "port {port} is already in use by another process — llama-server could not bind it"
+        ));
+    }
+    Some(strip_log_decoration(last))
+}
+
+/// Drop a leading `0.00.189.904`-style timestamp and a single-letter
+/// severity, then collapse the runs of spaces llama.cpp uses to align
+/// its subsystem column.
+fn strip_log_decoration(line: &str) -> String {
+    let mut toks: Vec<&str> = line.split_whitespace().collect();
+    if toks
+        .first()
+        .is_some_and(|t| t.chars().all(|c| c.is_ascii_digit() || c == '.') && t.contains('.'))
+    {
+        toks.remove(0);
+    }
+    if toks.first().is_some_and(|t| t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase())) {
+        toks.remove(0);
+    }
+    toks.join(" ")
+}
+
+/// [`failure_reason`] over the router's log file, tail only — the log is
+/// recreated per start, but a long healthy run can still make it large.
+pub fn failure_reason_from_log(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join("router.log")).ok()?;
+    let tail: String = {
+        let lines: Vec<&str> = text.lines().collect();
+        lines[lines.len().saturating_sub(80)..].join("\n")
+    };
+    failure_reason(&tail)
+}
+
+/// Every live process running our preset. [`find_preset_process`]
+/// returns the first; cleaning up strays needs all of them.
+pub fn preset_processes(preset: &Path) -> Vec<u32> {
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for e in entries.flatten() {
+        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+            continue;
+        };
+        if let Ok(cmdline) = std::fs::read(e.path().join("cmdline")) {
+            let cmdline = String::from_utf8_lossy(&cmdline).replace('\0', " ");
+            if cmdline_matches(&cmdline, preset) {
+                out.push(pid);
+            }
+        }
+    }
+    out.sort_unstable();
+    out
+}
+
+/// SIGTERM every live llama-server running our preset, whatever port it
+/// is on and whether or not we have a marker for it. Still bound by
+/// "never touch a server we didn't start": running OUR generated preset
+/// is the ownership credential, exactly as in [`stop`]. Returns the pids
+/// signalled.
+pub fn kill_strays(preset: &Path) -> Result<Vec<u32>> {
+    let pids = preset_processes(preset);
+    let mut killed = Vec::new();
+    for pid in pids {
+        if std::process::Command::new("kill")
+            .arg(pid.to_string())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            killed.push(pid);
+        }
+    }
+    Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_start_failure {
+    use super::*;
+
+    /// The live incident, 2026-09-07. Scott pointed modelsteward at a
+    /// machine where Project NOMAD already held 8080. Our only "is the
+    /// port free?" check was fetch_models(), which asks "is a llama.cpp
+    /// ROUTER there?" — NOMAD answered nothing it recognised, so we
+    /// called the port free, spawned, and llama-server died on bind.
+    /// Four zombies and a 30s timeout later the user still had to open
+    /// a log file to find out why.
+    const REAL_BIND_FAILURE: &str = concat!(
+        "0.00.189.869 I srv  llama_server: starting server in router mode. models will be automatically loaded on-demand\n",
+        "0.00.189.904 E srv         start: couldn't bind HTTP server socket, hostname: 127.0.0.1, port: 8080\n",
+        "0.00.189.905 I srv    operator(): operator(): cleaning up before exit...\n",
+        "0.00.190.082 E srv  llama_server: exiting due to HTTP server error\n",
+    );
+
+    #[test]
+    fn bind_failure_becomes_plain_language_naming_the_port() {
+        let r = failure_reason(REAL_BIND_FAILURE).expect("a reason");
+        assert!(r.contains("8080"), "must name the port: {r}");
+        assert!(
+            r.to_lowercase().contains("in use"),
+            "must say the port is taken, not quote llama.cpp at the user: {r}"
+        );
+        assert!(
+            !r.contains("0.00.189"),
+            "timestamps are noise in a user-facing line: {r}"
+        );
+    }
+
+    #[test]
+    fn a_non_bind_error_is_still_reported_verbatim_enough_to_act_on() {
+        let log = "0.00.1 I srv starting\n\
+                   0.00.2 E srv load: failed to load model '/models/gone.gguf'\n";
+        let r = failure_reason(log).expect("a reason");
+        assert!(r.contains("gone.gguf"), "keep the actionable detail: {r}");
+        assert!(!r.starts_with("0.00"), "strip the timestamp: {r}");
+    }
+
+    /// A clean startup log must not manufacture a failure — the wait
+    /// loop calls this on timeout, and "no reason found" has to stay
+    /// distinguishable from "here is the reason".
+    #[test]
+    fn a_healthy_log_yields_no_reason() {
+        let log = "0.00.1 I srv  llama_server: starting server in router mode\n\
+                   0.00.2 I srv  llama_server: listening on 127.0.0.1:8181\n";
+        assert_eq!(failure_reason(log), None);
+    }
+
+    /// Log grammars drift (CLAUDE.md): don't key off the ` E srv `
+    /// column layout alone.
+    #[test]
+    fn reason_survives_a_severity_column_that_moves() {
+        let log = "[error] server: couldn't bind HTTP server socket, port: 9999\n";
+        let r = failure_reason(log).expect("a reason");
+        assert!(r.contains("9999"), "{r}");
+    }
+
+    #[test]
+    fn port_in_use_sees_a_bound_socket_that_fetch_models_would_miss() {
+        // Bind a plain TCP listener that speaks no HTTP at all — this is
+        // NOMAD from our side: a real socket holder that /models cannot
+        // detect.
+        let l = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = l.local_addr().unwrap().port();
+        assert!(port_in_use(port), "a bound port must read as in use");
+        drop(l);
+        assert!(!port_in_use(port), "and free again once released");
+    }
+}
+
+#[cfg(test)]
+mod tests_reaping {
+    /// std's Child does NOT reap on drop. router::start() took the pid
+    /// and dropped the handle, so every llama-server that exited stayed
+    /// a <defunct> entry owned by the GUI — four of them on Scott's
+    /// machine on 2026-09-07, one per failed start.
+    #[test]
+    fn a_reaped_child_leaves_no_zombie() {
+        let child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn /bin/true");
+        let pid = child.id();
+        crate::core::system::reap_in_background(child);
+
+        // The reaper runs on its own thread; give it a moment.
+        let mut state = 'x';
+        for _ in 0..100 {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+            match proc_state(pid) {
+                None => return, // fully gone — reaped
+                Some(s) => {
+                    state = s;
+                    if s != 'Z' {
+                        continue;
+                    }
+                }
+            }
+        }
+        panic!("pid {pid} still present as state {state:?} — not reaped");
+    }
+
+    /// Field 3 of /proc/<pid>/stat, parsed after the LAST ')' because a
+    /// comm can itself contain parens and spaces.
+    fn proc_state(pid: u32) -> Option<char> {
+        let s = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after = s.rsplit_once(')')?.1;
+        after.split_whitespace().next()?.chars().next()
+    }
 }
 
 #[cfg(test)]
