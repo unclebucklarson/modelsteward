@@ -193,6 +193,46 @@ pub fn merge_model(
     Ok(apply_splices(source, splices))
 }
 
+/// Point an EXISTING provider block at a new base URL.
+///
+/// [`ensure_models_container`] only consults its scaffold when it
+/// *creates* the block; once `provider.<id>` exists it returns the source
+/// untouched. So every router-port change since the provider was first
+/// written left opencode.json pointing at the old port — the config said
+/// 8181 and OpenCode kept calling 8080 (found 2026-09-08).
+///
+/// Merges rather than replaces, for the same reason [`merge_model`] does:
+/// `options` is a user-editable object that may hold an `apiKey` or a
+/// hand-written comment, and none of that is ours to discard. A provider
+/// that is already correct returns the source byte-for-byte, so a no-op
+/// sync cannot dirty the file.
+pub fn set_provider_base_url(
+    source: &str,
+    provider_id: &str,
+    base_url: &str,
+) -> Result<String, EditError> {
+    let ast = parse_source(source)?;
+    let root = extract_root_object(&ast)?;
+    let block = navigate_to_provider(root, provider_id)?;
+
+    // Already right? Change nothing.
+    if block
+        .get("options")
+        .and_then(|o| o.value.as_object())
+        .and_then(|o| o.get("baseURL"))
+        .and_then(|b| b.value.as_string_lit())
+        .is_some_and(|b| b.value == base_url)
+    {
+        return Ok(source.to_string());
+    }
+
+    let patch = serde_json::json!({ "options": { "baseURL": base_url } });
+    let patch_obj = patch.as_object().expect("literal object");
+    let mut splices = Vec::new();
+    collect_merge_splices(source, block, patch_obj, &mut splices)?;
+    Ok(apply_splices(source, splices))
+}
+
 /// Comment out an entire model entry, leaving it in the file.
 ///
 /// Removal is the one destructive thing this tool does, so it isn't a
@@ -596,7 +636,7 @@ fn extract_root_object<'a, 'b>(ast: &'b ParsedAst<'a>) -> Result<&'b Object<'a>,
 
 /// Navigate `root -> provider -> <provider_id> -> models`. Returns the models
 /// object; returns `MissingContainer` if any hop is absent.
-fn navigate_to_models<'a, 'b>(
+fn navigate_to_provider<'a, 'b>(
     root: &'b Object<'a>,
     provider_id: &str,
 ) -> Result<&'b Object<'a>, EditError> {
@@ -616,12 +656,19 @@ fn navigate_to_models<'a, 'b>(
         .ok_or_else(|| EditError::MissingContainer {
             path: format!("provider.{provider_id}"),
         })?;
-    let block_obj = block
+    block
         .value
         .as_object()
         .ok_or_else(|| EditError::NotObject {
             path: format!("provider.{provider_id}"),
-        })?;
+        })
+}
+
+fn navigate_to_models<'a, 'b>(
+    root: &'b Object<'a>,
+    provider_id: &str,
+) -> Result<&'b Object<'a>, EditError> {
+    let block_obj = navigate_to_provider(root, provider_id)?;
     let models = block_obj
         .get("models")
         .ok_or_else(|| EditError::MissingContainer {
@@ -761,6 +808,107 @@ fn splice_into_object(source: &str, object: &Object<'_>, entry_text: &str) -> St
 }
 
 // ─── tests ───────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests_base_url {
+    use super::*;
+
+    /// Scott's real file shape, reduced: our provider already exists, so
+    /// `ensure_models_container` returns the source untouched and the
+    /// scaffold's baseURL is never consulted. Changing the router port
+    /// left opencode.json pointing at the old one forever — found
+    /// 2026-09-08, the third defect in the port-change chain.
+    const REAL: &str = r#"{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "llamacpp": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "llama.cpp (modelsteward)",
+      "options": {
+        // hand-written note that must survive
+        "baseURL": "http://127.0.0.1:8080/v1"
+      },
+      "models": {
+        "qwen3.8-27b-ud-q4_k_xl": { "name": "qwen (llama.cpp)" }
+      }
+    },
+    "ollama": {
+      "options": { "baseURL": "http://127.0.0.1:11434/v1" }
+    }
+  }
+}"#;
+
+    #[test]
+    fn rewrites_our_base_url_in_place() {
+        let out = set_provider_base_url(REAL, "llamacpp", "http://127.0.0.1:8181/v1").unwrap();
+        assert!(
+            out.contains("\"baseURL\": \"http://127.0.0.1:8181/v1\""),
+            "our baseURL must move to the new port:\n{out}"
+        );
+        assert!(
+            !out.contains("127.0.0.1:8080"),
+            "and the old one must be gone:\n{out}"
+        );
+    }
+
+    #[test]
+    fn leaves_every_other_provider_alone() {
+        let out = set_provider_base_url(REAL, "llamacpp", "http://127.0.0.1:8181/v1").unwrap();
+        assert!(
+            out.contains("\"baseURL\": \"http://127.0.0.1:11434/v1\""),
+            "Ollama's peer entry is not ours to touch:\n{out}"
+        );
+    }
+
+    #[test]
+    fn preserves_comments_and_models() {
+        let out = set_provider_base_url(REAL, "llamacpp", "http://127.0.0.1:8181/v1").unwrap();
+        assert!(out.contains("// hand-written note that must survive"), "{out}");
+        assert!(out.contains("qwen3.8-27b-ud-q4_k_xl"), "{out}");
+        assert!(strictly_valid(&out).is_ok(), "still parses:\n{out}");
+    }
+
+    /// A sibling key the user set by hand lives in the same `options`
+    /// object; a wholesale replace would eat it.
+    #[test]
+    fn keeps_sibling_options() {
+        let src = r#"{
+  "provider": {
+    "llamacpp": {
+      "options": { "baseURL": "http://127.0.0.1:8080/v1", "apiKey": "mine" },
+      "models": {}
+    }
+  }
+}"#;
+        let out = set_provider_base_url(src, "llamacpp", "http://127.0.0.1:9000/v1").unwrap();
+        assert!(out.contains("\"apiKey\": \"mine\""), "{out}");
+        assert!(out.contains("9000"), "{out}");
+    }
+
+    /// Provider block exists but predates any `options` key.
+    #[test]
+    fn inserts_options_when_absent() {
+        let src = r#"{
+  "provider": {
+    "llamacpp": {
+      "name": "llama.cpp (modelsteward)",
+      "models": {}
+    }
+  }
+}"#;
+        let out = set_provider_base_url(src, "llamacpp", "http://127.0.0.1:8181/v1").unwrap();
+        assert!(out.contains("8181"), "{out}");
+        assert!(strictly_valid(&out).is_ok(), "{out}");
+    }
+
+    /// Already correct: no rewrite, so a no-op sync cannot dirty the file
+    /// or trip the "differs" state in the Connections mirror.
+    #[test]
+    fn unchanged_when_already_right() {
+        let out = set_provider_base_url(REAL, "llamacpp", "http://127.0.0.1:8080/v1").unwrap();
+        assert_eq!(out, REAL);
+    }
+}
 
 #[cfg(test)]
 mod tests {

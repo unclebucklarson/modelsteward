@@ -105,6 +105,10 @@ pub struct SyncReport {
     /// opencode.json doesn't exist — OpenCode isn't installed; nothing
     /// was written and that's fine (Connections serves other clients).
     pub skipped_missing: bool,
+    /// The provider's baseURL was repointed (a router port change).
+    /// Worth saying out loud: it is the one edit that changes where
+    /// OpenCode sends every request, and it used to not happen at all.
+    pub base_url_repointed: Option<String>,
 }
 
 /// Compute the new source text. Pure with respect to the filesystem —
@@ -123,6 +127,15 @@ pub fn sync_source(
 
     let mut source = jsonc::ensure_models_container(source, PROVIDER_ID, &scaffold)
         .context("ensuring provider.llamacpp.models exists")?;
+
+    // ensure_models_container only uses the scaffold when it CREATES the
+    // block, so on an existing file the baseURL above was never applied.
+    // A router port change therefore never reached OpenCode: our config
+    // said 8181 while OpenCode kept calling 8080 (2026-09-08).
+    let before = source.clone();
+    source = jsonc::set_provider_base_url(&source, PROVIDER_ID, base_url)
+        .context("pointing provider.llamacpp at the current base URL")?;
+    let base_url_changed = source != before;
 
     let existing = existing_model_ids(&source)?;
     // Which existing entries already carry a tool_call key (hand-set or
@@ -151,6 +164,9 @@ pub fn sync_source(
     }
 
     let desired_ids: std::collections::HashSet<_> = desired.iter().map(|d| d.id.as_str()).collect();
+    if base_url_changed {
+        report.base_url_repointed = Some(base_url.to_string());
+    }
     report.orphans = existing
         .into_iter()
         .filter(|id| !desired_ids.contains(id.as_str()))

@@ -1123,6 +1123,20 @@ independent direction and opened one whole category we had missed.
 - **`llama-sweep-bench`** exists as an upstream sweep binary; we
   hand-roll sweeps. Worth an evaluation before building more of ours.
 
+## Found 2026-09-08 while fixing the port chain
+
+- **Hermes registration does not follow a port change.**
+  `hermes::register_provider` bails when `registered_provider(text,
+  base_url)` already matches — but that lookup is keyed BY base_url, so
+  after a port change it finds nothing and would register a SECOND
+  provider block beside the stale one, rather than repointing the first.
+  opencode (fixed) and pi (already correct — it rebuilds the block and
+  compares `old_base_url`) both handle this; Hermes is the odd one out.
+  Lower stakes because registration is a deliberate one-time button
+  rather than part of sync, which is why it is logged rather than fixed
+  here. The fix is the same shape as opencode's: find our block by
+  provider NAME, then repoint its `base_url`.
+
 ## Parked / ideas
 
 - ✔ SHIPPED 2026-08-27/28 (see M8 #5 + Managed llama.cpp in the Build

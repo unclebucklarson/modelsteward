@@ -140,9 +140,6 @@ struct App {
     edit_server_bin: String,
     edit_ollama_port: String,
     edit_models_max: String,
-    /// Connections-tab port draft, separate from the Settings buffer so
-    /// the two panes don't overwrite each other mid-edit.
-    conn_port: String,
 
     activity: Vec<String>,
     busy: Option<String>,
@@ -367,7 +364,6 @@ impl App {
             live_vram: None,
             edit_scan_dirs: String::new(),
             edit_port: String::new(),
-            conn_port: String::new(),
             edit_server_bin: String::new(),
             edit_ollama_port: String::new(),
             edit_models_max: String::new(),
@@ -417,7 +413,6 @@ impl App {
             .collect::<Vec<_>>()
             .join("\n");
         self.edit_port = self.cfg.port.to_string();
-        self.conn_port = self.cfg.port.to_string();
         self.edit_server_bin = self
             .cfg
             .server_bin
@@ -1890,6 +1885,12 @@ impl App {
                              skipped (other apps connect via the Connections tab)"
                                 .to_string(),
                         );
+                    }
+                    if let Some(url) = &r.base_url_repointed {
+                        self.log(format!(
+                            "sync: OpenCode's base URL repointed to {url} — restart \
+                             OpenCode (or reload its config) to pick it up"
+                        ));
                     }
                     for id in &r.ghosts_commented {
                         self.log(format!(
@@ -3580,61 +3581,29 @@ impl App {
         // The base URL is the identity of this whole tab — one line,
         // always visible above the sub-tabs.
         let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
-        if self.conn_port.is_empty() {
-            self.conn_port = self.cfg.port.to_string();
-        }
-        // The port is editable HERE, where the base URL lives, because
-        // this is where people come when another app needs a different
-        // one. It used to be only in Settings, and a typed-but-unsaved
-        // value looked exactly like a live one — Scott changed the port
-        // to 8181, watched this line keep saying 8080, and spent a
-        // session debugging a router that was still binding the old port
-        // (2026-09-07). An unapplied edit now says so in the line itself.
-        let typed = self.conn_port.trim().parse::<u16>().ok();
-        let pending = typed.is_some_and(|p| p != self.cfg.port);
+        // Read-only on purpose. Settings is the ONE surface that selects
+        // what serves (CLAUDE.md), and the port is that kind of decision:
+        // a second editor here meant two buffers for one value, which
+        // promptly diverged — a Settings save left this pane offering to
+        // "apply" the port you had just replaced (2026-09-08). What the
+        // Connections tab owes you is the current URL and a short path to
+        // where it changes.
         ui.horizontal(|ui| {
             ui.label("Base URL:");
-            ui.monospace("http://127.0.0.1:");
-            let w = ui.add(
-                egui::TextEdit::singleline(&mut self.conn_port)
-                    .desired_width(56.0)
-                    .font(egui::TextStyle::Monospace),
-            );
-            w.on_hover_text(
-                "The port llama-server binds. Changing it restarts the router \
-                 and re-syncs every connector's base URL.",
-            );
-            ui.monospace("/v1");
+            ui.monospace(&base_url);
             if ui.small_button("copy").clicked() {
                 ui.ctx().copy_text(base_url.clone());
                 self.log("base URL copied");
             }
-            match typed {
-                None => {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 60, 60),
-                        format!("⚠ {:?} is not a port", self.conn_port.trim()),
-                    );
-                }
-                Some(p) if pending => {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
-                        format!("⚠ not applied — still serving on {}", self.cfg.port),
-                    );
-                    let busy = self.busy.is_some();
-                    if ui
-                        .add_enabled(!busy, egui::Button::new(format!("Apply :{p}")))
-                        .on_disabled_hover_text("another operation is running")
-                        .on_hover_text(
-                            "Saves the port, restarts the router on it, and re-syncs \
-                             OpenCode/pi/Hermes so their base URLs follow.",
-                        )
-                        .clicked()
-                    {
-                        self.apply_port_change(p);
-                    }
-                }
-                Some(_) => {}
+            if ui
+                .small_button("change port…")
+                .on_hover_text(
+                    "Opens Settings, where the router port lives. Changing it \
+                     restarts the router and repoints every connector's base URL.",
+                )
+                .clicked()
+            {
+                self.pane = Pane::Settings;
             }
         });
         // Zombie children are ours by definition, so this is never noise
@@ -3648,11 +3617,7 @@ impl App {
                     format!(
                         "⚠ {} exited server process(es) not cleaned up: {}",
                         zombies.len(),
-                        zombies
-                            .iter()
-                            .map(u32::to_string)
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        zombies.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
                     ),
                 )
                 .on_hover_text(
@@ -4179,7 +4144,33 @@ impl App {
 
         egui::Grid::new("settings").num_columns(2).show(ui, |ui| {
             ui.label("Router port");
-            ui.text_edit_singleline(&mut self.edit_port);
+            ui.horizontal(|ui| {
+                ui.text_edit_singleline(&mut self.edit_port);
+                // The gap that cost a session: a typed-but-unsaved port
+                // looked exactly like a live one, so the Connections tab
+                // kept showing the old number and the app looked broken
+                // (2026-09-07). Say it in the row itself, before the save.
+                match self.edit_port.trim().parse::<u16>() {
+                    Ok(p) if p != self.cfg.port => {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!("⚠ unsaved — still serving on {}", self.cfg.port),
+                        )
+                        .on_hover_text(
+                            "Save & Rescan writes it; the router keeps the old port \
+                             until you Apply.",
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(_) if !self.edit_port.trim().is_empty() => {
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 60, 60),
+                            "⚠ not a port number",
+                        );
+                    }
+                    Err(_) => {}
+                }
+            });
             ui.end_row();
             ui.label("llama-server binary");
             ui.horizontal(|ui| {
@@ -4447,40 +4438,6 @@ impl App {
     /// Review G12: the one-click follow-through after router settings
     /// change — stop, regen preset, start, sync. What the log used to
     /// tell the user to go do by hand.
-    /// Change the router port from the Connections tab and make it
-    /// real: persist it, then run the same restart+resync the Settings
-    /// pane's "Apply now" runs. Saving without restarting is what made
-    /// the old flow so confusing — the config said one thing and the
-    /// running server another (2026-09-07).
-    fn apply_port_change(&mut self, port: u16) {
-        if port == self.cfg.port {
-            return;
-        }
-        // Refuse before restarting rather than after: stopping a working
-        // router to find the new port occupied is a strictly worse
-        // outcome than declining the change.
-        if router::port_in_use(port) {
-            self.log(format!(
-                "ERROR: port {port} is already in use by another process — \
-                 the router was left on {}",
-                self.cfg.port
-            ));
-            self.conn_port = self.cfg.port.to_string();
-            return;
-        }
-        let old = self.cfg.port;
-        self.cfg.port = port;
-        if let Err(e) = self.cfg.save(&system::config_file()) {
-            self.cfg.port = old;
-            self.log(format!("ERROR saving port: {e:#}"));
-            return;
-        }
-        // Keep the Settings buffer honest — it renders the same value.
-        self.edit_port = port.to_string();
-        self.log(format!("router port {old} -> {port}; restarting"));
-        self.action_apply_settings();
-    }
-
     fn action_apply_settings(&mut self) {
         if let Some(msg) =
             self.serving_disruption("Applying settings (a full router restart)")

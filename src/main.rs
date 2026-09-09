@@ -551,6 +551,9 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
             report.added.len(),
             report.updated.len()
         );
+        if let Some(url) = &report.base_url_repointed {
+            println!("  → base URL repointed to {url} (restart OpenCode to pick it up)");
+        }
         for id in &report.added {
             println!("  + {id}");
         }
