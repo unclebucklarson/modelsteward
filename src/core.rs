@@ -28,3 +28,4 @@ pub mod rows;
 pub mod settings;
 pub mod system;
 pub mod trial;
+pub mod warden;

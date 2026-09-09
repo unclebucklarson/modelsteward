@@ -35,6 +35,19 @@ fn strip_snap_redirect(p: &Path) -> Option<PathBuf> {
 /// three hand-rolled copies had already grown (review catch): a
 /// snap-redirected env var or HOME never decides where data lives.
 pub fn xdg_dir(var: &str, fallback_rel: &str) -> PathBuf {
+    xdg_base(var, fallback_rel).join("modelsteward")
+}
+
+/// The XDG base directory itself, WITHOUT this app's name appended.
+///
+/// Split out so a sibling's published file can be found under the same
+/// base — `xdg_base("XDG_STATE_HOME", ".local/state").join("modelwarden")`
+/// — while keeping one copy of the empty/relative/snap guards. Reading a
+/// sibling through `xdg_dir` instead produced
+/// `…/modelsteward/modelwarden/inventory.json`, which reported warden as
+/// "not installed" on a machine where it had run that morning
+/// (caught by a live check, 2026-09-08).
+pub fn xdg_base(var: &str, fallback_rel: &str) -> PathBuf {
     std::env::var_os(var)
         // XDG spec: a set-but-empty variable means unset. Without this
         // the config path came out RELATIVE ("modelsteward/config.json")
@@ -44,7 +57,6 @@ pub fn xdg_dir(var: &str, fallback_rel: &str) -> PathBuf {
         .filter(|p| p.is_absolute())
         .filter(|p| strip_snap_redirect(p).is_none())
         .unwrap_or_else(|| real_home().join(fallback_rel))
-        .join("modelsteward")
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

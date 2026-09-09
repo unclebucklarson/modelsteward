@@ -1039,6 +1039,77 @@ they stop being unexamined instincts). Open items:
   ggerganov disabled it by default because it corrupts chat-template
   structure. For agents, failing loudly is correct.
 
+## Family realignment (agreed 2026-09-08, after the three-repo architecture review)
+
+Review published as an artifact; findings summarised here so the repo is
+self-contained. Verdict: **no ground-up rewrite** — steward's value is 205
+commits of incident-driven fixes, and `core/` is already headless and
+egui-free, so the carve is mechanical. Steward realigns to **launch +
+agent config**, shedding duplicated concern to the siblings. Projected
+25,132 -> ~16-18k LOC.
+
+Evidence that decided it: warden and lab already publish live schema-v1
+files (`inventory.json`, `results.json`) keyed by the SAME sha256 content
+identity, and steward reads neither; the harvested copies have already
+drifted badly (`discover` 597 differing lines, `gguf` vs warden 560,
+`diagnose` 552); and the agent-config layer (jsonc/opencode/hermes/
+piagent/reasoning, 3,432 LOC) contains ten llama.cpp references in total,
+so it is already engine-agnostic.
+
+### In progress — steps 1-3, then re-evaluate
+
+1. **Adopt the sha256 content identity.** Carry warden's identity
+   alongside steward's alias so the three tools are joinable. Nothing is
+   removed. Enables 2 and 5.
+2. **Read `inventory.json` as the model list.** "Curated by warden",
+   literally; steward's own scan becomes the fallback for when warden
+   has not run. Kills the worst drift pair (`gguf.rs`).
+3. **Extract the `Connector` trait.** Already Phase 2 above, now
+   understood as the durable core rather than a tidy-up. Do it before
+   agent #4 (openclaw) or the duplication triples.
+
+### Backlog — after re-evaluating 1-3
+
+4. **Attached-provider seam.** Generalise the Ollama peer probe into
+   "any OpenAI-compatible endpoint": read its model list, sync it into
+   the agent configs, meter it, claim nothing about its tuning. Makes
+   vLLM / MLX / FreeToken / a remote box connectable with no per-engine
+   code. This is the cheap half of multi-engine and should stay firmly
+   separate from the managed half.
+5. **Read `results.json`; retire the in-app measurement stack**
+   (trial/bench/quality/energy/report, ~4,200 LOC + its UI). Largest
+   single reduction; needs modellab's core API stable, which its handoff
+   says lands after its M5. **Verdicts stay in steward** — the
+   magnitude-scaled guards and near-miss handling are hard-won and the
+   agreed boundary already assigns the keep/apply decision here.
+6. **Split `ui.rs`** (6,854 lines, 27% of the codebase) one module per
+   tab. No architectural risk; biggest day-to-day maintainability win.
+
+### Engine strategy: two seams, not one trait
+
+llama.cpp's router mode (one process, many presets, hot-swap, `--fit`
+placement) and vLLM's one-model-per-process are not variants of one
+abstraction. What every engine shares is an OpenAI-compatible endpoint,
+so split by how much authority steward claims: **attached provider**
+(read-only, ~300 LOC once, any engine) vs **managed engine** (read-write,
+roughly the 2,923-line engine layer per engine).
+
+**A second managed engine costs all three repos, not just steward** —
+FreeToken's formats (MXFP4/NVFP4/FP8/BF16 from HF) are not GGUF, warden's
+inventory `meta` is GGUF header fields, and lab's fit arithmetic reads
+those fields. That propagation is the real price of multi-engine.
+
+**FreeToken** (`github.com/FlashML-org/FreeToken`, Apache-2.0, MoE
+serving engine) is the first managed candidate that passes the
+"measured, not guessed" test: native RTX 30-series, and all three of its
+named target models are already in this fleet — including a
+DeepSeek-V4-Flash in **BF16**, one of its four native formats. Its thesis
+("static placement is wrong most of the time") directly contradicts our
+crowned `ncpu-moe-32`, and its own headline (35B at 39.3 t/s on 8 GB)
+sits ~13% over a third-party llama.cpp figure rather than the claimed
+3-4x. That contradiction is a modellab campaign, not a features
+decision. Order: attach, evaluate, manage only if measured.
+
 ## From the supplied practitioner guide (`docs/human_research/`, reconciled 2026-09-03)
 
 Scott dropped a 1,193-line guide (carteakey.dev / l3ms, RTX 4070 +

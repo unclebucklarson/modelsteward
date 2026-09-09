@@ -475,6 +475,35 @@ pub fn write_preset(
     Ok((preset_path(), entries.len()))
 }
 
+/// alias -> modelwarden content identity for a scanned library, plus a
+/// warning when warden's file exists but could not be read.
+///
+/// Warden not being installed is silent and yields an empty map: this
+/// app has always worked alone and must keep doing so. A DAMAGED
+/// inventory is different — reading it as "warden knows nothing" would
+/// quietly drop every identity we had recorded, so it is reported.
+pub fn content_ids(
+    models: &[crate::core::library::ModelFile],
+) -> (std::collections::BTreeMap<String, String>, Option<String>) {
+    use crate::core::{safefs::Loaded, warden};
+    let inv = match warden::load(&warden::inventory_path()) {
+        Loaded::Ok(i) => i,
+        Loaded::Missing => return (Default::default(), None),
+        Loaded::Damaged(why) => {
+            return (
+                Default::default(),
+                Some(format!("modelwarden inventory unreadable ({why}) — measuring without content identities")),
+            );
+        }
+    };
+    let entries = crate::core::router::default_entries(models);
+    let pairs: Vec<(&str, &std::path::Path)> = entries
+        .iter()
+        .map(|(alias, mf, _)| (alias.as_str(), mf.path.as_path()))
+        .collect();
+    (warden::identities(pairs, &inv), None)
+}
+
 /// Wait on a spawned child in a detached thread so it can never become
 /// a zombie.
 ///

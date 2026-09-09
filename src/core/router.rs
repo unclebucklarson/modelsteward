@@ -636,6 +636,17 @@ pub struct Measurement {
     /// Multi-hop agent-loop completion rate (quality probe): a model
     /// can ace single tool calls yet quit mid-loop — the MoE lesson.
     pub loop_reliability: Option<f64>,
+    /// modelwarden's content identity (`sha256:<hex>`) for the file this
+    /// alias serves — the family's shared join key.
+    ///
+    /// Our aliases are ours alone, so nothing could line this app's
+    /// numbers up with warden's inventory or modellab's results; all
+    /// three saw a different fleet (architecture review, 2026-09-08).
+    /// Recorded, never required: warden may not be installed, may not
+    /// have hashed the file yet, or may not know it at all, and every
+    /// one of those is a normal state that must not affect measuring.
+    #[serde(default)]
+    pub content_id: Option<String>,
 }
 
 impl Measurement {
@@ -884,6 +895,12 @@ pub struct CalibrateJob<'a> {
     /// against free memory, so this is the condition that explains why a
     /// settled context moves between runs.
     pub conditions: &'a dyn Fn() -> (Option<u64>, Option<String>),
+    /// alias -> warden content identity. Supplied by the CALLER for the
+    /// same reason `conditions` is: resolving it needs the scanned
+    /// library and a sibling's file, neither of which this module should
+    /// reach for. Returning `None` for everything is a valid resolver
+    /// and simply records no identities.
+    pub content_id: &'a dyn Fn(&str) -> Option<String>,
 }
 
 pub fn calibrate(
@@ -899,6 +916,7 @@ pub fn calibrate(
         no_tool_probe,
         disabled,
         conditions,
+        content_id,
     } = *job;
     // Preset models AND the router's own HF cache downloads ("cache" source
     // — e.g. models pulled by `llama-server -hf` or vendor tools). Both are
@@ -992,6 +1010,7 @@ pub fn calibrate(
                     env_fp: Some(env_fp.to_string()),
                     free_vram_mib,
                     gpu_tenant: gpu_tenant.clone(),
+                    content_id: content_id(&m.id),
                     ..Default::default()
                 }
             }
@@ -1018,6 +1037,10 @@ pub fn calibrate(
                     error: Some(detail),
                     args_fp: m.args_fp.clone(),
                     env_fp: Some(env_fp.to_string()),
+                    // A failed load still identifies a real file: the
+                    // identity is a property of the bytes, not of
+                    // whether they served.
+                    content_id: content_id(&m.id),
                     ..Default::default()
                 }
             }
@@ -1322,6 +1345,70 @@ pub fn kill_strays(preset: &Path) -> Result<Vec<u32>> {
         }
     }
     Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_content_id {
+    use super::*;
+
+    /// measurements.json is live user state going back to v0.2. A new
+    /// field must never make an existing file unreadable — the C1 rule
+    /// says a file we cannot parse is rescued and reported, so a serde
+    /// break here would look like corruption to every existing user.
+    #[test]
+    fn a_measurements_file_written_before_content_id_still_loads() {
+        let before = r#"{
+          "qwen3.8-27b-ud-q4_k_xl": {
+            "n_ctx": 108208, "tool_call": true, "error": null,
+            "args_fp": "abc", "env_fp": "def",
+            "pp_tps": 302.8, "tg_tps": 47.05,
+            "bench_build": 10775,
+            "eval_score": 0.82, "tool_reliability": 1.0, "loop_reliability": 0.6
+          }
+        }"#;
+        let m: Measurements = serde_json::from_str(before).expect("old file must still parse");
+        let e = m.get("qwen3.8-27b-ud-q4_k_xl").expect("entry");
+        assert_eq!(e.n_ctx, Some(108_208));
+        assert_eq!(e.content_id, None, "absent means unknown, not an error");
+    }
+
+    #[test]
+    fn the_identity_round_trips() {
+        let mut m = Measurements::new();
+        m.insert(
+            "a".into(),
+            Measurement {
+                n_ctx: Some(4096),
+                content_id: Some("sha256:00b5a7c4".into()),
+                ..Default::default()
+            },
+        );
+        let text = serde_json::to_string(&m).unwrap();
+        let back: Measurements = serde_json::from_str(&text).unwrap();
+        assert_eq!(back["a"].content_id.as_deref(), Some("sha256:00b5a7c4"));
+    }
+
+    /// The identity is a label, not a condition. Freshness is about
+    /// config and environment; gaining or losing an identity (warden
+    /// installed later, an inventory rebuilt) must never trigger a
+    /// re-measure of a 50 GB model.
+    #[test]
+    fn identity_does_not_affect_freshness() {
+        let base = Measurement {
+            n_ctx: Some(4096),
+            tool_call: Some(true),
+            args_fp: Some("A".into()),
+            env_fp: Some("E".into()),
+            ..Default::default()
+        };
+        let tagged = Measurement { content_id: Some("sha256:ff".into()), ..base.clone() };
+        assert!(base.is_fresh(Some("A"), "E"));
+        assert_eq!(
+            base.is_fresh(Some("A"), "E"),
+            tagged.is_fresh(Some("A"), "E"),
+            "an identity must not change staleness in either direction"
+        );
+    }
 }
 
 #[cfg(test)]

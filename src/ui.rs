@@ -6099,6 +6099,17 @@ fn run_calibration(
     // Reuse the scan from a few lines up — a third full model-tree walk
     // per setup was pure waste (review finding F11, 2026-09-01).
     let off = system::disabled_ids(cfg, &report.models);
+    // Warden's identity for each alias, resolved once from the scan we
+    // already have rather than per model.
+    let (ids, warn) = system::content_ids(&report.models);
+    if let Some(w) = warn {
+        let _ = tx.send(Msg::Progress(format!("WARNING: {w}")));
+    } else if !ids.is_empty() {
+        let _ = tx.send(Msg::Progress(format!(
+            "modelwarden knows {} of these models — recording content identities",
+            ids.len()
+        )));
+    }
     let progress_tx = tx.clone();
     router::calibrate(
         &router::CalibrateJob {
@@ -6110,6 +6121,7 @@ fn run_calibration(
             no_tool_probe: &embed,
             disabled: &off,
             conditions: &|| system::gpu_conditions(cfg),
+            content_id: &|alias| ids.get(alias).cloned(),
         },
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));

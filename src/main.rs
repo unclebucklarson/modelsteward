@@ -446,6 +446,15 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let off = system::disabled_ids(cfg, &report.models);
+    let (ids, warn) = system::content_ids(&report.models);
+    match warn {
+        Some(w) => eprintln!("WARNING: {w}"),
+        None if !ids.is_empty() => eprintln!(
+            "modelwarden knows {} of these models — recording content identities",
+            ids.len()
+        ),
+        None => {}
+    }
     let conditions = || system::gpu_conditions(cfg);
     let job = router::CalibrateJob {
         dir: &dir,
@@ -456,6 +465,7 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
         no_tool_probe: &embed,
         disabled: &off,
         conditions: &conditions,
+        content_id: &|alias| ids.get(alias).cloned(),
     };
     let results = router::calibrate(&job, &mut |line| {
         eprintln!("{line}");
