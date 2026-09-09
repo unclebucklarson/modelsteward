@@ -37,6 +37,10 @@ pub struct Inventory {
 pub struct Root {
     pub id: String,
     pub path: PathBuf,
+    /// "shelf" | "ollama" | "hf_hub" | "removable" — warden's own
+    /// classification of the store.
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -130,6 +134,52 @@ impl Inventory {
         let root = self.roots.iter().find(|r| r.id == loc.root_id)?;
         Some(root.path.join(&loc.rel_path))
     }
+}
+
+/// Where warden says models live, filtered to what is usable right now.
+///
+/// Warden owns "what exists and where"; keeping our own parallel list of
+/// stores is exactly the duplication the family realignment is removing.
+/// Asking it for roots means a shelf the user added in warden, or a
+/// backup drive they just plugged in, becomes servable here without
+/// being configured twice.
+///
+/// Offline roots are skipped rather than reported: an unplugged drive is
+/// a normal state, and handing a missing directory to the scanner would
+/// just walk nothing. `hf_hub` is deliberately not returned — this app
+/// already locates the hub cache itself, and the router serves those
+/// natively.
+#[derive(Debug, Default, PartialEq)]
+pub struct Roots {
+    /// Directories to walk for GGUFs: warden's shelves, plus removable
+    /// roots that are currently mounted.
+    pub shelves: Vec<PathBuf>,
+    /// Ollama blob stores.
+    pub ollama: Vec<PathBuf>,
+}
+
+pub fn servable_roots(inv: &Inventory) -> Roots {
+    let mut out = Roots::default();
+    for r in &inv.roots {
+        // `exists` is the mount check: warden lists removable roots
+        // whether or not the drive is plugged in.
+        if !r.path.is_dir() {
+            continue;
+        }
+        match r.kind.as_deref() {
+            Some("ollama") => out.ollama.push(r.path.clone()),
+            Some("shelf") | Some("removable") => out.shelves.push(r.path.clone()),
+            // hf_hub: found by us already. Anything unknown is left
+            // alone rather than guessed at — a future root kind must not
+            // silently become a directory we walk.
+            _ => {}
+        }
+    }
+    out.shelves.sort();
+    out.shelves.dedup();
+    out.ollama.sort();
+    out.ollama.dedup();
+    out
 }
 
 /// Map this app's aliases to warden identities, for every model warden
@@ -377,6 +427,78 @@ mod tests {
         let map = identities(vec![("a", p), ("b", p)], &inv);
         assert_eq!(map.get("a"), map.get("b"));
         assert_eq!(map.len(), 2);
+    }
+
+    /// Warden's real root kinds, from the live file on this machine.
+    fn roots_fixture(paths: &[(&str, &str, &str)]) -> Inventory {
+        let roots: Vec<String> = paths
+            .iter()
+            .map(|(id, kind, path)| {
+                format!(r#"{{"id":"{id}","kind":"{kind}","label":null,"path":"{path}"}}"#)
+            })
+            .collect();
+        parse(&format!(
+            r#"{{"schema_version":1,"roots":[{}],"models":{{}}}}"#,
+            roots.join(",")
+        ))
+    }
+
+    #[test]
+    fn classifies_warden_roots_for_our_scanner() {
+        let tmp = std::env::temp_dir().join(format!("ms-roots-{}", std::process::id()));
+        let shelf = tmp.join("shelf");
+        let olla = tmp.join("ollama");
+        let drive = tmp.join("drive");
+        let hub = tmp.join("hub");
+        for d in [&shelf, &olla, &drive, &hub] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let inv = roots_fixture(&[
+            ("a", "shelf", shelf.to_str().unwrap()),
+            ("b", "ollama", olla.to_str().unwrap()),
+            ("c", "removable", drive.to_str().unwrap()),
+            ("d", "hf_hub", hub.to_str().unwrap()),
+        ]);
+        let r = servable_roots(&inv);
+        assert!(r.shelves.contains(&shelf), "a shelf is ours to walk");
+        assert!(
+            r.shelves.contains(&drive),
+            "a MOUNTED backup drive holds servable models: {r:?}"
+        );
+        assert_eq!(r.ollama, vec![olla]);
+        assert!(
+            !r.shelves.contains(&hub),
+            "the hub cache is found by us and served natively by the router: {r:?}"
+        );
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    /// An unplugged backup drive is a normal state, not an error, and
+    /// must never be handed to the scanner as a directory.
+    #[test]
+    fn an_offline_root_is_skipped() {
+        let inv = roots_fixture(&[(
+            "gone",
+            "removable",
+            "/run/media/buck/definitely-not-mounted-xyz",
+        )]);
+        assert_eq!(servable_roots(&inv), Roots::default());
+    }
+
+    /// A root kind warden invents later must not silently become a
+    /// directory we walk.
+    #[test]
+    fn an_unknown_root_kind_is_left_alone() {
+        let tmp = std::env::temp_dir().join(format!("ms-unk-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let inv = roots_fixture(&[("x", "s3-bucket-of-the-future", tmp.to_str().unwrap())]);
+        assert_eq!(servable_roots(&inv), Roots::default());
+        std::fs::remove_dir_all(&tmp).ok();
+    }
+
+    #[test]
+    fn no_inventory_means_no_extra_roots() {
+        assert_eq!(servable_roots(&Inventory::default()), Roots::default());
     }
 
 }

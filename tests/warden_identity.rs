@@ -150,3 +150,120 @@ fn a_newer_schema_is_refused() {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+// ── step 2: warden curates where models live ─────────────────────────
+
+/// The realignment's second step: warden owns "what exists and where",
+/// so a store catalogued there becomes servable here without being
+/// configured twice.
+#[test]
+fn warden_roots_are_classified_for_our_scanner() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shelf = tmp.path().join("a-shelf");
+    let drive = tmp.path().join("a-mounted-drive");
+    let store = tmp.path().join("ollama-store");
+    for d in [&shelf, &drive, &store] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let inv_path = tmp.path().join("inventory.json");
+    std::fs::write(
+        &inv_path,
+        format!(
+            r#"{{"schema_version":1,"roots":[
+                 {{"id":"s","kind":"shelf","label":null,"path":"{}"}},
+                 {{"id":"r","kind":"removable","label":null,"path":"{}"}},
+                 {{"id":"o","kind":"ollama","label":null,"path":"{}"}},
+                 {{"id":"gone","kind":"removable","label":null,"path":"{}"}}
+               ],"models":{{}}}}"#,
+            shelf.display(),
+            drive.display(),
+            store.display(),
+            tmp.path().join("unplugged").display(),
+        ),
+    )
+    .unwrap();
+
+    let inv = match warden::load(&inv_path) {
+        Loaded::Ok(i) => i,
+        other => panic!("{other:?}"),
+    };
+    let roots = warden::servable_roots(&inv);
+
+    assert!(roots.shelves.contains(&shelf));
+    assert!(
+        roots.shelves.contains(&drive),
+        "a mounted backup drive holds servable models: {roots:?}"
+    );
+    assert_eq!(roots.ollama, vec![store]);
+    assert_eq!(
+        roots.shelves.len(),
+        2,
+        "the unplugged drive must not reach the scanner: {roots:?}"
+    );
+}
+
+/// Warden's roots ADD to the configured ones rather than replacing them.
+/// A union cannot regress a working setup — which is the whole reason
+/// this step is safe to ship before the rest of the realignment.
+#[test]
+fn warden_roots_never_replace_the_users_own() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mine = tmp.path().join("my-own-dir");
+    let theirs = tmp.path().join("warden-knows-this");
+    for d in [&mine, &theirs] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let inv_path = tmp.path().join("inventory.json");
+    std::fs::write(
+        &inv_path,
+        format!(
+            r#"{{"schema_version":1,"roots":[{{"id":"s","kind":"shelf","label":null,"path":"{}"}}],"models":{{}}}}"#,
+            theirs.display()
+        ),
+    )
+    .unwrap();
+    let inv = match warden::load(&inv_path) {
+        Loaded::Ok(i) => i,
+        other => panic!("{other:?}"),
+    };
+
+    // The union the scanner performs, in miniature.
+    let mut dirs = vec![mine.clone()];
+    for p in warden::servable_roots(&inv).shelves {
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    assert!(dirs.contains(&mine), "the user's own directory survives");
+    assert!(dirs.contains(&theirs), "warden's is added");
+    assert_eq!(dirs.len(), 2);
+}
+
+/// The same root configured in both places must be walked once, not
+/// twice — a duplicate would double every model in the Library.
+#[test]
+fn a_root_known_to_both_is_not_added_twice() {
+    let tmp = tempfile::tempdir().unwrap();
+    let shared = tmp.path().join("shared");
+    std::fs::create_dir_all(&shared).unwrap();
+    let inv_path = tmp.path().join("inventory.json");
+    std::fs::write(
+        &inv_path,
+        format!(
+            r#"{{"schema_version":1,"roots":[{{"id":"s","kind":"shelf","label":null,"path":"{}"}}],"models":{{}}}}"#,
+            shared.display()
+        ),
+    )
+    .unwrap();
+    let inv = match warden::load(&inv_path) {
+        Loaded::Ok(i) => i,
+        other => panic!("{other:?}"),
+    };
+    let mut dirs = vec![shared.clone()];
+    for p in warden::servable_roots(&inv).shelves {
+        if !dirs.contains(&p) {
+            dirs.push(p);
+        }
+    }
+    assert_eq!(dirs, vec![shared], "deduped");
+}

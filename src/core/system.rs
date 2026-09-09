@@ -17,6 +17,9 @@ pub struct ScanReport {
     pub devices: Vec<discover::Device>,
     pub devices_from: Option<PathBuf>,
     pub models: Vec<library::ModelFile>,
+    /// What modelwarden contributed to this scan, or why it could not —
+    /// `None` when warden is absent, which is the normal solo case.
+    pub warden_note: Option<String>,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -251,13 +254,55 @@ pub fn router_config(cfg: &settings::AppConfig) -> router::RouterConfig {
 }
 
 pub fn scan_models(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> Vec<library::ModelFile> {
+    scan_models_reported(cfg, extra_dirs).0
+}
+
+/// As [`scan_models`], but also says what modelwarden contributed, so the
+/// curation is visible rather than mysterious.
+///
+/// Warden owns "what exists and where" (family realignment, step 2). Its
+/// roots are added to the ones configured here rather than replacing
+/// them: a union cannot regress a working setup, and it means a shelf
+/// added in warden — or a backup drive just plugged in — becomes
+/// servable without being configured twice. Warden absent changes
+/// nothing at all.
+pub fn scan_models_reported(
+    cfg: &settings::AppConfig,
+    extra_dirs: &[PathBuf],
+) -> (Vec<library::ModelFile>, Option<String>) {
+    use crate::core::{safefs::Loaded, warden};
     let mut scan_dirs = cfg.scan_dirs.clone();
     scan_dirs.extend(extra_dirs.iter().cloned());
-    library::scan(
-        &scan_dirs,
-        &library::default_ollama_stores(),
-        library::default_hf_hub().as_deref(),
-    )
+    let mut ollama = library::default_ollama_stores();
+
+    let note = match warden::load(&warden::inventory_path()) {
+        Loaded::Ok(inv) => {
+            let roots = warden::servable_roots(&inv);
+            let added_dirs: Vec<_> = roots
+                .shelves
+                .into_iter()
+                .filter(|p| !scan_dirs.contains(p))
+                .collect();
+            let added_ollama: Vec<_> = roots
+                .ollama
+                .into_iter()
+                .filter(|p| !ollama.contains(p))
+                .collect();
+            let n = added_dirs.len() + added_ollama.len();
+            scan_dirs.extend(added_dirs);
+            ollama.extend(added_ollama);
+            (n > 0).then(|| {
+                format!("modelwarden contributed {n} model store(s) beyond those configured here")
+            })
+        }
+        Loaded::Missing => None,
+        Loaded::Damaged(why) => Some(format!(
+            "modelwarden inventory unreadable ({why}) — scanning only the configured directories"
+        )),
+    };
+
+    let models = library::scan(&scan_dirs, &ollama, library::default_hf_hub().as_deref());
+    (models, note)
 }
 
 pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanReport {
@@ -280,11 +325,13 @@ pub fn scan_report(cfg: &settings::AppConfig, extra_dirs: &[PathBuf]) -> ScanRep
         })
         .unwrap_or_default();
 
+    let (models, warden_note) = scan_models_reported(cfg, extra_dirs);
     ScanReport {
         installs,
         devices,
         devices_from,
-        models: scan_models(cfg, extra_dirs),
+        models,
+        warden_note,
     }
 }
 
@@ -661,6 +708,7 @@ mod tests {
             }],
             devices_from: Some(PathBuf::from("/s")),
             models: vec![],
+            warden_note: None,
         };
         let a = env_fingerprint(&mk(10216, 24111));
         assert_eq!(a, env_fingerprint(&mk(10216, 24111)), "stable");

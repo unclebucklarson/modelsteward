@@ -1790,6 +1790,9 @@ impl App {
                         report.devices.len(),
                         report.models.len()
                     ));
+                    if let Some(note) = &report.warden_note {
+                        self.log(format!("scan: {note}"));
+                    }
                     self.scan = Some(report);
                     // Does NOT clear busy: spawn_scan is a bare thread
                     // that never claimed it. Clearing it here opened the

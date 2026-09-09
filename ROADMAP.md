@@ -1061,9 +1061,21 @@ so it is already engine-agnostic.
 1. **Adopt the sha256 content identity.** Carry warden's identity
    alongside steward's alias so the three tools are joinable. Nothing is
    removed. Enables 2 and 5.
-2. **Read `inventory.json` as the model list.** "Curated by warden",
-   literally; steward's own scan becomes the fallback for when warden
-   has not run. Kills the worst drift pair (`gguf.rs`).
+2. **Read `inventory.json` as the model list.** ✔ SHIPPED 2026-09-08 —
+   as roots rather than as a replacement list. `warden::servable_roots`
+   adds warden's shelves and its currently-mounted `removable` roots to
+   the directories configured here, so a shelf added in warden or a
+   drive just plugged in becomes servable without being configured
+   twice. A union, deliberately: it cannot regress a working setup.
+   `hf_hub` roots are skipped (we locate the cache ourselves, the router
+   serves those natively) and an unknown root `kind` is never walked.
+   **The `gguf.rs` half is BLOCKED, not done** — see
+   `docs/handoff-warden.md`. Warden's reader covers 5 of our 8 fields
+   and `read_fields` reaches 2 more (`expert_count`, `chat_template`),
+   but `has_mtp` comes from tensor names containing `.nextn.` and
+   warden's reader is "metadata only, never the tensors". Requested
+   there; until it lands, deleting our parser would cost a real
+   capability, so it stays.
 3. **Extract the `Connector` trait.** Already Phase 2 above, now
    understood as the durable core rather than a tidy-up. Do it before
    agent #4 (openclaw) or the duplication triples.
