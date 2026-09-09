@@ -218,3 +218,96 @@ fn measurement_state_survives_interruption() {
         "the damaged file was moved aside, so the path is now free"
     );
 }
+
+// ── the Connector fan-out (family realignment, step 3) ───────────────
+
+use modelsteward::core::connector::{self, Connector, SyncContext};
+
+/// The fan-out drives real connectors against real file formats — the
+/// layer that was previously written twice (once in the CLI, once in the
+/// GUI) and had already drifted in wording, with no test over either.
+#[test]
+fn the_fan_out_writes_every_present_agent_and_says_so_once() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // pi installed: ~/.pi/agent/ exists.
+    let pi_dir = tmp.path().join(".pi/agent");
+    std::fs::create_dir_all(&pi_dir).unwrap();
+    let pi_models = pi_dir.join("models.json");
+
+    // Hermes installed: ~/.hermes/ exists.
+    let hermes_home = tmp.path().join(".hermes");
+    std::fs::create_dir_all(&hermes_home).unwrap();
+
+    let want = [desired("qwen3.8-27b", 108_208), desired("big-moe", 262_144)];
+    let known: BTreeSet<String> = want.iter().map(|d| d.id.clone()).collect();
+    let cs: Vec<Box<dyn Connector>> = vec![
+        Box::new(connector::PiConnector::at(pi_models.clone())),
+        Box::new(connector::HermesConnector::at(hermes_home.clone())),
+    ];
+    let lines = connector::sync_all(
+        &cs,
+        &SyncContext { base_url: "http://127.0.0.1:8181/v1", desired: &want, known: &known },
+    );
+
+    assert!(
+        lines.iter().any(|l| l.contains("pi agent synced")),
+        "pi reported: {lines:?}"
+    );
+    assert!(
+        lines.iter().any(|l| l.contains("Hermes synced")),
+        "hermes reported: {lines:?}"
+    );
+    assert!(pi_models.exists(), "pi's config was actually written");
+
+    // The measured context reached pi's own schema, at the new port.
+    let pi_text = std::fs::read_to_string(&pi_models).unwrap();
+    assert!(pi_text.contains("8181"), "the base URL follows the router: {pi_text}");
+    assert!(pi_text.contains("qwen3.8-27b"), "{pi_text}");
+}
+
+/// Neither agent installed: the whole fan-out is silent. A user who runs
+/// only OpenCode must never read about pi or Hermes.
+#[test]
+fn the_fan_out_is_silent_when_no_agent_is_installed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let want = [desired("m", 65_536)];
+    let known: BTreeSet<String> = want.iter().map(|d| d.id.clone()).collect();
+    let cs: Vec<Box<dyn Connector>> = vec![
+        Box::new(connector::PiConnector::at(tmp.path().join("nope/models.json"))),
+        Box::new(connector::HermesConnector::at(tmp.path().join("also-nope"))),
+    ];
+    let lines = connector::sync_all(
+        &cs,
+        &SyncContext { base_url: "http://127.0.0.1:8080/v1", desired: &want, known: &known },
+    );
+    assert!(lines.is_empty(), "absent agents say nothing: {lines:?}");
+}
+
+/// OpenCode through the trait produces the same file the typed path
+/// does — the guarantee that lets agent #4 copy this pattern.
+#[test]
+fn opencode_through_the_trait_writes_a_real_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    let oc = tmp.path().join("opencode.json");
+    std::fs::write(&oc, "{\n  \"$schema\": \"https://opencode.ai/config.json\"\n}\n").unwrap();
+
+    let want = [desired("qwen3.8-27b", 108_208)];
+    let known: BTreeSet<String> = want.iter().map(|d| d.id.clone()).collect();
+    let c = connector::OpenCodeConnector::at(oc.clone());
+    assert!(c.present(), "a config that exists means OpenCode is installed");
+
+    let out = c
+        .sync(&SyncContext {
+            base_url: "http://127.0.0.1:8080/v1",
+            desired: &want,
+            known: &known,
+        })
+        .expect("sync");
+    assert!(!out.skipped_missing);
+    assert!(out.summary.unwrap().contains("OpenCode synced"));
+
+    let text = std::fs::read_to_string(&oc).unwrap();
+    assert!(text.contains("qwen3.8-27b"), "{text}");
+    assert!(jsonc::strictly_valid(&text).is_ok(), "still valid JSONC:\n{text}");
+}

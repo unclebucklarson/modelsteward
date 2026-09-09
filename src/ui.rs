@@ -12,7 +12,7 @@
 //! the UI thread never blocks on the network or a model load.
 
 use crate::core::{
-    advisor, aiadvisor, bench, cancel, diagnose, discover, evidence, history, managed, meter,
+    advisor, aiadvisor, bench, cancel, connector, diagnose, discover, evidence, history, managed, meter,
     hermes, ollama, opencode, piagent, reasoning, router, rows, settings, system, trial,
 };
 use eframe::egui;
@@ -6174,61 +6174,15 @@ fn run_sync(
         report.orphans.retain(|id| !ghosts.contains(id));
         report.ghosts_commented = ghosts;
     }
-    // pi coding agent (Connections p2): measured contexts into
-    // ~/.pi/agent/models.json — pi's native router integration assumes
-    // 128k when the router doesn't say (measured 2026-08-30).
+    // pi and Hermes go through the Connector fan-out (step 3): this
+    // block and the CLI's were the same logic written twice, already
+    // drifted in wording.
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
-    let mut lines = Vec::new();
-    let pi_path = piagent::default_models_path();
-    // Positive evidence for removals: preset ∪ measurement keys −
-    // disabled (F3: cache models never enter the preset, and an
-    // unreadable preset must not read as "everything left").
     let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
-    match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
-        Ok(r) if r.skipped_missing => {}
-        Ok(r) => lines.push(format!(
-            "pi agent synced ({}): {} added, {} updated, {} removed{}{}",
-            pi_path.display(),
-            r.added.len(),
-            r.updated.len(),
-            r.removed.len(),
-            if r.kept_unmeasured.is_empty() {
-                String::new()
-            } else {
-                format!(
-                    ", {} kept (not measurable right now — never deleted over a \
-                     transient failure)",
-                    r.kept_unmeasured.len()
-                )
-            },
-            if r.created_file { " — models.json created" } else { "" },
-        )),
-        Err(e) => lines.push(format!("pi agent sync FAILED: {e:#}")),
-    }
-    // Hermes: measured contexts into its context cache. Registration of
-    // the provider itself stays an explicit click (Connections).
-    let home = hermes::default_home();
-    match hermes::sync(&home, &base_url, &desired) {
-        Ok(r) if r.skipped_missing => {}
-        Ok(r) => {
-            let mut l = format!("Hermes synced: {} context(s) written", r.written.len());
-            if !r.below_minimum.is_empty() {
-                l.push_str(&format!(
-                    " — {} skipped below Hermes's 64k minimum ({})",
-                    r.below_minimum.len(),
-                    r.below_minimum.join(", ")
-                ));
-            }
-            if r.provider_unregistered {
-                l.push_str(
-                    " · no Hermes provider points at this router yet — \
-                     register it on the Connections tab",
-                );
-            }
-            lines.push(l);
-        }
-        Err(e) => lines.push(format!("Hermes sync FAILED: {e:#}")),
-    }
+    let lines = connector::sync_all(
+        &connector::secondary(),
+        &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
+    );
     Ok((report, lines))
 }
 

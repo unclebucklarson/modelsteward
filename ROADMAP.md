@@ -1076,9 +1076,22 @@ so it is already engine-agnostic.
    warden's reader is "metadata only, never the tensors". Requested
    there; until it lands, deleting our parser would cost a real
    capability, so it stays.
-3. **Extract the `Connector` trait.** Already Phase 2 above, now
-   understood as the durable core rather than a tidy-up. Do it before
-   agent #4 (openclaw) or the duplication triples.
+3. **Extract the `Connector` trait.** ✔ SHIPPED 2026-09-08.
+   `core/connector.rs` gives every agent one shape (id, display name,
+   config path, present, sync) and `sync_all` fans out over them,
+   rendering identical lines for the CLI and the GUI — which had the pi
+   and Hermes blocks written twice and already drifted in wording. A
+   failing connector no longer risks the others: agents are independent,
+   and a broken pi install must not cost someone their Hermes sync.
+   Connectors take an optional path so the trait is testable against
+   tempdirs; a hardcoded path is how this layer went untested long
+   enough to drift. OpenCode implements the trait (so agent #4 has the
+   pattern) but the callers still drive it through its typed
+   `SyncReport`: the Connections mirror needs that detail and ghost
+   cleanup needs live router state, and destabilising the connector
+   everything else was built around buys nothing here.
+
+**Steps 1-3 are complete (2026-09-08). Re-evaluate before starting 4-6.**
 
 ### Backlog — after re-evaluating 1-3
 

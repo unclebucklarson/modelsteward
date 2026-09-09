@@ -43,7 +43,7 @@
 //! Ports default to the configured value (~/.config/modelsteward/config.json).
 
 use modelsteward::core::{
-    advisor, bench, cancel, diagnose, discover, hermes, opencode, piagent, router, settings,
+    advisor, bench, cancel, connector, diagnose, discover, opencode, router, settings,
     system, trial,
 };
 use std::path::PathBuf;
@@ -577,55 +577,15 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
             }
         }
     }
-    // pi coding agent (Connections p2, 2026-08-30): measured context
-    // windows into ~/.pi/agent/models.json — pi's native router
-    // integration assumes 128k when the router doesn't report n_ctx.
-    let pi_path = piagent::default_models_path();
+    // pi and Hermes go through the Connector fan-out (step 3): this
+    // block and the GUI's were the same logic written twice, already
+    // drifted in wording.
     let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
-    match piagent::sync_file_with_known(&pi_path, &base_url, &desired, &known) {
-        Ok(r) if r.skipped_missing => {}
-        Ok(r) => {
-            println!(
-                "pi agent synced ({}): {} added, {} updated, {} removed{}",
-                pi_path.display(),
-                r.added.len(),
-                r.updated.len(),
-                r.removed.len(),
-                if r.created_file { " — models.json created" } else { "" },
-            );
-            if !r.kept_unmeasured.is_empty() {
-                println!(
-                    "  ~ {} entr(ies) kept although not measurable right now — a \
-                     transient load failure never deletes a config entry",
-                    r.kept_unmeasured.len()
-                );
-            }
-        }
-        Err(e) => eprintln!("pi agent sync FAILED: {e:#}"),
-    }
-    // Hermes: measured contexts into its context cache. Registering the
-    // provider itself is an explicit GUI action (it edits a live,
-    // hand-maintained config) — the CLI reports when it's missing.
-    let home = hermes::default_home();
-    match hermes::sync(&home, &base_url, &desired) {
-        Ok(r) if r.skipped_missing => {}
-        Ok(r) => {
-            println!("Hermes synced: {} context(s) written", r.written.len());
-            if !r.below_minimum.is_empty() {
-                println!(
-                    "  ! {} model(s) skipped — under Hermes's 64,000-token minimum: {}",
-                    r.below_minimum.len(),
-                    r.below_minimum.join(", ")
-                );
-            }
-            if r.provider_unregistered {
-                println!(
-                    "  ? no Hermes custom provider points at this router yet — \
-                     register one in the GUI (Connections tab) or Hermes's own /model"
-                );
-            }
-        }
-        Err(e) => eprintln!("Hermes sync FAILED: {e:#}"),
+    for line in connector::sync_all(
+        &connector::secondary(),
+        &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
+    ) {
+        println!("{line}");
     }
     Ok(())
 }

@@ -5,6 +5,7 @@ pub mod advisor;
 pub mod aiadvisor;
 pub mod bench;
 pub mod cancel;
+pub mod connector;
 pub mod diagnose;
 pub mod discover;
 pub mod energy;
