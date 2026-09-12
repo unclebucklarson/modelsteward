@@ -22,18 +22,23 @@ are most likely to trust.
 
 ## Measured cost (this machine, release build, synthetic logs)
 
-| Turns retained | Log | Memory held | `results()` per 30 s tick |
-|---|---|---|---|
-| 2,000 | 727 KB | 288 KB | 29 µs |
-| 20,000 | 7.3 MB | 2.7 MB | 245 µs |
-| 60,000 | 22 MB | ~8 MB | 756 µs |
+**The CPU half of the finding is a non-issue** — `results()` costs
+**756 µs once every 30 s** at 60,000 retained turns, a 0.0025% duty
+cycle. The original write-up framed it as "O(all tasks ever) per tick",
+which is true and misleading.
 
-**The CPU half of the finding is a non-issue** — 756 µs every 30 s at a
-month of heavy use is a 0.0025% duty cycle. The original write-up
-framed it as "O(all tasks ever) per tick", which is true and misleading.
+The memory half is real. **Corrected 2026-09-12**: the first figure
+(~133 B/turn) was measured in a process whose RSS had already grown, so
+it understated. Measuring each size in a fresh process, with only the
+miner resident:
 
-**The memory half is real but slow**: ~133 bytes per turn, ~8 MB/month
-of heavy use. Worth fixing; not worth risking the ledger for.
+| | Bytes per turn | At 60,000 turns (≈1 month heavy) |
+|---|---|---|
+| Before | **217 B** | 12.7 MB |
+| After the model dedup | **124 B** | 7.2 MB |
+
+A 43% reduction, and the original problem was *larger* than first
+documented, not smaller.
 
 ## Why "credit and drop on release" is a trap
 
@@ -49,7 +54,33 @@ one model on one port over half an hour is a sample, not a proof —
 speculative decoding, multimodal turns, parallel slots and
 cancellations are all unrepresented.
 
-## Options
+## Done: the model dedup (2026-09-12)
+
+Not in the original option list, and the better first move — it takes
+40%+ of the memory with **zero** risk to the ledger, because it changes
+nothing about retention.
+
+`Task.model` was redundant. On a spawn line the miner updates
+`port_model[port]` and bumps `port_gen[port]` *in the same branch*, so
+within one generation a port's model never changes — which makes
+`(port, generation)` a unique determinant of the model, and it is
+already the task's key. The per-task `Option<String>` plus its heap
+allocation was therefore a copy, per turn, of a value shared by every
+turn in that generation.
+
+It is now `gen_model: BTreeMap<(port, generation), String>` — **one
+entry per spawn**, not per turn. `results()` reads attribution from the
+key, keeping the port's final tenant as the documented fallback for
+tasks whose lines preceded any spawn line.
+
+Pinned first by two tests that did not exist: one port reused by two
+models with the same task id attributes each turn correctly, and a task
+seen before any spawn line falls back to the port's tenant. Both were
+written and passing against the OLD implementation before it changed,
+which is what makes them a check on the refactor rather than a
+description of it.
+
+## Options for the remainder
 
 - **A — credit and drop on release.** NOT recommended: rests entirely on
   the terminal-release assumption, and its failure is invisible and
@@ -63,8 +94,9 @@ cancellations are all unrepresented.
   so memory is bounded regardless of generation lifetime. Re-opens A's
   hazard only for tasks 10,000 turns old.
 
-**Recommendation:** B now; C only if the bound must be guaranteed.
-Doing nothing is also defensible — 8 MB/month with no CPU cost.
+**Recommendation:** B next; C only if the bound must be guaranteed.
+With the dedup done, the remaining exposure is ~7 MB per month of heavy
+use and no CPU cost, so stopping here is also defensible.
 
 ## Whatever lands, this test comes first
 

@@ -1125,6 +1125,64 @@ so it is already engine-agnostic.
 6. **Split `ui.rs`** (6,854 lines, 27% of the codebase) one module per
    tab. No architectural risk; biggest day-to-day maintainability win.
 
+### CPU-only serving (outside request, 2026-09-12)
+
+A user with a **Threadripper 5000-series and 256 GB of system RAM, no
+GPU** got in touch. The possibility had not been considered; it turns
+out to be closer than expected, and it touches modellab as much as this
+app.
+
+**Tested here, not assumed.** Hiding the GPU with
+`CUDA_VISIBLE_DEVICES=""` gives a genuine CPU-only environment on the
+dev machine. Steward under it: **0 devices, `devices_from: None`, all 8
+installs and 22 models still found, no crash, nothing invented.** The
+advice layer guards every VRAM statement behind `hw.vram_mib > 0`, so
+it does not manufacture GPU advice, and RAM comes from `/proc/meminfo`.
+Serving CPU-only is therefore largely already true — what is missing is
+honesty about the parts that cannot apply, and the knobs that actually
+matter there.
+
+Three concrete gaps:
+
+- **Energy is Intel-RAPL-only.** `energy.rs` scans for `intel-rapl:N`
+  packages; an AMD Threadripper needs the AMD path (`amd_energy` /
+  hwmon). So J/token — one of this project's distinguishing numbers —
+  would be silently unavailable on exactly the machine where CPU energy
+  is most interesting. **Fixable and testable here**, since the RAPL
+  reader is independent of NVML.
+- **The placement menus go vacuous.** `cpu-moe` and `-ncmoe` describe
+  moving experts OFF the GPU; with no GPU every variant is the same
+  config. The Lab would run for hours and report "no difference". Not
+  wrong, but it should decline with a reason rather than let the user
+  discover it. Same for anything keyed on `-ngl`.
+- **The knobs that matter change.** On CPU: `--threads` /
+  `--threads-batch`, real thread PLACEMENT (see the
+  thread-count-is-not-placement rule in CLAUDE.md), `--no-mmap` /
+  `--mlock` — far more relevant with weights RAM-resident — batch
+  sizes, KV quant against RAM rather than VRAM, and speculative
+  decoding, which matters MORE on CPU because decode is the bottleneck.
+  And on a multi-CCD Zen 3, `--numa` may genuinely matter: the
+  practitioner guide's "skip it on single socket" does not obviously
+  transfer to a Threadripper's NPS modes.
+
+**Process: run it like the pi/hermes request** — the project's first
+outside feature ask, where the requester became the live-validation
+tester. We cannot measure CPU tuning without CPU hardware, and
+"measured, not guessed" forbids shipping guessed advice. Order:
+
+1. **Ask for `--scan` JSON and `--report` from his machine.** Cheap for
+   him; tells us what the app sees and whether anything lies.
+2. **Fix what lies, here.** The AMD energy path and the vacuous-menu
+   gating are honest-reporting work, testable locally under
+   `CUDA_VISIBLE_DEVICES=""`.
+3. **Then add CPU menus that HE validates.** This is where his hardware
+   is irreplaceable and ours is useless.
+
+**For modellab** (belongs in a handoff, not decided here): its
+computed-fit half is arguably EASIER CPU-only — there is no placement
+problem to solve, just KV arithmetic against 256 GB — while its campaign
+axes would need the CPU set above. Its instance's call.
+
 ### Engine strategy: two seams, not one trait
 
 llama.cpp's router mode (one process, many presets, hot-swap, `--fit`

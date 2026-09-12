@@ -235,7 +235,6 @@ pub fn cache_effectiveness_with_coverage(log: &str) -> (Vec<ModelCacheStats>, Co
 
 #[derive(Default, Debug, Clone)]
 struct Task {
-    model: Option<String>,
     prompt: Option<u64>,
     generated: Option<u64>,
     release: Option<u64>,
@@ -261,6 +260,16 @@ pub struct LogMiner {
     port_gen: BTreeMap<u32, u32>,
     disabled_ports: std::collections::BTreeSet<u32>,
     context_ports: std::collections::BTreeSet<u32>,
+    /// Model per `(port, generation)`. The attribution a task needs is
+    /// already determined by its key: `port_model` and `port_gen` are
+    /// updated in the same branch on a spawn line, so within one
+    /// generation a port's model never changes. Storing it here — one
+    /// entry per spawn — instead of on every Task removes an
+    /// `Option<String>` and its heap allocation from each of the
+    /// hundreds of thousands of turns the table accumulates, about 40%
+    /// of its measured 133 bytes per turn, with no change to retention
+    /// and no risk to the ledger (finding C6, 2026-09-12).
+    gen_model: BTreeMap<(u32, u32), String>,
     tasks: BTreeMap<(u32, u32, u64), Task>,
     /// Tail of the last feed that didn't end in a newline — a chunk
     /// boundary must never split a line in half.
@@ -298,14 +307,18 @@ impl LogMiner {
         let port_gen = &mut self.port_gen;
         let disabled_ports = &mut self.disabled_ports;
         let context_ports = &mut self.context_ports;
+        let gen_model = &mut self.gen_model;
         let tasks = &mut self.tasks;
         {
         if let Some(idx) = line.find("spawning server instance with name=") {
             let rest = &line[idx + "spawning server instance with name=".len()..];
             if let Some((name, port_part)) = rest.split_once(" on port ") {
                 if let Ok(port) = port_part.trim().parse::<u32>() {
-                    port_model.insert(port, name.trim().to_string());
-                    *port_gen.entry(port).or_default() += 1;
+                    let name = name.trim().to_string();
+                    port_model.insert(port, name.clone());
+                    let generation = port_gen.entry(port).or_default();
+                    *generation += 1;
+                    gen_model.insert((port, *generation), name);
                 }
             }
             return;
@@ -323,9 +336,6 @@ impl LogMiner {
         let Some(task) = task_id(body) else { return };
         let generation = port_gen.get(&port).copied().unwrap_or(0);
         let t = tasks.entry((port, generation, task)).or_default();
-        if t.model.is_none() {
-            t.model = port_model.get(&port).cloned();
-        }
         // Two dialects (grammar drift found live 2026-08-28, b10630 ->
         // b10672: the n_gen / progress lines all but vanished; current
         // builds put per-turn truth in print_timing's "/ N tokens"):
@@ -355,11 +365,17 @@ impl LogMiner {
         let disabled_ports = &self.disabled_ports;
         let context_ports = &self.context_ports;
         let tasks = &self.tasks;
+        let gen_model = &self.gen_model;
     let mut per_model: BTreeMap<String, ModelCacheStats> = BTreeMap::new();
-    for ((port, _, _), t) in tasks {
-        // Bound-at-first-sight; final mapping only as a fallback for
-        // tasks whose lines preceded any spawn line we saw.
-        let Some(model) = t.model.as_ref().or_else(|| port_model.get(port)) else {
+    for ((port, generation, _), t) in tasks {
+        // Bound-at-first-sight, via the key: `(port, generation)` names
+        // the model that was active when this task was first seen. The
+        // port's FINAL tenant is only a fallback, for tasks whose lines
+        // preceded any spawn line we saw.
+        let Some(model) = gen_model
+            .get(&(*port, *generation))
+            .or_else(|| port_model.get(port))
+        else {
             continue;
         };
         let (Some(prompt), Some(generated), Some(release)) = (t.prompt, t.generated, t.release) else {
@@ -561,6 +577,58 @@ mod tests {
         // 10000-1000 = 9000 prompt, processed 9000 -> zero reuse, flagged.
         assert_eq!(vision.reused_tokens, 0);
         assert!(vision.reuse_disabled);
+    }
+
+    /// Ports get REUSED within one router lifetime and a new child
+    /// restarts task ids at 0, so `(port, generation, task)` is the key
+    /// and a task is bound to the model active WHEN FIRST SEEN. The
+    /// meter's permanent ledger sits on this attribution (review catch
+    /// 2026-08-28) — and nothing tested it until the C6 retention work
+    /// needed to change how the model is stored (2026-09-12).
+    #[test]
+    fn one_port_reused_by_two_models_attributes_each_turn_correctly() {
+        let log = "\
+1.0 I srv load: spawning server instance with name=coder-q4 on port 40001\n\
+[40001] 0.05 I slot print_timing: id  0 | task 7 | prompt processing, n_tokens =   1000, progress = 1.00\n\
+[40001] 0.09 I slot print_timing: id  0 | task 7 | n_gen =    200, tg =  40.00 t/s\n\
+[40001] 0.10 I slot      release: id  0 | task 7 | stop processing: n_tokens = 3000, truncated = 0\n\
+2.0 I srv load: spawning server instance with name=vision-q4 on port 40001\n\
+[40001] 0.05 I slot print_timing: id  0 | task 7 | prompt processing, n_tokens =    500, progress = 1.00\n\
+[40001] 0.09 I slot print_timing: id  0 | task 7 | n_gen =    100, tg =  40.00 t/s\n\
+[40001] 0.10 I slot      release: id  0 | task 7 | stop processing: n_tokens = 1100, truncated = 0\n";
+        let stats = cache_effectiveness(log);
+        assert_eq!(stats.len(), 2, "same port, same task id, two models: {stats:?}");
+
+        // total_prompt = 3000-200 = 2800; processed 1000 -> reused 1800.
+        let coder = stats.iter().find(|s| s.model == "coder-q4").expect("coder");
+        assert_eq!(coder.turns, 1);
+        assert_eq!(coder.prompt_tokens, 2_800);
+        assert_eq!(coder.reused_tokens, 1_800);
+        assert_eq!(coder.generated_tokens, 200);
+
+        // total_prompt = 1100-100 = 1000; processed 500 -> reused 500.
+        let vision = stats.iter().find(|s| s.model == "vision-q4").expect("vision");
+        assert_eq!(vision.turns, 1);
+        assert_eq!(vision.prompt_tokens, 1_000);
+        assert_eq!(vision.reused_tokens, 500);
+        assert_eq!(vision.generated_tokens, 100);
+    }
+
+    /// The documented fallback: a task whose lines precede any spawn
+    /// line we saw is attributed to the port's tenant at the end. Must
+    /// survive the C6 change, since it is the one case where the key
+    /// cannot supply the model.
+    #[test]
+    fn a_task_seen_before_any_spawn_line_falls_back_to_the_ports_tenant() {
+        let log = "\
+[40001] 0.05 I slot print_timing: id  0 | task 1 | prompt processing, n_tokens =   1000, progress = 1.00\n\
+[40001] 0.09 I slot print_timing: id  0 | task 1 | n_gen =    100, tg =  40.00 t/s\n\
+[40001] 0.10 I slot      release: id  0 | task 1 | stop processing: n_tokens = 2100, truncated = 0\n\
+9.0 I srv load: spawning server instance with name=late-arrival on port 40001\n";
+        let stats = cache_effectiveness(log);
+        assert_eq!(stats.len(), 1, "{stats:?}");
+        assert_eq!(stats[0].model, "late-arrival");
+        assert_eq!(stats[0].turns, 1);
     }
 
     #[test]
