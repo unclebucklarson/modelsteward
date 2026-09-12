@@ -466,6 +466,10 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
         disabled: &off,
         conditions: &conditions,
         content_id: &|alias| ids.get(alias).cloned(),
+        // The CLI has no Ctrl-C wiring yet — bench, trial and quality all
+        // pass a never-cancelled token the same way. Worth adding (the
+        // sibling modellab does it), but that is its own change.
+        cancel: &cancel::CancelToken::default(),
     };
     let results = router::calibrate(&job, &mut |line| {
         eprintln!("{line}");

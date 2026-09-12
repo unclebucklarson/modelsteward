@@ -909,6 +909,14 @@ pub struct CalibrateJob<'a> {
     /// reach for. Returning `None` for everything is a valid resolver
     /// and simply records no identities.
     pub content_id: &'a dyn Fn(&str) -> Option<String>,
+    /// Checked before the network and between models, so ✖ Cancel means
+    /// something. It did not exist: `dispatch_now` minted a token from
+    /// `begin()` and never passed it here, so cancelling a 12-model
+    /// measure removed the button, printed "cancelling — stopping at the
+    /// next safe point…", and went on loading models 4-12. Killing the
+    /// app was the only way out — the thing cancel.rs was written to fix
+    /// (adversarial review, 2026-09-12).
+    pub cancel: &'a crate::core::cancel::CancelToken,
 }
 
 pub fn calibrate(
@@ -925,7 +933,12 @@ pub fn calibrate(
         disabled,
         conditions,
         content_id,
+        cancel,
     } = *job;
+    // BEFORE the network: an already-cancelled job must not open a
+    // connection, which is also what makes this testable without a
+    // router.
+    cancel.check()?;
     // Preset models AND the router's own HF cache downloads ("cache" source
     // — e.g. models pulled by `llama-server -hf` or vendor tools). Both are
     // servable through the router, so both deserve measurement; anything
@@ -949,6 +962,14 @@ pub fn calibrate(
     let mut out = read_measurements(dir);
     let total = models.len();
     for (i, m) in models.iter().enumerate() {
+        // A safe boundary: measurements already written are kept.
+        if cancel.is_cancelled() {
+            progress(format!(
+                "cancelled — stopped after {i} of {total} model(s); what was measured \
+                 is kept"
+            ));
+            break;
+        }
         let n = i + 1;
         if !force
             && let Some(stored) = out.get(&m.id)
@@ -1419,6 +1440,72 @@ pub fn kill_strays(dir: &Path, cfg: &RouterConfig) -> Result<Vec<u32>> {
         }
     }
     Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_cancel {
+    use super::*;
+    use crate::core::cancel::CancelToken;
+
+    /// ✖ Cancel was inert during a measurement: no cancel field existed
+    /// on CalibrateJob at all, so the token `begin()` minted was
+    /// dropped. Asserting it is checked BEFORE the network is what makes
+    /// this testable with no router: a cancelled job must come back with
+    /// the cancel message, not a connection error against a dead port.
+    #[test]
+    fn an_already_cancelled_job_never_opens_a_connection() {
+        let token = CancelToken::default();
+        token.cancel();
+        let dir = std::env::temp_dir();
+        let no_probe: std::collections::HashSet<String> = Default::default();
+        let job = CalibrateJob {
+            dir: &dir,
+            // Nothing listens here; reaching the network would say so.
+            port: 1,
+            env_fp: "fp",
+            build: None,
+            force: false,
+            no_tool_probe: &no_probe,
+            disabled: &no_probe,
+            conditions: &|| (None, None),
+            content_id: &|_| None,
+            cancel: &token,
+        };
+        let err = calibrate(&job, &mut |_| {}).expect_err("must refuse");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("cancelled by user"), "got: {msg}");
+        assert!(
+            !msg.contains("not answering") && !msg.contains("/models"),
+            "it must not have tried the router first: {msg}"
+        );
+    }
+
+    /// A token that is NOT cancelled must not block the normal path —
+    /// the check has to be a check, not a gate.
+    #[test]
+    fn a_live_token_does_not_refuse_before_the_network() {
+        let token = CancelToken::default();
+        let dir = std::env::temp_dir();
+        let no_probe: std::collections::HashSet<String> = Default::default();
+        let job = CalibrateJob {
+            dir: &dir,
+            port: 1,
+            env_fp: "fp",
+            build: None,
+            force: false,
+            no_tool_probe: &no_probe,
+            disabled: &no_probe,
+            conditions: &|| (None, None),
+            content_id: &|_| None,
+            cancel: &token,
+        };
+        let err = calibrate(&job, &mut |_| {}).expect_err("no router on port 1");
+        let msg = format!("{err:#}");
+        assert!(
+            !msg.contains("cancelled by user"),
+            "an uncancelled token must let it reach the router: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]

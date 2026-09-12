@@ -1204,7 +1204,9 @@ impl App {
                 return;
             }
             match action {
-                AfterStart::Calibrate { force } => calibrate_worker(&cfg, force, tx),
+                AfterStart::Calibrate { force } => {
+                    calibrate_worker(&cfg, force, &cancel_token, tx)
+                }
                 AfterStart::Lab {
                     id, measure, bench, spec, ub, kv, quality, load, dials, moe,
                     vision, cache, ckpt, slots,
@@ -1334,8 +1336,13 @@ impl App {
             return;
         }
         let cfg = self.cfg.clone();
+        // Mint a token: Set Up Everything runs a calibrate, and the
+        // status bar offers ✖ Cancel while it does.
+        let Some(cancel_token) = self.begin("setup") else {
+            return;
+        };
         self.spawn("setting up everything", move |tx| {
-            setup_flow(&cfg, tx);
+            setup_flow(&cfg, &cancel_token, tx);
         });
     }
 
@@ -1722,6 +1729,11 @@ impl App {
             .backend_sel
             .unwrap_or_else(|| advisor::default_backends(&check));
         let cfg = self.cfg.clone();
+        // The verify step after the build runs a calibrate; without a
+        // token, ✖ Cancel during those minutes did nothing at all.
+        let Some(cancel_token) = self.begin("rebuild") else {
+            return;
+        };
         self.spawn(
             "updating + rebuilding llama.cpp, then verifying (this takes many minutes)",
             move |tx| {
@@ -1750,7 +1762,7 @@ impl App {
                             ));
                             let _ = router::stop(&dir, &system::preset_path());
                         }
-                        if setup_flow(&cfg, tx) {
+                        if setup_flow(&cfg, &cancel_token, tx) {
                             let after = router::read_measurements(&dir);
                             for line in advisor::verify_summary(&advisor::verify_outcome(
                                 &before, &after,
@@ -6104,6 +6116,7 @@ fn start_router(cfg: &settings::AppConfig) -> anyhow::Result<u32> {
 fn run_calibration(
     cfg: &settings::AppConfig,
     force: bool,
+    cancel: &cancel::CancelToken,
     tx: &Sender<Msg>,
 ) -> anyhow::Result<router::Measurements> {
     let report = system::scan_report(cfg, &[]);
@@ -6148,6 +6161,7 @@ fn run_calibration(
             disabled: &off,
             conditions: &|| system::gpu_conditions(cfg),
             content_id: &|alias| ids.get(alias).cloned(),
+            cancel,
         },
         &mut |line| {
             let _ = progress_tx.send(Msg::Progress(line));
@@ -6339,8 +6353,13 @@ fn trial_table_grid(
 }
 
 /// The Measure New/Stale worker: calibrate + report, off-thread.
-fn calibrate_worker(cfg: &settings::AppConfig, force: bool, tx: &Sender<Msg>) {
-    match run_calibration(cfg, force, tx) {
+fn calibrate_worker(
+    cfg: &settings::AppConfig,
+    force: bool,
+    cancel: &cancel::CancelToken,
+    tx: &Sender<Msg>,
+) {
+    match run_calibration(cfg, force, cancel, tx) {
         Ok(m) => {
             let measured = m.values().filter(|x| x.n_ctx.is_some()).count();
             let failed = m.values().filter(|x| x.error.is_some()).count();
@@ -6411,7 +6430,11 @@ fn start_router_and_wait(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
 /// verification: start if down -> wait healthy -> incremental calibrate ->
 /// sync. Narrates via tx; on failure it reports (Msg::Error) and returns
 /// false so callers stop there.
-fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
+fn setup_flow(
+    cfg: &settings::AppConfig,
+    cancel: &cancel::CancelToken,
+    tx: &Sender<Msg>,
+) -> bool {
     let step = |m: &str| {
         let _ = tx.send(Msg::Progress(format!("setup: {m}")));
     };
@@ -6433,7 +6456,7 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
         }
     }
     step("measuring anything new or stale");
-    let measurements = match run_calibration(cfg, false, tx) {
+    let measurements = match run_calibration(cfg, false, cancel, tx) {
         Ok(m) => m,
         Err(e) => {
             let _ = tx.send(Msg::Error(format!("setup/calibrate: {e:#}")));
