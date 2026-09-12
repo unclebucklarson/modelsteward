@@ -9,6 +9,9 @@ feature work.
 - **[EFFICIENCY-RELIABILITY.md](EFFICIENCY-RELIABILITY.md)** — work per
   frame, per tick, per operation. Two CRITICAL unbounded-growth
   findings, five HIGH.
+- **[PRE-TAG-v0.7.0.md](PRE-TAG-v0.7.0.md)** — 2026-09-11, the diff
+  since v0.6.75. Five fixed before the tag (four of them regressions
+  introduced since the last release), ten carried into the backlog.
 
 ## How these were produced
 

@@ -380,7 +380,22 @@ NOT unblocked by the laptop: multi-GPU work (it is still one GPU).
   automation; measured a solid negative on b10630, watch upstream.
 - **Community dataset (Tier 2)** — needs a home to exist first.
 
-## Where things stand (2026-09-03, 220 unit + 4 integration tests green)
+## Where things stand (2026-09-11, v0.7.0 — 266 unit + 15 integration tests green)
+
+**v0.7.0** closes 26 commits since v0.6.75. User-visible: the router port
+is changeable and actually takes effect, reaching opencode.json (both
+halves were broken); an occupied port is refused in 0.36s naming the
+cause instead of a 30s timeout pointing at a log file; llama-servers are
+reaped, so failed starts no longer leave `<defunct>` children, with
+Tools -> Clean Up Stray Servers for what Stop cannot reach. Underneath:
+benchmarks measure generation at a realistic KV depth and record the VRAM
+conditions they were taken under, the GUI stopped perturbing the
+inference it measures, and the app now reads modelwarden's inventory for
+content identity and model stores. A pre-tag review of the whole diff
+fixed five more, four of them regressions introduced since the last tag
+(`code-review/PRE-TAG-v0.7.0.md`).
+
+### Older status (2026-09-03, 220 unit + 4 integration tests green)
 
 Since the v0.6.75 tag: two review cycles (findings fixed, then the
 FIXES reviewed — six overstated claims completed, one regression
