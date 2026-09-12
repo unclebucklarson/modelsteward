@@ -62,9 +62,8 @@ pub fn meter_report_text(
         // (pre-tag review, 2026-09-11).
         let (stats, coverage) =
             crate::core::evidence::cache_effectiveness_with_coverage(&text);
-        match meter::harvest_stats(&dir, &stats, &text, now) {
-            Ok((_, Some(why))) => eprintln!("WARNING: meter: {why}"),
-            _ => {}
+        if let Ok((_, Some(why))) = meter::harvest_stats(&dir, &stats, &text, now) {
+            eprintln!("WARNING: meter: {why}");
         }
         // The GUI poller warns on parser drift; the CLI surface must
         // too, or `--meter` prints a confident zero when the log

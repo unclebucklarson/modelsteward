@@ -83,17 +83,40 @@ pub fn counter_delta(before: u64, after: u64, max_range: u64) -> u64 {
     }
 }
 
+/// Sum the per-GPU `power.draw` column, or `None` when nothing usable
+/// came back.
+///
+/// `filter_map(parse).sum()` over an all-rejected iterator is `0.0`, and
+/// wrapping that in `Some` on a successful exit turned a card reporting
+/// `[N/A]` — normal for some models and drivers — into a *measured* zero
+/// watts. Extracted so it can be tested at all, which is why it went
+/// unnoticed (adversarial review, 2026-09-12).
+pub fn parse_power_w(stdout: &str) -> Option<f64> {
+    let mut any = false;
+    let mut total = 0.0;
+    for l in stdout.lines() {
+        let t = l.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // `[N/A]`, `[Not Supported]`, anything non-numeric: the card is
+        // not telling us, which is not the same as zero.
+        let w: f64 = t.parse().ok()?;
+        total += w;
+        any = true;
+    }
+    any.then_some(total)
+}
+
 fn gpu_power_w() -> Option<f64> {
     let out = std::process::Command::new("nvidia-smi")
         .args(["--query-gpu=power.draw", "--format=csv,noheader,nounits"])
         .output()
         .ok()?;
-    out.status.success().then(|| {
-        String::from_utf8_lossy(&out.stdout)
-            .lines()
-            .filter_map(|l| l.trim().parse::<f64>().ok())
-            .sum()
-    })
+    if !out.status.success() {
+        return None;
+    }
+    parse_power_w(&String::from_utf8_lossy(&out.stdout))
 }
 
 /// What one measured window cost.
@@ -192,14 +215,84 @@ impl EnergySample {
             (Some(j), Some(w)) => Some((j - w * self.secs).max(0.0)),
             _ => None,
         };
+        // BOTH halves or nothing. `g.unwrap_or(0.0) + c.unwrap_or(0.0)`
+        // returned a partial sum dressed as a total — precisely what the
+        // comment above the cpu_j computation says must not happen
+        // ("reporting a partial sum … would inject invented joules into
+        // the measured-cost line the product is sold on").
+        //
+        // On a stock machine RAPL is root-locked, so the CPU half is
+        // always unknown, and the crowned `--cpu-moe` configs run their
+        // experts there: the J/tok column was ranking CPU-offload
+        // variants against GPU-resident ones with the offloaded half
+        // priced at zero, and the meter's "measured local cost" line
+        // inherited it (adversarial review, 2026-09-12).
+        //
+        // Absent is the honest answer, and the Build Advisor already
+        // tells the user how to make RAPL readable.
         match (gpu, cpu) {
-            (None, None) => None,
-            (g, c) => Some(g.unwrap_or(0.0) + c.unwrap_or(0.0)),
+            (Some(g), Some(c)) => Some(g + c),
+            _ => None,
         }
     }
 }
 
 #[cfg(test)]
+mod tests_partial_energy {
+    use super::{Baseline, EnergySample, parse_power_w};
+
+    /// The defect, and it bites this machine: `/sys/class/powercap/
+    /// intel-rapl:0/energy_uj` is root-locked here, so cpu_j is always
+    /// None — and `g.unwrap_or(0.0) + c.unwrap_or(0.0)` returned the GPU
+    /// figure alone as the TOTAL. The crowned ncpu-moe-32 config runs 32
+    /// layers of experts on the CPU, so the Lab's J/tok column has been
+    /// ranking CPU-offload variants against GPU-resident ones with the
+    /// offloaded half priced at zero (review 2026-09-12).
+    #[test]
+    fn a_missing_cpu_half_is_unknown_not_a_total() {
+        let s = EnergySample { secs: 10.0, gpu_j: Some(1000.0), cpu_j: None };
+        let idle = Baseline { gpu_w: Some(20.0), cpu_w: Some(5.0) };
+        assert_eq!(
+            s.marginal_j(&idle),
+            None,
+            "GPU-only is not the total energy; the module's contract is \
+             measured or absent, no estimates"
+        );
+    }
+
+    #[test]
+    fn a_missing_gpu_half_is_also_unknown() {
+        let s = EnergySample { secs: 10.0, gpu_j: None, cpu_j: Some(200.0) };
+        let idle = Baseline { gpu_w: Some(20.0), cpu_w: Some(5.0) };
+        assert_eq!(s.marginal_j(&idle), None);
+    }
+
+    /// Both halves present: a real total, idle draw subtracted.
+    #[test]
+    fn both_halves_present_gives_the_marginal_total() {
+        let s = EnergySample { secs: 10.0, gpu_j: Some(1000.0), cpu_j: Some(200.0) };
+        let idle = Baseline { gpu_w: Some(20.0), cpu_w: Some(5.0) };
+        // (1000 - 200) + (200 - 50) = 950
+        assert_eq!(s.marginal_j(&idle), Some(950.0));
+    }
+
+    /// And the same rule on the GPU side of the input: nvidia-smi
+    /// reporting no usable value is unknown, not zero watts.
+    #[test]
+    fn nvidia_smi_reporting_no_value_is_unknown() {
+        assert_eq!(parse_power_w("[N/A]\n"), None);
+        assert_eq!(parse_power_w("[Not Supported]"), None);
+        assert_eq!(parse_power_w(""), None);
+        assert_eq!(parse_power_w("   \n  \n"), None);
+    }
+
+    #[test]
+    fn real_readings_still_sum_across_cards() {
+        assert_eq!(parse_power_w("350.5\n"), Some(350.5));
+        assert_eq!(parse_power_w("100.0\n200.0\n"), Some(300.0));
+    }
+}
+
 mod tests {
     use super::*;
 
@@ -267,13 +360,27 @@ mod tests {
             cpu_w: Some(100.0),
         };
         assert_eq!(s.marginal_j(&hot_idle), Some(0.0));
-        // CPU untracked (RAPL root-locked) -> GPU-only, honestly partial.
+        // REVERSED 2026-09-12, with the reason recorded rather than the
+        // assertion quietly edited. This previously expected
+        // Some(2750.0) — the GPU figure alone — and called it "honestly
+        // partial". Partial is only honest if the partiality TRAVELS,
+        // and it does not: `TrialResult.j_per_token` is a bare
+        // Option<f64> and `meter::cost_report` takes a plain f64, so the
+        // number reaches the trial table (which RANKS configs by it) and
+        // the "measured local cost" line with nothing saying the CPU was
+        // excluded. Treating an unreadable CPU as zero joules is an
+        // estimate, and a badly wrong one for the `--cpu-moe` configs
+        // that put their experts there — which is exactly what this
+        // machine's crowned config does, with RAPL root-locked.
+        //
+        // The module's own contract is "honestly None (never
+        // estimated)". So: both halves, or no number.
         let gpu_only = EnergySample {
             secs: 10.0,
             gpu_j: Some(3000.0),
             cpu_j: None,
         };
-        assert_eq!(gpu_only.marginal_j(&idle), Some(2750.0));
+        assert_eq!(gpu_only.marginal_j(&idle), None);
         // Nothing measurable -> None, never a guess.
         let none = EnergySample {
             secs: 10.0,
