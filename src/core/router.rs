@@ -1273,7 +1273,24 @@ pub fn failure_reason(log: &str) -> Option<String> {
             // (pre-tag review, 2026-09-11).
             || l.split_whitespace().any(|t| t == "E")
     };
-    let errors: Vec<&str> = log.lines().filter(|l| is_error(l)).collect();
+    // Scope to the STARTUP phase. Once llama-server logs `listening on`
+    // it HAS started; everything after is a runtime error answering a
+    // different question — and llama.cpp logs plenty of those with the
+    // same `E` severity, notably `http client error: Connection handling
+    // canceled` for every ordinary client disconnect. Without this the
+    // function returned that line as the reason a start failed, against
+    // a perfectly healthy router (verified on the live log, 2026-09-12;
+    // my own regression from the day before, whose test passed only
+    // because its fixture had no `E` lines at all).
+    //
+    // If the readiness wording ever drifts, `take_while` yields the whole
+    // log and we are back to the previous behaviour — no worse, and the
+    // startup phase is exactly when no readiness line exists yet.
+    let errors: Vec<&str> = log
+        .lines()
+        .take_while(|l| !l.contains("listening on"))
+        .filter(|l| is_error(l))
+        .collect();
 
     // Prefer the CAUSE over the consequence. llama-server reports a bind
     // failure and then, two lines later, "exiting due to HTTP server
@@ -1312,15 +1329,21 @@ fn strip_log_decoration(line: &str) -> String {
     toks.join(" ")
 }
 
-/// [`failure_reason`] over the router's log file, tail only — the log is
-/// recreated per start, but a long healthy run can still make it large.
+/// [`failure_reason`] over the router's log file — the HEAD, not the tail.
+///
+/// The log is recreated on every start, so startup is at the beginning:
+/// on this machine `listening on` is line 2 of 7,073. Reading the tail
+/// meant the readiness marker was never in view, so the scoping in
+/// `failure_reason` could not engage and the last routine client
+/// disconnect won — which is what a unit test and a mutation check both
+/// missed, and only running it against the live log exposed
+/// (2026-09-12). A failed start's whole log is a few KB; 64 KiB of head
+/// covers the startup phase of a healthy one many times over, and
+/// `read_head` decodes lossily so a multibyte model name at the cut
+/// cannot empty it.
 pub fn failure_reason_from_log(dir: &Path) -> Option<String> {
-    let text = std::fs::read_to_string(dir.join("router.log")).ok()?;
-    let tail: String = {
-        let lines: Vec<&str> = text.lines().collect();
-        lines[lines.len().saturating_sub(80)..].join("\n")
-    };
-    failure_reason(&tail)
+    let head = crate::core::system::read_head(&dir.join("router.log"), 64 * 1024)?;
+    failure_reason(&head)
 }
 
 /// Every live process running our preset. [`find_preset_process`]
@@ -1657,6 +1680,48 @@ mod tests_start_failure {
     /// A clean startup log must not manufacture a failure — the wait
     /// loop calls this on timeout, and "no reason found" has to stay
     /// distinguishable from "here is the reason".
+    /// The log shape of an actually-healthy router on this machine
+    /// (2026-09-12): it reports `listening on`, then accumulates routine
+    /// per-request errors for hours. My original fixture had no `E`
+    /// lines at all, so the "healthy" test passed while the real thing
+    /// returned "http client error: Connection handling canceled" as the
+    /// reason a start failed.
+    const REAL_HEALTHY: &str = concat!(
+        "0.00.212.129 I srv  llama_server: starting server in router mode. models will be automatically loaded on-demand\n",
+        "0.00.213.362 I srv  llama_server: listening on http://127.0.0.1:8181\n",
+        "[41251] 223.54.295.354 E srv    send_error: task id = 329854, error: request (116060 tokens) exceeds the available context size (115712 tokens), try increasing it\n",
+        "774.04.714.477 E srv    operator(): http client error: Connection handling canceled\n",
+        "774.05.721.444 E srv    operator(): http client error: Connection handling canceled\n",
+    );
+
+    /// Once the server has said it is listening, it STARTED. Anything
+    /// after that is a runtime error and answers a different question,
+    /// so "why did the start fail?" must have no answer rather than a
+    /// confidently wrong one.
+    #[test]
+    fn a_router_that_reported_listening_has_no_start_failure() {
+        assert_eq!(
+            failure_reason(REAL_HEALTHY),
+            None,
+            "routine per-request errors are not a reason the START failed"
+        );
+    }
+
+    /// And a real startup error still gets through, even after the
+    /// server has begun logging — it precedes readiness.
+    #[test]
+    fn an_error_before_readiness_is_still_reported() {
+        let log = concat!(
+            "0.00.1 I srv  llama_server: starting server in router mode\n",
+            "0.00.2 E srv    load: no CUDA devices detected\n",
+            "0.00.3 I srv  llama_server: listening on http://127.0.0.1:8181\n",
+            "9.99.9 E srv    operator(): http client error: Connection handling canceled\n",
+        );
+        let r = failure_reason(log).expect("the pre-readiness failure");
+        assert!(r.contains("no CUDA devices"), "{r}");
+        assert!(!r.contains("http client"), "the runtime noise must not win: {r}");
+    }
+
     #[test]
     fn a_healthy_log_yields_no_reason() {
         let log = "0.00.1 I srv  llama_server: starting server in router mode\n\
