@@ -739,32 +739,56 @@ pub fn migrate_measurement(all: &mut Measurements, old_id: &str, new_id: &str) {
 /// same config + environment — re-measuring ctx must not wipe them. A
 /// changed fingerprint means the old numbers describe a different setup,
 /// so they drop with it.
-pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) {
-    if let Some(old) = all.get(id)
-        && old.args_fp == m.args_fp
-        && old.env_fp == m.env_fp
-    {
-        m.pp_tps = old.pp_tps;
-        m.tg_tps = old.tg_tps;
-        // Every measured field must be listed here or a re-measure
-        // silently wipes it (review finding M4, and the reason this
-        // list is tested).
-        m.tg_deep_tps = old.tg_deep_tps;
-        m.tg_depth = old.tg_depth;
-        m.bench_build = old.bench_build;
-        m.eval_score = old.eval_score;
-        m.tool_reliability = old.tool_reliability;
-        m.loop_reliability = old.loop_reliability;
-        // The family join key. A calibrate run with warden absent or its
-        // inventory damaged resolves None for every alias, and without
-        // this line that run would wipe every recorded identity — the
-        // precise outcome warden.rs's header says must never happen
-        // (pre-tag review, 2026-09-11).
+pub fn upsert_measurement(
+    all: &mut Measurements,
+    id: &str,
+    mut m: Measurement,
+) -> Vec<&'static str> {
+    let mut dropped: Vec<&'static str> = Vec::new();
+    if let Some(old) = all.get(id) {
+        // Identity travels ALWAYS: it describes the bytes, and no change
+        // of flags or build can alter which file this is. It sat inside
+        // the gate below for one day, which meant `keep_variant` —
+        // clearing both fingerprints on purpose to force a re-verify —
+        // guaranteed the next calibrate wiped it, the exact outcome
+        // warden.rs's header says must never happen (review 2026-09-12).
         if m.content_id.is_none() {
             m.content_id = old.content_id.clone();
         }
+
+        if old.args_fp == m.args_fp && old.env_fp == m.env_fp {
+            // Same config, same environment: nothing measured here is
+            // stale. Every measured field must be listed or a re-measure
+            // silently wipes it (finding M4).
+            m.pp_tps = old.pp_tps;
+            m.tg_tps = old.tg_tps;
+            m.tg_deep_tps = old.tg_deep_tps;
+            m.tg_depth = old.tg_depth;
+            m.bench_build = old.bench_build;
+            m.eval_score = old.eval_score;
+            m.tool_reliability = old.tool_reliability;
+            m.loop_reliability = old.loop_reliability;
+        } else {
+            // A different config or build: these numbers describe the
+            // old one and drop with it — bench passes the model's own
+            // overrides to llama-bench, so they really are
+            // config-specific. That is the design, and it stays. What was
+            // wrong is that it happened in SILENCE: tens of minutes of
+            // GPU time became None with no word to the user. Say what
+            // went, so a caller can tell them to re-run it.
+            if old.pp_tps.is_some() || old.tg_tps.is_some() || old.tg_deep_tps.is_some() {
+                dropped.push("bench baselines");
+            }
+            if old.eval_score.is_some()
+                || old.tool_reliability.is_some()
+                || old.loop_reliability.is_some()
+            {
+                dropped.push("quality scores");
+            }
+        }
     }
     all.insert(id.to_string(), m);
+    dropped
 }
 
 pub fn write_measurements(dir: &Path, m: &Measurements) -> Result<()> {
@@ -1086,7 +1110,19 @@ pub fn calibrate(
                 ..Default::default()
             },
         );
-        upsert_measurement(&mut out, &m.id, measurement);
+        let dropped = upsert_measurement(&mut out, &m.id, measurement);
+        if !dropped.is_empty() {
+            // Not silent any more: the config or build changed, so these
+            // numbers described the old one. Name what went and what
+            // brings it back.
+            progress(format!(
+                "[{n}/{total}] {}: {} dropped — the config or build changed since they \
+                 were taken; re-run {} to restore them",
+                m.id,
+                dropped.join(" and "),
+                if dropped.len() > 1 { "Bench and Quality" } else if dropped[0] == "bench baselines" { "Bench" } else { "Quality" }
+            ));
+        }
         write_measurements(dir, &out)?; // persist per model — a mid-run
         // failure keeps everything measured so far
         let _ = unload_model(port, &m.id);
@@ -1440,6 +1476,116 @@ pub fn kill_strays(dir: &Path, cfg: &RouterConfig) -> Result<Vec<u32>> {
         }
     }
     Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_carry_across_a_config_change {
+    use super::*;
+
+    fn expensive() -> Measurement {
+        Measurement {
+            n_ctx: Some(108_208),
+            tool_call: Some(true),
+            args_fp: Some("OLD".into()),
+            env_fp: Some("E".into()),
+            pp_tps: Some(302.8),
+            tg_tps: Some(47.0),
+            tg_deep_tps: Some(35.1),
+            tg_depth: Some(16_384),
+            bench_build: Some(10_775),
+            eval_score: Some(0.83),
+            tool_reliability: Some(1.0),
+            loop_reliability: Some(0.67),
+            content_id: Some("sha256:00b5a7c4".into()),
+            ..Default::default()
+        }
+    }
+
+    /// The live chain (adversarial review, 2026-09-12): `keep_variant`
+    /// clears both fingerprints to force a re-verify, so the NEXT
+    /// calibrate arrives with `Some(fp)` against a stored `None`, the
+    /// carry gate fails, and everything it guards is replaced with
+    /// None. Identity is not a property of the config — a different
+    /// `--ubatch` cannot change which file this is — so it must survive
+    /// regardless. I put this line inside the gate the day before.
+    #[test]
+    fn the_content_identity_survives_a_fingerprint_mismatch() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), expensive());
+        let _ = upsert_measurement(
+            &mut all,
+            "m",
+            Measurement {
+                n_ctx: Some(131_072),
+                args_fp: Some("NEW".into()),
+                env_fp: Some("E".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            all["m"].content_id.as_deref(),
+            Some("sha256:00b5a7c4"),
+            "the join key is a property of the bytes, not of the flags"
+        );
+    }
+
+    /// Bench and quality DO describe a config — bench passes the model's
+    /// own overrides to llama-bench — so dropping them on a real config
+    /// change is the documented design. What was wrong is that it
+    /// happened in silence: tens of minutes of GPU went to None with no
+    /// word to the user. The drop is now reported so a caller can say so.
+    #[test]
+    fn a_config_change_drops_the_config_dependent_numbers_and_says_so() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), expensive());
+        let dropped = upsert_measurement(
+            &mut all,
+            "m",
+            Measurement {
+                n_ctx: Some(131_072),
+                args_fp: Some("NEW".into()),
+                env_fp: Some("E".into()),
+                ..Default::default()
+            },
+        );
+        assert!(all["m"].pp_tps.is_none(), "bench describes the old config");
+        assert!(all["m"].eval_score.is_none());
+        assert!(
+            dropped.contains(&"bench baselines") && dropped.contains(&"quality scores"),
+            "the loss must be reportable, not silent: {dropped:?}"
+        );
+    }
+
+    #[test]
+    fn matching_fingerprints_keep_everything_and_report_nothing() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), expensive());
+        let dropped = upsert_measurement(
+            &mut all,
+            "m",
+            Measurement {
+                n_ctx: Some(108_208),
+                args_fp: Some("OLD".into()),
+                env_fp: Some("E".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(all["m"].eval_score, Some(0.83));
+        assert_eq!(all["m"].pp_tps, Some(302.8));
+        assert!(dropped.is_empty(), "nothing was lost: {dropped:?}");
+    }
+
+    /// A model measured for the first time has nothing to lose.
+    #[test]
+    fn a_first_measurement_reports_no_loss() {
+        let mut all = Measurements::new();
+        let dropped = upsert_measurement(
+            &mut all,
+            "brand-new",
+            Measurement { n_ctx: Some(4096), ..Default::default() },
+        );
+        assert!(dropped.is_empty(), "{dropped:?}");
+    }
 }
 
 #[cfg(test)]
