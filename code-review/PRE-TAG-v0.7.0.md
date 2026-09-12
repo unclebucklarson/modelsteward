@@ -15,41 +15,28 @@ introduced since the last release:
 | 4 | `warden.rs` | `removable` roots walked as shelves — a mounted backup drive would duplicate the whole fleet under `-2` aliases and serve it from USB |
 | 5 | `safefs.rs` | `write_atomic` forced 0644 on new files, making first writes world-readable under `umask 077` |
 
+## Also fixed before the tag — Group A (commit follows)
+
+Scott reviewed the ten open findings and took the four that write wrong
+data into durable state:
+
+| # | Where | What |
+|---|---|---|
+| A1 | `quality.rs` | a failed battery returned past the unload, leaving 20 GB resident so the next measurement was contended |
+| A2 | `quality.rs` | transport failure and model failure both came back as `Err(String)`, so a network blip permanently lowered `loop_reliability`. Now separated BY TYPE: outer `Result` = unreachable (abort, as the eval loop already did), inner = the model's behaviour (score) |
+| A3 | `bench.rs` | `--bench` stamped its own post-unload VRAM sample over calibrate's, so `--report` printed a context and a condition from different runs |
+| A5 | `ui.rs` → `system::read_head` | a multibyte character straddling the 8 KB window emptied the meter fingerprint, letting `--meter` re-credit a log it had already counted |
+
 ## Open — carried into the backlog
 
-Ordered by severity. None blocks the release; all are real.
+Ordered by severity. None blocks the release; all are real. **Group A
+above is resolved**; what follows is Groups B and C, slated for 0.7.1.
 
-- **`quality.rs:383` — a failed probe leaves the model resident.**
-  `run_and_record` propagates the new `run_quality` errors with `?`,
-  skipping `unload_model` + `wait_until_not_loaded`. A connection reset
-  mid-battery leaves 20 GB loaded, and the next bench or calibrate sees
-  a contended card — which this codebase treats as a *wrong*
-  measurement, not a slow one.
-- **`quality.rs:212` — H12 is still live in `agent_loop_shot`.** A
-  transport failure during a loop shot is scored as "the model quit
-  mid-loop", permanently lowering `loop_reliability` in
-  `measurements.json` over a network blip. The evals and tool probes two
-  loops above were fixed for exactly this; the loop probe was missed.
-- **`bench.rs:317` — bench overwrites calibrate's free-VRAM sample.**
-  `free_vram_mib` exists to explain the settled `n_ctx` it was measured
-  beside. A later `--bench` stamps its own (post-unload, therefore
-  larger) sample onto the same entry, so `--report` prints a context and
-  a free-VRAM figure from different runs under a preamble promising they
-  belong together. One sample is also reused across every model in a
-  multi-model run.
 - **`system.rs:434` — `fleet_known_ids` never forgets.** It unions every
   key of `measurements.json`, which is only ever added to. A deleted
   model stays "known" forever, so piagent's removal rule can never fire
   and the dead entry sits in `~/.pi/agent/models.json` indefinitely —
   disabling the model is the only way to evict it.
-- **`ui.rs:727` — meter log-head read can silently produce `""`.**
-  `read_to_string` over a fixed 8192-byte `Take` errors when a multibyte
-  character straddles the cut; `.ok()?` then makes the harvest
-  fingerprint the empty string, so a router restart stops being detected
-  as a new instance and the CLI `--meter` (which passes the whole log)
-  computes a different fingerprint and re-credits the entire log. The
-  miner feed immediately above already does the right thing with
-  `from_utf8_lossy` over raw bytes.
 - **`evidence.rs:264` — `LogMiner` retains every task forever.** The old
   unbounded per-tick CPU was traded for unbounded memory: ~10k turns/day
   leaves ~300k permanent entries in a month, and `results()` re-walks all

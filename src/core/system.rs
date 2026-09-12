@@ -571,6 +571,23 @@ pub fn reap_in_background(mut child: std::process::Child) {
     });
 }
 
+/// The first `n` bytes of a file as text, decoded lossily.
+///
+/// Fingerprints only need the head of a log, but reading a fixed byte
+/// window with `read_to_string` FAILS when a multibyte character
+/// straddles the cut — and the caller's `.ok()` turned that into an
+/// empty fingerprint, which stops a router restart being recognised as
+/// a new instance and lets `--meter` re-credit a whole log it has
+/// already counted (pre-tag review, 2026-09-11). Bytes in, lossy out,
+/// exactly as the miner feed alongside it already did.
+pub fn read_head(path: &std::path::Path, n: u64) -> Option<String> {
+    use std::io::Read;
+    let f = std::fs::File::open(path).ok()?;
+    let mut buf = Vec::new();
+    f.take(n).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
+}
+
 /// Zombie children of THIS process: our own spawns that exited and were
 /// never waited on. Should always be empty now that every spawn is
 /// reaped — which is exactly why it is worth showing, as a canary for a
@@ -617,6 +634,38 @@ fn is_zombie(pid: u32) -> bool {
     stat.rsplit_once(')')
         .and_then(|(_, rest)| rest.split_whitespace().next())
         == Some("Z")
+}
+
+#[cfg(test)]
+mod tests_read_head {
+    use super::read_head;
+
+    /// The live shape: a multibyte character straddling the byte window.
+    /// read_to_string returns InvalidData here, and the caller's `.ok()`
+    /// silently produced an empty fingerprint.
+    #[test]
+    fn a_character_straddling_the_cut_does_not_empty_the_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("router.log");
+        // 7 ASCII bytes then a 3-byte character: a cut at 8 lands inside it.
+        std::fs::write(&p, "abcdefg\u{2014}rest of the log").unwrap();
+        let head = read_head(&p, 8).expect("must not fail on a split character");
+        assert!(head.starts_with("abcdefg"), "the readable prefix survives: {head:?}");
+        assert!(!head.is_empty(), "an empty head silently breaks the meter ledger");
+    }
+
+    #[test]
+    fn a_clean_cut_reads_exactly_the_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("l.log");
+        std::fs::write(&p, "0123456789").unwrap();
+        assert_eq!(read_head(&p, 4).unwrap(), "0123");
+    }
+
+    #[test]
+    fn a_missing_file_is_none_not_empty_string() {
+        assert_eq!(read_head(std::path::Path::new("/no/such/log"), 16), None);
+    }
 }
 
 #[cfg(test)]

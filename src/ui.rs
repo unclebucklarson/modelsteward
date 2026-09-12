@@ -720,14 +720,7 @@ impl App {
                     .is_some();
                     if fed {
                         // Fingerprints only need the head of the file.
-                        let head = (|| -> Option<String> {
-                            use std::io::Read;
-                            let f = std::fs::File::open(&log_path).ok()?;
-                            let mut buf = String::new();
-                            let _ = f.take(8192).read_to_string(&mut buf).ok()?;
-                            Some(buf)
-                        })()
-                        .unwrap_or_default();
+                        let head = system::read_head(&log_path, 8192).unwrap_or_default();
                         let (stats, coverage) = miner.results();
                         let text = head;
                         // Say so ONCE when the log stops parsing, rather

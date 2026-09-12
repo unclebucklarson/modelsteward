@@ -255,7 +255,7 @@ pub fn run_baselines(
     // (modellab handoff 2026-09-02, issue 4). A contended baseline is
     // not a slower number, it is a WRONG one, and it gets written into
     // measurements.json as if it were the model's speed. Refuse.
-    let (free_vram_mib, tenant) = system::gpu_conditions(cfg);
+    let (_free_vram_mib, tenant) = system::gpu_conditions(cfg);
     if let Some(t) = &tenant {
         anyhow::bail!(
             "{t} is holding the GPU — a baseline measured against that would \
@@ -321,8 +321,14 @@ pub fn run_baselines(
                 entry.tg_deep_tps = b.tg_deep_tps;
                 entry.tg_depth = b.tg_depth;
                 entry.bench_build = b.build;
-                // The condition the numbers were taken under.
-                entry.free_vram_mib = free_vram_mib;
+                // NOT free_vram_mib. That field exists to explain the
+                // settled n_ctx it was recorded beside, and --report
+                // prints the two together under a preamble promising
+                // exactly that. Stamping a bench-time sample (taken
+                // after an unload, so larger, and sampled ONCE for a
+                // whole multi-model run) onto the same entry made the
+                // pair come from different runs and the explanation
+                // false (pre-tag review, 2026-09-11).
                 measurements.insert(id.clone(), entry);
                 router::write_measurements(&dir, &measurements)?; // persist per model
                 let _ = crate::core::history::record(

@@ -182,7 +182,21 @@ fn ask(port: u16, model: &str, prompt: &str) -> Result<String> {
 /// stalls, or overruns the hop cap. Isolated protocol legs all passed
 /// on the 80B while a real session stalled; THIS measures the loop
 /// itself. Returns Ok(hops) on a correct finish, Err(shape) otherwise.
-fn agent_loop_shot(port: u16, model: &str) -> std::result::Result<u32, String> {
+/// One multi-hop agent loop.
+///
+/// TWO failure kinds, kept apart by the type. The outer `Result` is a
+/// transport failure — the router unreachable, a dropped connection —
+/// which the caller must propagate, exactly as the eval loop already
+/// does ("aborting rather than recording a failure the model never
+/// had"). The inner `Result` is the model's own behaviour, which is
+/// what the score is about. Before this both came back as `Err(String)`
+/// and a network blip permanently lowered `loop_reliability` in
+/// measurements.json, where the advisor reads it (H12's surviving half,
+/// pre-tag review 2026-09-11).
+fn agent_loop_shot(
+    port: u16,
+    model: &str,
+) -> Result<std::result::Result<u32, String>> {
     const ANSWER: &str = "Steward Test Manual";
     let files: &[(&str, &str)] = &[
         ("README.md", "# Steward Test Manual
@@ -209,11 +223,11 @@ Synthetic fixture."),
                 "max_tokens": 1024,
             }),
         )
-        .map_err(|e| format!("request failed at hop {hop}: {e:#}"))?;
+        .with_context(|| format!("agent loop could not reach the model at hop {hop}"))?;
         let msg = body
             .pointer("/choices/0/message")
             .cloned()
-            .ok_or_else(|| format!("no message at hop {hop}"))?;
+            .ok_or_else(|| anyhow::anyhow!("no message in the response at hop {hop}"))?;
         let content = msg
             .get("content")
             .and_then(|c| c.as_str())
@@ -256,23 +270,29 @@ Synthetic fixture."),
                     }));
                 }
             }
-            _ if content.contains(ANSWER) => return Ok(hop),
+            _ if content.contains(ANSWER) => return Ok(Ok(hop)),
             _ if content.trim().is_empty() => {
-                return Err(format!("stalled at hop {hop}: empty turn after tool result"))
+                return Ok(Err(format!(
+                    "stalled at hop {hop}: empty turn after tool result"
+                )))
             }
             _ if content.contains("list_files") || content.contains("read_file") => {
-                return Err(format!(
+                return Ok(Err(format!(
                     "narrated tools as text at hop {hop} instead of calling them"
-                ))
+                )))
             }
-            _ => return Err(format!("finished at hop {hop} without the answer")),
+            _ => return Ok(Err(format!("finished at hop {hop} without the answer"))),
         }
     }
-    Err("hop cap (6) exceeded without an answer".into())
+    Ok(Err("hop cap (6) exceeded without an answer".into()))
 }
 
 /// Run the battery + N tool probes against a LOADED model. The caller
-/// owns loading/unloading; per-item failures score zero rather than abort.
+/// owns loading/unloading.
+///
+/// A failure of the MODEL scores zero and the battery continues; a
+/// failure to REACH the model aborts, because a number recorded from an
+/// unreachable server describes the network, not the model.
 pub fn run_quality(
     port: u16,
     model: &str,
@@ -338,7 +358,13 @@ pub fn run_quality(
     let mut loop_notes = Vec::new();
     for i in 0..loop_shots {
         cancel.check()?;
-        match agent_loop_shot(port, model) {
+        match agent_loop_shot(port, model).with_context(|| {
+            format!(
+                "agent loop {}/{loop_shots} could not reach the model — aborting \
+                 rather than recording a failure the model never had",
+                i + 1
+            )
+        })? {
             Ok(hops) => {
                 loop_ok += 1;
                 progress(format!(
@@ -380,7 +406,15 @@ pub fn run_and_record(
     use crate::core::{discover, history, system};
     progress(format!("quality {model}: loading…"));
     router::fetch_settled_ctx(cfg.port, model)?;
-    let score = run_quality(cfg.port, model, tool_shots, cancel, progress)?;
+    // Unload BEFORE propagating a failure. `?` here used to return past
+    // the unload at the end of this function, so a connection reset
+    // mid-battery left 20 GB resident and the next bench or calibrate
+    // measured a contended card — which this codebase treats as a wrong
+    // measurement, not a slow one (pre-tag review, 2026-09-11).
+    let outcome = run_quality(cfg.port, model, tool_shots, cancel, progress);
+    let _ = router::unload_model(cfg.port, model);
+    router::wait_until_not_loaded(cfg.port, model, std::time::Duration::from_secs(30));
+    let score = outcome?;
     let dir = router::state_dir();
     let mut all = router::read_measurements(&dir);
     let mut entry = all.get(model).cloned().unwrap_or_default();
@@ -402,8 +436,6 @@ pub fn run_and_record(
             ..Default::default()
         },
     );
-    let _ = router::unload_model(cfg.port, model);
-    router::wait_until_not_loaded(cfg.port, model, std::time::Duration::from_secs(30));
     progress(format!(
         "quality {model}: evals {}/{} ({:.0}%), tool calls {}/{} ({:.0}%), \
          agent loops {}/{} ({:.0}%)",
