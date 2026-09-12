@@ -734,13 +734,16 @@ impl App {
                             let _ = tx.send(Msg::Error(format!("meter: {note}")));
                         }
                         let now = advisor::now_epoch();
-                        let credited = meter::harvest_stats(
+                        let (credited, cursor_damaged) = meter::harvest_stats(
                             &router::state_dir(),
                             &stats,
                             &text,
                             now,
                         )
-                        .unwrap_or(0);
+                        .unwrap_or((0, None));
+                        if let Some(why) = cursor_damaged {
+                            let _ = tx.send(Msg::Error(format!("meter: {why}")));
+                        }
                         let _ = tx.send(Msg::CacheStats(stats));
                         if credited > 0 {
                             let trials = trial::read_trials(&router::state_dir());

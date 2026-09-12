@@ -62,7 +62,10 @@ pub fn meter_report_text(
         // (pre-tag review, 2026-09-11).
         let (stats, coverage) =
             crate::core::evidence::cache_effectiveness_with_coverage(&text);
-        let _ = meter::harvest_stats(&dir, &stats, &text, now);
+        match meter::harvest_stats(&dir, &stats, &text, now) {
+            Ok((_, Some(why))) => eprintln!("WARNING: meter: {why}"),
+            _ => {}
+        }
         // The GUI poller warns on parser drift; the CLI surface must
         // too, or `--meter` prints a confident zero when the log
         // dialect changed (review finding H11's CLI half, 2026-09-01).

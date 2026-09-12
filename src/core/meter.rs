@@ -155,7 +155,7 @@ pub fn deltas(
 /// is idempotent per log content.
 pub fn harvest(dir: &Path, log: &str, now: u64) -> Result<usize> {
     let stats = crate::core::evidence::cache_effectiveness(log);
-    harvest_stats(dir, &stats, log, now)
+    harvest_stats(dir, &stats, log, now).map(|(n, _)| n)
 }
 
 /// The poller already computes cache stats for the monitor; this
@@ -166,9 +166,9 @@ pub fn harvest_stats(
     stats: &[crate::core::evidence::ModelCacheStats],
     log: &str,
     now: u64,
-) -> Result<usize> {
+) -> Result<(usize, Option<String>)> {
     let Some(_lock) = try_lock(dir) else {
-        return Ok(0);
+        return Ok((0, None));
     };
     let totals: BTreeMap<String, Tally> = stats
         .iter()
@@ -186,17 +186,49 @@ pub fn harvest_stats(
         })
         .collect();
     let fp = log_fingerprint(log);
-    let cursor: Cursor = std::fs::read_to_string(cursor_path(dir))
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default();
+    // Missing and DAMAGED are different answers, and conflating them
+    // doubles an append-only ledger permanently.
+    //
+    // The writer was hardened to write_atomic for finding M5, whose own
+    // comment records that a default cursor "re-credited the ENTIRE
+    // log". The reader kept defaulting on ANY failure — EACCES after a
+    // root-owned write, EIO, a hand-edit, a future change to Cursor's
+    // shape — and a default cursor has no fingerprint, so `same_instance`
+    // is false, so every token in the current log is credited again.
+    // Three independent reviewers found this on 2026-09-12.
+    //
+    // Missing is genuinely a fresh start and still defaults. Damaged
+    // credits NOTHING this run and repairs the cursor at the current
+    // totals, so the run after it works from a valid baseline. That
+    // under-counts once rather than over-counting forever, which is the
+    // right direction for a number the user reads as money.
+    let mut damaged: Option<String> = None;
+    let cursor: Cursor = match crate::core::safefs::read_json::<Cursor>(&cursor_path(dir)) {
+        crate::core::safefs::Loaded::Ok(c) => c,
+        crate::core::safefs::Loaded::Missing => Cursor::default(),
+        crate::core::safefs::Loaded::Damaged(why) => {
+            damaged = Some(format!(
+                "the token ledger's cursor is unreadable ({why}) — nothing was credited \
+                 this time rather than counting the whole log twice; the next harvest \
+                 resumes normally"
+            ));
+            Cursor::default()
+        }
+    };
     let same_instance = match &cursor.fingerprint_v2 {
         Some(v2) => *v2 == fp,
         // Pre-v2 cursor: recognize the instance by the legacy hash so
         // the upgrade itself can't double-credit.
         None => !cursor.fingerprint.is_empty() && cursor.fingerprint == legacy_fingerprint(log),
     };
-    let new = deltas(&totals, &cursor, same_instance);
+    // A damaged cursor means we do not know what has already been
+    // counted, so we credit nothing — but still advance below, so this
+    // is a one-time gap and not a permanent refusal.
+    let new = if damaged.is_some() {
+        Vec::new()
+    } else {
+        deltas(&totals, &cursor, same_instance)
+    };
     std::fs::create_dir_all(dir)?;
     if !new.is_empty() {
         let hour = now - now % 3600;
@@ -241,7 +273,7 @@ pub fn harvest_stats(
             &serde_json::to_string_pretty(&advanced)?,
         )?;
     }
-    Ok(credited)
+    Ok((credited, damaged))
 }
 
 /// Every ledger line, file order.
@@ -497,6 +529,97 @@ fn fmt_day(epoch: u64) -> String {
 
 fn fmt_hour(epoch: u64) -> String {
     format!("{} {:02}:00", fmt_day(epoch), (epoch % 86_400) / 3600)
+}
+
+#[cfg(test)]
+mod tests_damaged_cursor {
+    use super::*;
+    use crate::core::evidence::ModelCacheStats;
+
+    fn stats(model: &str, turns: u64, prompt: u64, generated: u64) -> Vec<ModelCacheStats> {
+        vec![ModelCacheStats {
+            model: model.into(),
+            turns: turns as u32,
+            prompt_tokens: prompt,
+            reused_tokens: 0,
+            generated_tokens: generated,
+            reuse_disabled: false,
+            reuse_unsupported_context: false,
+        }]
+    }
+
+    fn ledger_totals(dir: &std::path::Path) -> (u64, u64) {
+        let text = std::fs::read_to_string(dir.join("meter.jsonl")).unwrap_or_default();
+        let mut p = 0;
+        let mut g = 0;
+        for l in text.lines().filter(|l| !l.trim().is_empty()) {
+            let v: serde_json::Value = serde_json::from_str(l).unwrap();
+            p += v["prompt"].as_u64().unwrap_or(0);
+            g += v["generated"].as_u64().unwrap_or(0);
+        }
+        (p, g)
+    }
+
+    /// First run: no cursor yet, so everything in the log is genuinely
+    /// new and must be credited. Defaulting is CORRECT here.
+    #[test]
+    fn a_missing_cursor_credits_the_log_once() {
+        let d = tempfile::tempdir().unwrap();
+        let s = stats("m", 10, 1000, 100);
+        let (n, dmg) = harvest_stats(d.path(), &s, "log-one", 3_600).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(dmg, None);
+        assert_eq!(ledger_totals(d.path()), (1000, 100));
+    }
+
+    /// The defect (found independently by three reviewers, 2026-09-12):
+    /// the cursor's WRITER was hardened to write_atomic for finding M5,
+    /// whose comment records that a default cursor "re-credited the
+    /// ENTIRE log". The READER still defaulted on any failure, so one
+    /// unreadable cursor doubled an append-only ledger permanently.
+    #[test]
+    fn a_damaged_cursor_credits_nothing_and_says_why() {
+        let d = tempfile::tempdir().unwrap();
+        let s = stats("m", 10, 1000, 100);
+        // Credit once legitimately.
+        harvest_stats(d.path(), &s, "log-one", 3_600).unwrap();
+        assert_eq!(ledger_totals(d.path()), (1000, 100));
+
+        // Now the cursor becomes unreadable — ENOSPC, EIO, a hand-edit.
+        std::fs::write(cursor_path(d.path()), "{ \"credited\": ").unwrap();
+
+        let (n, dmg) = harvest_stats(d.path(), &s, "log-one", 3_600).unwrap();
+        assert_eq!(n, 0, "crediting on a damaged cursor doubles the ledger");
+        assert!(dmg.is_some(), "and it must not be silent: {dmg:?}");
+        assert_eq!(
+            ledger_totals(d.path()),
+            (1000, 100),
+            "the ledger must be unchanged, not doubled"
+        );
+    }
+
+    /// Recovery matters as much as refusal: the run after a damaged
+    /// cursor must work from a valid baseline rather than being stuck
+    /// refusing forever.
+    #[test]
+    fn the_run_after_a_damaged_cursor_recovers() {
+        let d = tempfile::tempdir().unwrap();
+        let s = stats("m", 10, 1000, 100);
+        harvest_stats(d.path(), &s, "log-one", 3_600).unwrap();
+        std::fs::write(cursor_path(d.path()), "not json at all").unwrap();
+        harvest_stats(d.path(), &s, "log-one", 3_600).unwrap();
+
+        // More usage arrives on the same instance.
+        let more = stats("m", 15, 1500, 160);
+        let (n, dmg) = harvest_stats(d.path(), &more, "log-one", 3_600).unwrap();
+        assert_eq!(dmg, None, "the cursor was repaired");
+        assert_eq!(n, 1, "and the new delta is credited");
+        assert_eq!(
+            ledger_totals(d.path()),
+            (1500, 160),
+            "only the DELTA on top of what was already counted"
+        );
+    }
 }
 
 #[cfg(test)]
