@@ -316,7 +316,6 @@ pub fn arm_trial_marker(dir: &Path, model: &str) -> Result<()> {
         &dir.join("trial-in-progress"),
         &format!("{model}\n{}", std::process::id()),
     )
-    .map_err(Into::into)
 }
 
 /// Parse a marker file: (model, PID of the process that armed it).

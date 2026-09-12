@@ -4937,6 +4937,9 @@ impl App {
             .and_then(|p| std::fs::metadata(p).ok())
             .map(|m| m.len() as f64 / (1024.0 * 1024.0 * 1024.0));
         let port = self.cfg.port;
+        // Advisories go to OUR router or nowhere: the log tail they carry
+        // describes this machine.
+        let owned = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
         self.spawn(&format!("asking {answerer} about {display}"), move |tx| {
             let log = std::fs::read_to_string(router::state_dir().join("router.log"))
                 .unwrap_or_default();
@@ -4952,6 +4955,7 @@ impl App {
             );
             let backend = aiadvisor::RouterAdvisor {
                 port,
+                owned,
                 model: answerer.clone(),
             };
             use aiadvisor::Advisor as _;
@@ -5070,6 +5074,9 @@ impl App {
             })
             .collect();
         let port = self.cfg.port;
+        // Advisories go to OUR router or nowhere: the log tail they carry
+        // describes this machine.
+        let owned = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
         self.spawn(&format!("triaging b{cur}->b{up} against your models"), move |tx| {
             let repo_s = repo.display().to_string();
             // Tags can lag the daily fetch (found live: b10630 running,
@@ -5104,6 +5111,7 @@ impl App {
             let prompt = aiadvisor::triage_prompt(&commits, &models, cur, up);
             let backend = aiadvisor::RouterAdvisor {
                 port,
+                owned,
                 model: answerer,
             };
             use aiadvisor::Advisor as _;
@@ -5130,6 +5138,9 @@ impl App {
         };
         let cfg = self.cfg.clone();
         let port = self.cfg.port;
+        // Advisories go to OUR router or nowhere: the log tail they carry
+        // describes this machine.
+        let owned = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
         self.spawn(&format!("fleet brief: asking {answerer}"), move |tx| {
             let result = (|| -> anyhow::Result<String> {
                 crate::core::report::generate(&cfg)?;
@@ -5138,6 +5149,7 @@ impl App {
                 )?;
                 let backend = aiadvisor::RouterAdvisor {
                     port,
+                    owned,
                     model: answerer.clone(),
                 };
                 use aiadvisor::Advisor as _;
@@ -5473,6 +5485,9 @@ impl App {
         };
         let cfg = self.cfg.clone();
         let port = self.cfg.port;
+        // Advisories go to OUR router or nowhere: the log tail they carry
+        // describes this machine.
+        let owned = matches!(self.router_state, Some(router::RouterState::Ours { .. }));
         let question = question.to_string();
         self.tuning_question.clear();
         self.spawn(&format!("asking {answerer} about tuning"), move |tx| {
@@ -5483,6 +5498,7 @@ impl App {
                 )?;
                 let backend = aiadvisor::RouterAdvisor {
                     port,
+                    owned,
                     model: answerer.clone(),
                 };
                 use aiadvisor::Advisor as _;

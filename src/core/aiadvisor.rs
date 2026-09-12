@@ -25,9 +25,18 @@ pub trait Advisor {
 }
 
 /// The default backend: whatever model the app's own router serves.
+///
+/// `owned` is the caller's answer to "is this port a router we started?"
+/// — every call site passed `cfg.port` with no such check, so an
+/// advisory would happily POST a log tail to a stranger's server on that
+/// port. The app even labels that case "external server … observing
+/// only" on the Connections tab while doing it (adversarial review,
+/// 2026-09-12).
 pub struct RouterAdvisor {
     pub port: u16,
     pub model: String,
+    /// False = not ours. `ask` refuses rather than sending anything.
+    pub owned: bool,
 }
 
 /// The kwargs every advisory request sends. Two dialects, one truth
@@ -73,6 +82,13 @@ pub fn extract_answer(body: &serde_json::Value) -> Result<String> {
 
 impl Advisor for RouterAdvisor {
     fn ask(&self, system: &str, user: &str) -> Result<String> {
+        if !self.owned {
+            anyhow::bail!(
+                "port {} is not a router we started — refusing to send this machine's \
+                 logs to it. Advisories go to OUR router or nowhere.",
+                self.port
+            );
+        }
         let body: serde_json::Value =
             ureq::post(&format!("http://127.0.0.1:{}/v1/chat/completions", self.port))
                 .timeout(std::time::Duration::from_secs(300))
@@ -236,6 +252,9 @@ pub fn failure_prompt(
     file_gib: Option<f64>,
     log_tail: &str,
 ) -> String {
+    // The error string is the other place paths hide — report.rs
+    // sanitizes it for export for exactly that reason.
+    let error = &strip_home(error);
     let mut p = format!(
         "A local model failed to load and the rule-based diagnoser couldn't \
          classify the failure. Explain the likely cause in plain language for \
@@ -306,6 +325,22 @@ pub fn triage_prompt(commits: &str, models: &[String], current: u64, upstream: u
 /// The last `n` router-log lines belonging to `model`'s child server —
 /// the evidence a failure explanation reasons from. Empty when the model
 /// never spawned (the stored error is then the only evidence).
+/// Replace the user's home directory with `~`.
+///
+/// The failure explainer sends a 60-line router-log tail plus the stored
+/// error string, and both embed full model paths — hence the username.
+/// `report.rs` sanitizes exactly these strings before EXPORT, with the
+/// comment "error strings are where filesystem paths hide", while the
+/// advisory path sent them raw to whatever holds the configured port,
+/// under a menu that promises "nothing leaves this machine" (adversarial
+/// review, 2026-09-12).
+pub fn strip_home(s: &str) -> String {
+    match crate::core::settings::real_home().to_str() {
+        Some(h) if !h.is_empty() => s.replace(h, "~"),
+        _ => s.to_string(),
+    }
+}
+
 pub fn log_tail_for(log: &str, model: &str, n: usize) -> String {
     let Some(port) = crate::core::evidence::child_port(log, model) else {
         return String::new();
@@ -315,7 +350,85 @@ pub fn log_tail_for(log: &str, model: &str, n: usize) -> String {
         .lines()
         .filter(|l| l.starts_with(&prefix))
         .collect();
-    lines[lines.len().saturating_sub(n)..].join("\n")
+    strip_home(&lines[lines.len().saturating_sub(n)..].join("\n"))
+}
+
+#[cfg(test)]
+mod tests_no_paths_leave {
+    use super::{Advisor, RouterAdvisor, strip_home};
+
+    /// Refused BEFORE any request: asserting on the message distinguishes
+    /// "refused on ownership" from "the connection failed anyway", which
+    /// is the whole point — port 1 would error either way.
+    #[test]
+    fn an_unowned_port_receives_nothing() {
+        let a = RouterAdvisor { port: 1, model: "m".into(), owned: false };
+        let err = a.ask("sys", "user").expect_err("must refuse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a router we started"),
+            "refused on ownership: {msg}"
+        );
+        assert!(
+            !msg.to_lowercase().contains("connection")
+                && !msg.to_lowercase().contains("refused by"),
+            "it must not have sent anything: {msg}"
+        );
+    }
+
+    /// router.log echoes model paths verbatim, so a tail carries the
+    /// username. The advisory POSTs it to the configured port — which
+    /// the app itself may be displaying as an EXTERNAL server — under a
+    /// menu reading "nothing leaves this machine".
+    #[test]
+    fn a_home_path_becomes_a_tilde() {
+        let home = crate::core::settings::real_home();
+        let h = home.to_string_lossy();
+        let line = format!("[41251] load: {h}/models/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf");
+        let out = strip_home(&line);
+        assert!(!out.contains(h.as_ref()), "the home path must be gone: {out}");
+        assert!(out.contains("~/models/Qwen3.8-27B"), "and the shape kept: {out}");
+    }
+
+    /// The one that matters, and my first version of this test did NOT
+    /// catch it: asserting `strip_home` works proves nothing about
+    /// whether `log_tail_for` calls it. Removing the call left the
+    /// earlier test green, which is the same theater-test shape this
+    /// review round has been fixing elsewhere. This drives the real
+    /// function.
+    #[test]
+    fn the_log_tail_actually_leaves_with_no_home_path() {
+        let home = crate::core::settings::real_home();
+        let h = home.to_string_lossy();
+        let log = format!(
+            "1.0 I srv load: spawning server instance with name=qwen3.8-27b on port 41251\n\
+             [41251] 0.05 I srv load: loading {h}/models/Qwen3.8-27B/Qwen3.8-27B-UD-Q4_K_XL.gguf\n\
+             [41251] 0.06 E srv load: failed to allocate\n"
+        );
+        let tail = super::log_tail_for(&log, "qwen3.8-27b", 60);
+        assert!(!tail.is_empty(), "the tail must have found the child port");
+        assert!(
+            !tail.contains(h.as_ref()),
+            "no home path may leave in the tail: {tail}"
+        );
+        assert!(tail.contains("~/models/Qwen3.8-27B"), "shape kept: {tail}");
+    }
+
+    /// And the error string, which travels beside it.
+    #[test]
+    fn the_failure_prompt_carries_no_home_path() {
+        let home = crate::core::settings::real_home();
+        let h = home.to_string_lossy();
+        let err = format!("load failed: {h}/models/Big/Big-Q4.gguf: status code 500");
+        let prompt = super::failure_prompt("big", &err, Some(10775), "RTX 3090 Ti", 64_016, Some(46.1), "");
+        assert!(!prompt.contains(h.as_ref()), "the error string must be stripped too: {prompt}");
+        assert!(prompt.contains("~/models/Big"), "shape kept");
+    }
+
+    #[test]
+    fn text_without_a_home_path_is_untouched() {
+        assert_eq!(strip_home("srv: could not bind port 8080"), "srv: could not bind port 8080");
+    }
 }
 
 #[cfg(test)]
