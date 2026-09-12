@@ -160,7 +160,7 @@ fn main() {
                     c.port, cfg.port, c.port
                 );
             }
-            sync(&c)
+            sync(&c, None)
         }),
         Some("--advise") => {
             let server = system::pick_server(&cfg).ok();
@@ -314,7 +314,7 @@ fn trial_cmd(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
         println!("{model}: kept {label} — config.json updated, preset regenerated, router reloaded");
         // The kept config changed the measured context; the agent config
         // follows it now, not at some future sync.
-        sync(cfg)?;
+        sync(cfg, None)?;
         return Ok(());
     }
     let report = trial::run_trial(
@@ -524,7 +524,13 @@ fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredM
         .collect()
 }
 
-fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+/// `scanned` is the model list the caller already has — `setup` scans
+/// before it does anything else, and rescanning here walked the whole
+/// tree a third time in one command (pre-tag review, 2026-09-11).
+fn sync(
+    cfg: &settings::AppConfig,
+    scanned: Option<&[modelsteward::core::library::ModelFile]>,
+) -> anyhow::Result<()> {
     let measurements = router::read_measurements(&router::state_dir());
     let desired = desired_from_measurements(&measurements);
     if desired.is_empty() {
@@ -580,7 +586,15 @@ fn sync(cfg: &settings::AppConfig) -> anyhow::Result<()> {
     // pi and Hermes go through the Connector fan-out (step 3): this
     // block and the GUI's were the same logic written twice, already
     // drifted in wording.
-    let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
+    let owned;
+    let models = match scanned {
+        Some(m) => m,
+        None => {
+            owned = system::scan_models(cfg, &[]);
+            &owned
+        }
+    };
+    let known = system::fleet_known_ids(cfg, models);
     for line in connector::sync_all(
         &connector::secondary(),
         &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
@@ -645,7 +659,7 @@ fn setup(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         other => anyhow::bail!("port {} is not ours to set up: {other}", cfg.port),
     }
     calibrate(cfg, false)?;
-    sync(cfg)
+    sync(cfg, Some(&models))
 }
 
 /// M6 phase 2: the post-rebuild verification loop. Snapshot → restart the

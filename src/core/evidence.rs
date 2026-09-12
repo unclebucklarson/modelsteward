@@ -271,6 +271,19 @@ impl LogMiner {
     /// Feed the next chunk of log bytes (any split; lines may straddle
     /// chunks).
     pub fn feed(&mut self, chunk: &str) {
+        // No carry-over? Read the chunk where it lies. The unconditional
+        // `format!` below duplicated the whole input, which on the
+        // one-shot path (`cache_effectiveness`, used by `--meter`) means
+        // copying a log this module's own notes put at ~200 MB on a
+        // month-old router (pre-tag review, 2026-09-11).
+        if self.partial.is_empty() {
+            let complete_end = chunk.rfind('\n').map(|i| i + 1).unwrap_or(0);
+            for line in chunk[..complete_end].lines() {
+                self.feed_line(line);
+            }
+            self.partial = chunk[complete_end..].to_string();
+            return;
+        }
         let buf = format!("{}{}", self.partial, chunk);
         let complete_end = buf.rfind('\n').map(|i| i + 1).unwrap_or(0);
         self.partial = buf[complete_end..].to_string();

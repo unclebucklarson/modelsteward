@@ -29,8 +29,14 @@ data into durable state:
 
 ## Open — carried into the backlog
 
-Ordered by severity. None blocks the release; all are real. **Group A
-above is resolved**; what follows is Groups B and C, slated for 0.7.1.
+Ordered by severity. None blocks the release; all are real.
+
+**Group A is resolved** (before the tag) and **C7/C8/C9 are resolved**
+(after it, as safe filler): the `LogMiner::feed` whole-log copy, the
+double parse in `meter_report_text`, and sync's redundant model-tree
+walk — which was also a CLAUDE.md violation, since the GUI is supposed
+to use the cached scan. What remains are the three that need design
+rather than a patch.
 
 - **`system.rs:434` — `fleet_known_ids` never forgets.** It unions every
   key of `measurements.json`, which is only ever added to. A deleted
@@ -42,20 +48,6 @@ above is resolved**; what follows is Groups B and C, slated for 0.7.1.
   leaves ~300k permanent entries in a month, and `results()` re-walks all
   of them every tick. Completed tasks already folded into the cursor can
   never contribute again and could be dropped after crediting.
-- **`evidence.rs:274` — `feed` copies the whole log.** The one-shot
-  `cache_effectiveness` path runs `format!("{}{}", self.partial, chunk)`
-  over a file the module's own comment puts at ~200 MB on a month-old
-  router. The previous implementation iterated `lines()` with no copies;
-  skipping the concatenation when `partial` is empty restores that.
-- **`system.rs:61` — `meter_report_text` parses `router.log` twice**,
-  once inside `harvest` and again for `coverage.note()`. `harvest_stats`
-  exists precisely so one parse can serve both.
-- **`ui.rs:6181` — sync now walks the whole model tree.** `known` used to
-  be one small preset read; it is now
-  `fleet_known_ids(cfg, &scan_models(..))`, so "Set Up Everything" walks
-  every scan dir, blob store and hub cache an extra time — the waste
-  review finding F11 removed from this very flow. The scan result is
-  already in hand at both call sites.
 - **`opencode.rs:246` — the strict-JSON write gate waives itself.** It
   now runs only when the ORIGINAL parses strictly, which disables the C6
   protection for exactly the missing-comma files C6 was about. The

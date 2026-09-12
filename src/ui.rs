@@ -1284,8 +1284,9 @@ impl App {
     fn action_sync(&mut self) {
         let cfg = self.cfg.clone();
         let measurements = self.measurements.clone();
+        let scanned = self.scan.as_ref().map(|s| s.models.clone());
         self.spawn("syncing opencode.json", move |tx| {
-            match run_sync(&cfg, &measurements) {
+            match run_sync(&cfg, &measurements, scanned.as_deref()) {
                 Ok((report, lines)) => {
                     let _ = tx.send(Msg::SyncDone(report));
                     for l in lines {
@@ -4447,6 +4448,7 @@ impl App {
     fn action_apply_settings_now(&mut self) {
         let cfg = self.cfg.clone();
         let measurements = self.measurements.clone();
+        let scanned = self.scan.as_ref().map(|s| s.models.clone());
         self.spawn("applying settings: restarting router", move |tx| {
             // Stop errors are non-fatal: a router that isn't running is
             // already stopped for our purposes.
@@ -4465,7 +4467,7 @@ impl App {
             if !start_router_and_wait(&cfg, tx) {
                 return;
             }
-            match run_sync(&cfg, &measurements) {
+            match run_sync(&cfg, &measurements, scanned.as_deref()) {
                 Ok((report, lines)) => {
                     // All real work is done; Finished releases the busy
                     // gate LAST (F13: SyncDone clears busy too, and
@@ -6128,9 +6130,16 @@ fn run_calibration(
 /// Sync every connected agent: opencode.json (the original) plus each
 /// detected peer agent (Connections p2, 2026-08-30). The second return
 /// is one human line per agent that was actually present.
+/// `scanned` is the model list the caller already has. CLAUDE.md's rule
+/// is that the GUI uses the CACHED scan — recomputing one here walked
+/// every scan dir, blob store and hub cache a second time per sync, and
+/// three times in a single `Set Up Everything` (pre-tag review,
+/// 2026-09-11). `None` falls back to scanning, for callers that
+/// genuinely have none.
 fn run_sync(
     cfg: &settings::AppConfig,
     measurements: &router::Measurements,
+    scanned: Option<&[crate::core::library::ModelFile]>,
 ) -> anyhow::Result<(opencode::SyncReport, Vec<String>)> {
     let embed = router::embedding_ids_in_preset(&system::preset_path());
     let vision = router::vision_ids_in_preset(&system::preset_path());
@@ -6171,7 +6180,15 @@ fn run_sync(
     // block and the CLI's were the same logic written twice, already
     // drifted in wording.
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
-    let known = system::fleet_known_ids(cfg, &system::scan_models(cfg, &[]));
+    let owned;
+    let models = match scanned {
+        Some(m) => m,
+        None => {
+            owned = system::scan_models(cfg, &[]);
+            &owned
+        }
+    };
+    let known = system::fleet_known_ids(cfg, models);
     let lines = connector::sync_all(
         &connector::secondary(),
         &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
@@ -6402,7 +6419,10 @@ fn setup_flow(cfg: &settings::AppConfig, tx: &Sender<Msg>) -> bool {
     };
     let _ = tx.send(Msg::Measurements(measurements.clone()));
     step("syncing opencode.json");
-    match run_sync(cfg, &measurements) {
+    // setup_flow holds no scan of its own; run_calibration did one
+    // internally and dropped it. Threading it out of there is the
+    // remaining third of this finding.
+    match run_sync(cfg, &measurements, None) {
         Ok((report, lines)) => {
             let _ = tx.send(Msg::SyncDone(report));
             for l in lines {

@@ -54,11 +54,18 @@ pub fn meter_report_text(
     if harvest_first
         && let Ok(text) = std::fs::read_to_string(dir.join("router.log"))
     {
-        let _ = meter::harvest(&dir, &text, now);
+        // ONE parse, serving both. `harvest` runs cache_effectiveness
+        // internally, so calling it and then parsing again for the
+        // coverage note read a multi-hundred-MB log twice per `--meter`
+        // — the same double-parse already removed from the poller, and
+        // `harvest_stats` exists precisely so one parse can do both
+        // (pre-tag review, 2026-09-11).
+        let (stats, coverage) =
+            crate::core::evidence::cache_effectiveness_with_coverage(&text);
+        let _ = meter::harvest_stats(&dir, &stats, &text, now);
         // The GUI poller warns on parser drift; the CLI surface must
         // too, or `--meter` prints a confident zero when the log
         // dialect changed (review finding H11's CLI half, 2026-09-01).
-        let (_, coverage) = crate::core::evidence::cache_effectiveness_with_coverage(&text);
         drift_note = coverage.note();
     }
     let (label, since) = match range {
