@@ -75,7 +75,7 @@ fn one_sync_reaches_every_connector_and_disturbs_nothing_else() {
 
     // pi
     let known: BTreeSet<String> = want.iter().map(|d| d.id.clone()).collect();
-    let r = piagent::sync_file_with_known(&pi, base, &want, &known).unwrap();
+    let r = piagent::sync_file_with_known(&pi, base, &want, Some(&known)).unwrap();
     assert_eq!(r.added.len(), 2, "{r:?}");
     let doc: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(&pi).unwrap()).unwrap();
@@ -143,7 +143,7 @@ fn a_transient_load_failure_deletes_nothing_anywhere() {
         "and the entry is still in the file"
     );
 
-    let r = piagent::sync_file_with_known(&pi, base, &only_keeper, &still_here).unwrap();
+    let r = piagent::sync_file_with_known(&pi, base, &only_keeper, Some(&still_here)).unwrap();
     assert!(r.removed.is_empty(), "pi must not delete it: {r:?}");
     assert_eq!(r.kept_unmeasured, vec!["flaky".to_string()]);
     assert!(
@@ -247,7 +247,7 @@ fn the_fan_out_writes_every_present_agent_and_says_so_once() {
     ];
     let lines = connector::sync_all(
         &cs,
-        &SyncContext { base_url: "http://127.0.0.1:8181/v1", desired: &want, known: &known },
+        &SyncContext { base_url: "http://127.0.0.1:8181/v1", desired: &want, known: Some(&known) },
     );
 
     assert!(
@@ -279,7 +279,7 @@ fn the_fan_out_is_silent_when_no_agent_is_installed() {
     ];
     let lines = connector::sync_all(
         &cs,
-        &SyncContext { base_url: "http://127.0.0.1:8080/v1", desired: &want, known: &known },
+        &SyncContext { base_url: "http://127.0.0.1:8080/v1", desired: &want, known: Some(&known) },
     );
     assert!(lines.is_empty(), "absent agents say nothing: {lines:?}");
 }
@@ -301,7 +301,7 @@ fn opencode_through_the_trait_writes_a_real_config() {
         .sync(&SyncContext {
             base_url: "http://127.0.0.1:8080/v1",
             desired: &want,
-            known: &known,
+            known: Some(&known),
         })
         .expect("sync");
     assert!(!out.skipped_missing);

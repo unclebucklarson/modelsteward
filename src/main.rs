@@ -594,10 +594,19 @@ fn sync(
             &owned
         }
     };
-    let known = system::fleet_known_ids(cfg, models);
+    // The router's own list is the present-tense half of the fleet;
+    // without it we do not know what exists and remove nothing.
+    let offered: Option<Vec<String>> =
+        match router::status(&router::state_dir(), &system::router_config(cfg)) {
+            router::RouterState::Ours { models } => {
+                Some(models.into_iter().map(|m| m.id).collect())
+            }
+            _ => None,
+        };
+    let known = system::fleet_known_ids(cfg, models, offered.as_deref());
     for line in connector::sync_all(
         &connector::secondary(),
-        &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
+        &connector::SyncContext { base_url: &base_url, desired: &desired, known: known.as_ref() },
     ) {
         println!("{line}");
     }

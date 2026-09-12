@@ -100,9 +100,9 @@ pub fn sync_file_with_known(
     path: &Path,
     base_url: &str,
     desired: &[DesiredModel],
-    known: &std::collections::BTreeSet<String>,
+    known: Option<&std::collections::BTreeSet<String>>,
 ) -> Result<PiSyncReport> {
-    sync_inner(path, base_url, desired, Some(known))
+    sync_inner(path, base_url, desired, known)
 }
 
 /// Back-compat shim: no known-set means nothing is ever removed, which
@@ -368,7 +368,7 @@ mod tests {
         let v2 = [desired("qwen3.8-27b-ud-q4_k_xl", 100_000, false)];
         let known: std::collections::BTreeSet<String> =
             v2.iter().map(|d| d.id.clone()).collect();
-        sync_file_with_known(&path, "http://127.0.0.1:8080/v1", &v2, &known).unwrap();
+        sync_file_with_known(&path, "http://127.0.0.1:8080/v1", &v2, Some(&known)).unwrap();
         let slot2 = path.with_file_name("models.json.modelsteward.bak.2");
         assert_eq!(
             std::fs::read_to_string(&slot2).unwrap(),
@@ -402,7 +402,7 @@ mod tests {
         let v2 = [desired("a", 120_000, false)];
         let known: std::collections::BTreeSet<String> =
             ["a".to_string(), "b".to_string()].into_iter().collect();
-        let r = sync_file_with_known(&path, "http://x/v1", &v2, &known).unwrap();
+        let r = sync_file_with_known(&path, "http://x/v1", &v2, Some(&known)).unwrap();
         assert_eq!(r.updated, vec!["a".to_string()]);
         assert!(r.removed.is_empty(), "a failed load must NOT delete an entry");
         assert_eq!(r.kept_unmeasured, vec!["b".to_string()]);
@@ -414,7 +414,7 @@ mod tests {
 
         // Genuinely gone (file deleted / model disabled): now it goes.
         let only_a: std::collections::BTreeSet<String> = ["a".to_string()].into_iter().collect();
-        let r = sync_file_with_known(&path, "http://x/v1", &v2, &only_a).unwrap();
+        let r = sync_file_with_known(&path, "http://x/v1", &v2, Some(&only_a)).unwrap();
         assert_eq!(r.removed, vec!["b".to_string()]);
         assert_eq!(configured_models(&path), vec![("a".into(), safety_context(120_000))]);
     }

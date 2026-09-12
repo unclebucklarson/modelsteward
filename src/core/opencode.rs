@@ -233,15 +233,23 @@ fn backup_path(path: &Path, n: u32) -> std::path::PathBuf {
 /// Numbered backups, newest = .1, capped at [`BACKUP_DEPTH`]. A sync
 /// followed by a comment-out no longer eats the only recovery point.
 fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
-    // Never let an EDIT corrupt the file. Our own reader is lenient
-    // about missing commas, so without this check a bad splice reports
-    // success while OpenCode cannot load the result (finding C6,
-    // 2026-08-31). Refined 2026-09-01 (finding F1, EXECUTED): the gate
-    // fires only when the edit made things WORSE — a file whose OWN
-    // quirks already fail the strict parse (a style our reader accepts)
-    // must not have sync permanently refused with a message blaming the
-    // edit. It fails BEFORE the backup rotation, so the user's recovery
-    // points stay intact.
+    // TWO layers, and they answer different questions.
+    //
+    // This one is the cheap heuristic: our own reader is lenient about
+    // missing commas, so without it a bad splice reports success while
+    // OpenCode cannot load the result (finding C6, 2026-08-31). It fires
+    // only when the edit made things WORSE (finding F1, 2026-09-01) — a
+    // file whose OWN quirks fail the strict parse must not have sync
+    // permanently refused with a message blaming the edit. It runs
+    // BEFORE the backup rotation, so recovery points stay intact, and it
+    // works when OpenCode is not installed.
+    //
+    // Being deliberately narrow, it waives itself on an already-damaged
+    // file — which review B10 (2026-09-11) noted leaves such a file
+    // unguarded. That gap is now covered by the SECOND layer below:
+    // after the write, OpenCode's own parser gets the final word, and a
+    // file it rejects is rolled back. A guess before, an authority
+    // after.
     if let Err(e) = jsonc::strictly_valid(updated)
         && jsonc::strictly_valid(original).is_ok()
     {
@@ -253,6 +261,30 @@ fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     }
     if updated == original {
         return Ok(());
+    }
+    // Layer two: OpenCode's own verdict, on throwaway copies.
+    //
+    // Same rule as layer one — refuse only if the edit made things
+    // WORSE — but with OpenCode as the oracle instead of our parser,
+    // which closes the gap where layer one waives itself on an
+    // already-damaged file.
+    //
+    // Compared as OUTCOMES, never by reading the message. `opencode
+    // debug config` reports schema violations as well as syntax errors,
+    // so a user carrying a key this OpenCode version does not know would
+    // otherwise have sync refuse forever; and matching on wording would
+    // break the first time that wording changed, which this codebase has
+    // already learned about log grammars. The original is only consulted
+    // when the candidate is rejected, so the healthy path costs one call
+    // (pre-tag review B10, 2026-09-11).
+    if let Some(complaint) = opencode_rejects(updated)
+        && opencode_rejects(original).is_none()
+    {
+        anyhow::bail!(
+            "refusing to write {}: OpenCode loads the current file but rejects \
+             what this edit produced. It said: {complaint}. Nothing was changed.",
+            path.display()
+        );
     }
     for n in (1..BACKUP_DEPTH).rev() {
         let _ = std::fs::rename(backup_path(path, n), backup_path(path, n + 1));
@@ -271,6 +303,77 @@ fn write_backed_up(path: &Path, original: &str, updated: &str) -> Result<()> {
     // atomic and durable.
     crate::core::safefs::write_atomic(path, updated)?;
     Ok(())
+}
+
+/// Would OpenCode reject this config text? `None` means no, or that we
+/// could not ask — OpenCode not being installed is not a veto, and we
+/// are not the judge of a file its owner cannot load anyway.
+///
+/// The text is written to a throwaway directory as a project config and
+/// OpenCode is asked to resolve it there. Only a complaint naming THAT
+/// file counts: `opencode debug config` also resolves the user's global
+/// config, and someone else's broken file must not make every sync
+/// refuse itself.
+fn opencode_rejects(updated: &str) -> Option<String> {
+    let dir = std::env::temp_dir().join(format!(
+        "modelsteward-ocheck-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&dir).ok()?;
+    let probe = dir.join("opencode.json");
+    let verdict = (|| {
+        std::fs::write(&probe, updated).ok()?;
+        let out = std::process::Command::new("opencode")
+            .args(["debug", "config"])
+            .current_dir(&dir)
+            .output()
+            .ok()?; // `.output()` also reaps the child
+        if out.status.success() {
+            return None;
+        }
+        let said = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stderr),
+            String::from_utf8_lossy(&out.stdout)
+        );
+        complaint_about(&said, &probe)
+    })();
+    let _ = std::fs::remove_dir_all(&dir);
+    verdict
+}
+
+/// Extract OpenCode's complaint, but only when it names `path` — it also
+/// resolves the user's global config, and someone else's broken file is
+/// not a verdict on ours. Used for the MESSAGE only; whether to refuse is
+/// decided by comparing outcomes.
+fn complaint_about(output: &str, path: &Path) -> Option<String> {
+    let name = path.to_string_lossy();
+    if !output.contains(name.as_ref()) {
+        return None;
+    }
+    let line = output
+        .lines()
+        .find(|l| l.contains(name.as_ref()))
+        .unwrap_or("invalid configuration");
+    // Strip ANSI colour: this goes into a log line and an error banner.
+    let mut clean = String::with_capacity(line.len());
+    let mut chars = line.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            for t in chars.by_ref() {
+                if t.is_ascii_alphabetic() {
+                    break;
+                }
+            }
+        } else {
+            clean.push(c);
+        }
+    }
+    Some(clean.trim().to_string())
 }
 
 /// Swap the config with its newest backup — pressing twice toggles back,
@@ -403,6 +506,45 @@ pub fn comment_out_in_file(path: &Path, model_id: &str) -> Result<()> {
     let updated = jsonc::comment_out_model(&original, PROVIDER_ID, model_id, GHOST_NOTE)
         .with_context(|| format!("commenting out {model_id}"))?;
     write_backed_up(path, &original, &updated)
+}
+
+#[cfg(test)]
+mod tests_opencode_verdict {
+    use super::complaint_about;
+    use std::path::Path;
+
+    /// The real shape, captured from `opencode debug config` on a file
+    /// with a missing comma (2026-09-11), ANSI colour included.
+    const REAL: &str = "\u{1b}[91m\u{1b}[1mError: \u{1b}[0mConfig file at /home/u/.config/opencode/opencode.json is not valid JSON(C): 
+--- JSONC Input ---
+{
+}
+";
+
+    #[test]
+    fn a_complaint_naming_our_file_is_ours_to_act_on() {
+        let p = Path::new("/home/u/.config/opencode/opencode.json");
+        let c = complaint_about(REAL, p).expect("must be recognised as about our file");
+        assert!(c.contains("not valid JSON(C)"), "{c}");
+        assert!(!c.contains('\u{1b}'), "ANSI colour must not reach a log line: {c:?}");
+        assert!(!c.starts_with(' '), "trimmed: {c:?}");
+    }
+
+    /// The reason this check exists: `opencode debug config` also
+    /// resolves global and project config. A failure in SOMEONE ELSE'S
+    /// file must not make us roll back a write that was fine.
+    #[test]
+    fn a_complaint_about_a_different_file_is_not_ours() {
+        let p = Path::new("/home/u/.config/opencode/opencode.json");
+        let other = "Error: Config file at /home/u/work/proj/opencode.json is not valid JSON(C)";
+        assert_eq!(complaint_about(other, p), None);
+    }
+
+    #[test]
+    fn unrelated_failure_output_is_not_read_as_a_verdict_on_us() {
+        let p = Path::new("/home/u/.config/opencode/opencode.json");
+        assert_eq!(complaint_about("could not reach the provider", p), None);
+    }
 }
 
 #[cfg(test)]

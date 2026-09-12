@@ -6166,13 +6166,20 @@ fn run_sync(
         &format!("http://127.0.0.1:{}/v1", cfg.port),
         &desired,
     )?;
+    // One router read serves both the ghost cleanup and the fleet check
+    // below: both ask "what does the router offer right now", and asking
+    // twice invites two different answers. `None` = not ours / not up.
+    let offered: Option<Vec<String>> =
+        match router::status(&router::state_dir(), &system::router_config(cfg)) {
+            router::RouterState::Ours { models } => {
+                Some(models.into_iter().map(|m| m.id).collect())
+            }
+            _ => None,
+        };
     // Ghost cleanup (user decision 2026-08-26): only against a LIVE router.
-    if let router::RouterState::Ours { models } =
-        router::status(&router::state_dir(), &system::router_config(cfg))
-    {
-        let offered: Vec<String> = models.into_iter().map(|m| m.id).collect();
+    if let Some(offered) = &offered {
         let ghosts =
-            opencode::comment_out_ghosts(&path, &report.orphans, &offered, measurements)?;
+            opencode::comment_out_ghosts(&path, &report.orphans, offered, measurements)?;
         report.orphans.retain(|id| !ghosts.contains(id));
         report.ghosts_commented = ghosts;
     }
@@ -6188,10 +6195,10 @@ fn run_sync(
             &owned
         }
     };
-    let known = system::fleet_known_ids(cfg, models);
+    let known = system::fleet_known_ids(cfg, models, offered.as_deref());
     let lines = connector::sync_all(
         &connector::secondary(),
-        &connector::SyncContext { base_url: &base_url, desired: &desired, known: &known },
+        &connector::SyncContext { base_url: &base_url, desired: &desired, known: known.as_ref() },
     );
     Ok((report, lines))
 }

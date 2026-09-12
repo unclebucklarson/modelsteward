@@ -28,10 +28,12 @@ pub struct SyncContext<'a> {
     pub base_url: &'a str,
     /// The measured model set the agent should end up mirroring.
     pub desired: &'a [DesiredModel],
-    /// Ids the fleet is known to hold: preset ∪ measurements − disabled.
-    /// Positive evidence for a removal, so a model that merely failed to
-    /// load today is never deleted from a user's config.
-    pub known: &'a BTreeSet<String>,
+    /// Ids the fleet is known to hold RIGHT NOW — positive evidence
+    /// authorising a removal. `None` means we could not establish it
+    /// (the router is down), and every connector must then leave
+    /// existing entries alone: a stopped provider is not evidence its
+    /// models are gone.
+    pub known: Option<&'a BTreeSet<String>>,
 }
 
 /// What one connector did, in a shape both the CLI and the GUI can
@@ -323,7 +325,7 @@ mod tests {
         desired: &'a [DesiredModel],
         known: &'a BTreeSet<String>,
     ) -> SyncContext<'a> {
-        SyncContext { base_url: "http://127.0.0.1:8080/v1", desired, known }
+        SyncContext { base_url: "http://127.0.0.1:8080/v1", desired, known: Some(known) }
     }
 
     fn ok_outcome() -> Result<Outcome> {

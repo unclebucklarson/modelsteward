@@ -31,30 +31,32 @@ data into durable state:
 
 Ordered by severity. None blocks the release; all are real.
 
-**Group A is resolved** (before the tag) and **C7/C8/C9 are resolved**
-(after it, as safe filler): the `LogMiner::feed` whole-log copy, the
-double parse in `meter_report_text`, and sync's redundant model-tree
-walk — which was also a CLAUDE.md violation, since the GUI is supposed
-to use the cached scan. What remains are the three that need design
-rather than a patch.
+**Group A is resolved** (before the tag), **C7/C8/C9** after it as safe
+filler, and **B4/B10** after that with Scott's design input. What remains
+is **C6 alone** — see `docs/design/c6-logminer-retention.md`.
 
-- **`system.rs:434` — `fleet_known_ids` never forgets.** It unions every
-  key of `measurements.json`, which is only ever added to. A deleted
-  model stays "known" forever, so piagent's removal rule can never fire
-  and the dead entry sits in `~/.pi/agent/models.json` indefinitely —
-  disabling the model is the only way to evict it.
+**B4** — `fleet_known_ids` now answers a present-tense question. It no
+longer unions measurement keys (a historical record, only ever added to,
+which is why no removal could ever fire); it takes the router's own
+offered list, and returns `None` when the router is down so nothing is
+removed at all. Scott's insight supplied the missing half: warden owns
+existence, and its inventory distinguishes "on an unplugged drive" from
+"gone". Step 1's content identity is what lets the two views be joined.
+
+**B10** — the strict-write gate keeps its narrow "only if we made it
+worse" rule, and OpenCode's own parser is now a second layer with the
+same rule. Two live discoveries shaped it: `opencode debug config`
+NORMALISES what it reads (it writes `$schema` into the file), so it can
+never be pointed at the user's real config — it runs against throwaway
+copies; and it reports SCHEMA violations as well as syntax errors, so the
+verdict is decided by comparing outcomes for the original and the
+candidate, never by reading the message.
+
 - **`evidence.rs:264` — `LogMiner` retains every task forever.** The old
   unbounded per-tick CPU was traded for unbounded memory: ~10k turns/day
   leaves ~300k permanent entries in a month, and `results()` re-walks all
   of them every tick. Completed tasks already folded into the cursor can
   never contribute again and could be dropped after crediting.
-- **`opencode.rs:246` — the strict-JSON write gate waives itself.** It
-  now runs only when the ORIGINAL parses strictly, which disables the C6
-  protection for exactly the missing-comma files C6 was about. The
-  trailing-comma fix that motivated the change was right; the scope was
-  too wide. It should compare damage — refuse when the edit introduces a
-  NEW class of error — rather than skip the check wholesale.
-
 Two lower-severity notes: `rows.rs:575` still ranks quant "speed" from
 the empty-cache `tg_tps` although `tg_deep_tps` was added to `Row` for
 exactly the reason CLAUDE.md gives; and `quality.rs:275`'s doc comment

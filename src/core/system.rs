@@ -430,22 +430,74 @@ pub fn disabled_ids(
     out
 }
 
-/// Every id the app still KNOWS — the positive-evidence set connector
-/// removals require. Union of the preset's sections and the measurement
-/// store's keys (cache-source models never pass through our preset:
-/// review finding F3, 2026-09-01), minus what the user disabled (a
-/// disabled model SHOULD leave the agents' configs). An unreadable
-/// preset contributes nothing — and because the union covers it,
-/// absence of the file is no longer treated as evidence that every
-/// model left the fleet.
+/// Every id the fleet still holds, or `None` when we cannot tell.
+///
+/// This set is positive evidence authorising a REMOVAL from an agent's
+/// config, so it must answer a present-tense question. It used to union
+/// in every key of `measurements.json` — a file that is only ever added
+/// to — which meant a deleted model stayed "known" forever and the
+/// removal path could never fire at all (pre-tag review, 2026-09-11).
+/// Measurements are a historical record; asking them what exists NOW was
+/// the whole bug.
+///
+/// `offered` is the router's own model list, and `None` means the router
+/// is down. Then we genuinely do not know what the fleet holds — cache
+/// models never pass through our preset (finding F3) — so the answer is
+/// `None` and nothing is removed. That is CLAUDE.md's rule: a stopped
+/// provider is not evidence its models are gone.
 pub fn fleet_known_ids(
     cfg: &settings::AppConfig,
     models: &[crate::core::library::ModelFile],
+    offered: Option<&[String]>,
+) -> Option<std::collections::BTreeSet<String>> {
+    use crate::core::{safefs::Loaded, warden};
+    let offered = offered?;
+    let inv = match warden::load(&warden::inventory_path()) {
+        Loaded::Ok(i) => Some(i),
+        // Warden absent or damaged: we fall back to our own truth rather
+        // than refusing to ever remove. A wrong removal costs one config
+        // entry that the next sync restores; never removing costs the
+        // feature.
+        _ => None,
+    };
+    Some(fleet_known_from(
+        cfg,
+        models,
+        offered,
+        &router::read_measurements(&router::state_dir()),
+        inv.as_ref(),
+    ))
+}
+
+/// The decision itself, pure over its inputs so it can be tested without
+/// a router, a warden install, or a state directory.
+pub fn fleet_known_from(
+    cfg: &settings::AppConfig,
+    models: &[crate::core::library::ModelFile],
+    offered: &[String],
+    measurements: &router::Measurements,
+    inventory: Option<&crate::core::warden::Inventory>,
 ) -> std::collections::BTreeSet<String> {
+    // Present tense, from the two things that can actually serve a model.
     let mut known = router::ids_in_preset(&preset_path());
-    for id in router::read_measurements(&router::state_dir()).keys() {
-        known.insert(id.clone());
+    known.extend(offered.iter().cloned());
+
+    // Unplugged is not gone. A model whose file has left our scan may
+    // simply be on a drive that is not mounted — and modelwarden, which
+    // owns storage truth, still catalogues it. That judgement is only
+    // possible because calibration records warden's content identity
+    // beside our alias; without the join key the two views could not be
+    // lined up at all.
+    if let Some(inv) = inventory {
+        for (alias, m) in measurements {
+            if let Some(cid) = m.content_id.as_deref()
+                && inv.models.contains_key(cid)
+            {
+                known.insert(alias.clone());
+            }
+        }
     }
+
     for off in disabled_ids(cfg, models) {
         known.remove(&off);
     }
@@ -641,6 +693,102 @@ fn is_zombie(pid: u32) -> bool {
     stat.rsplit_once(')')
         .and_then(|(_, rest)| rest.split_whitespace().next())
         == Some("Z")
+}
+
+#[cfg(test)]
+mod tests_fleet_known {
+    use super::*;
+    use crate::core::{router::Measurement, warden::Inventory};
+
+    fn cfg() -> settings::AppConfig {
+        settings::AppConfig { disabled: Vec::new(), ..Default::default() }
+    }
+
+    fn measured(pairs: &[(&str, Option<&str>)]) -> router::Measurements {
+        pairs
+            .iter()
+            .map(|(id, cid)| {
+                (
+                    (*id).to_string(),
+                    Measurement {
+                        n_ctx: Some(4096),
+                        content_id: cid.map(str::to_string),
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn inventory_with(ids: &[&str]) -> Inventory {
+        let models: Vec<String> = ids
+            .iter()
+            .map(|id| format!(r#""{id}": {{"display_name":"x","size":1,"locations":[]}}"#))
+            .collect();
+        serde_json::from_str(&format!(
+            r#"{{"schema_version":1,"roots":[],"models":{{{}}}}}"#,
+            models.join(",")
+        ))
+        .unwrap()
+    }
+
+    /// The bug: measurements.json is only ever added to, so unioning its
+    /// keys made a deleted model "known" forever and no removal could
+    /// ever fire. A measurement alone must not keep an id alive.
+    #[test]
+    fn a_measurement_alone_is_not_evidence_the_model_still_exists() {
+        let m = measured(&[("long-gone", None)]);
+        let known = fleet_known_from(&cfg(), &[], &["still-here".into()], &m, None);
+        assert!(known.contains("still-here"), "the router's own list counts");
+        assert!(
+            !known.contains("long-gone"),
+            "a historical measurement is not present-tense evidence: {known:?}"
+        );
+    }
+
+    /// Unplugged is not gone. Warden owns storage truth, and it still
+    /// catalogues the content — so the alias stays known and the entry
+    /// survives in the user's agent config.
+    #[test]
+    fn a_model_warden_still_catalogues_survives_an_unplugged_drive() {
+        let m = measured(&[("on-the-backup-drive", Some("sha256:abc"))]);
+        let inv = inventory_with(&["sha256:abc"]);
+        let known = fleet_known_from(&cfg(), &[], &[], &m, Some(&inv));
+        assert!(
+            known.contains("on-the-backup-drive"),
+            "warden knows this content exists — it is unplugged, not deleted: {known:?}"
+        );
+    }
+
+    /// But content warden does NOT know is genuinely gone, and the dead
+    /// entry should finally be removable.
+    #[test]
+    fn content_warden_does_not_know_is_treated_as_gone() {
+        let m = measured(&[("deleted", Some("sha256:zzz"))]);
+        let inv = inventory_with(&["sha256:abc"]);
+        let known = fleet_known_from(&cfg(), &[], &[], &m, Some(&inv));
+        assert!(!known.contains("deleted"), "{known:?}");
+    }
+
+    /// Step 1's join key is what makes the distinction possible at all:
+    /// with no content_id there is nothing to ask warden about.
+    #[test]
+    fn without_a_content_id_there_is_nothing_to_ask_warden() {
+        let m = measured(&[("old-entry", None)]);
+        let inv = inventory_with(&["sha256:abc"]);
+        let known = fleet_known_from(&cfg(), &[], &[], &m, Some(&inv));
+        assert!(!known.contains("old-entry"), "{known:?}");
+    }
+
+    #[test]
+    fn a_disabled_model_is_never_known_even_when_the_router_offers_it() {
+        let mut c = cfg();
+        c.disabled = vec!["turned-off".into()];
+        let known =
+            fleet_known_from(&c, &[], &["turned-off".into(), "on".into()], &Default::default(), None);
+        assert!(known.contains("on"));
+        assert!(!known.contains("turned-off"), "a disabled model SHOULD leave agent configs");
+    }
 }
 
 #[cfg(test)]
