@@ -505,25 +505,6 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn desired_from_measurements(m: &router::Measurements) -> Vec<opencode::DesiredModel> {
-    // Embedding models serve /v1/embeddings — they don't belong in the
-    // chat/agent config.
-    let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let vision = router::vision_ids_in_preset(&system::preset_path());
-    m.iter()
-        .filter(|(id, _)| !embed.contains(id.as_str()))
-        .filter_map(|(id, m)| {
-            m.n_ctx.map(|ctx| opencode::DesiredModel {
-                id: id.clone(),
-                display_name: format!("{id} (llama.cpp)"),
-                context: ctx,
-                tool_call: m.tool_call,
-                vision: vision.contains(id.as_str()),
-            })
-        })
-        .collect()
-}
-
 /// `scanned` is the model list the caller already has — `setup` scans
 /// before it does anything else, and rescanning here walked the whole
 /// tree a third time in one command (pre-tag review, 2026-09-11).
@@ -532,7 +513,17 @@ fn sync(
     scanned: Option<&[modelsteward::core::library::ModelFile]>,
 ) -> anyhow::Result<()> {
     let measurements = router::read_measurements(&router::state_dir());
-    let desired = desired_from_measurements(&measurements);
+    // The scan resolves disabled PATHS to aliases, so it is taken once
+    // here and reused for `known` below.
+    let owned;
+    let models = match scanned {
+        Some(m) => m,
+        None => {
+            owned = system::scan_models(cfg, &[]);
+            &owned
+        }
+    };
+    let desired = system::desired_models(cfg, &measurements, models);
     if desired.is_empty() {
         anyhow::bail!("no successful measurements yet — run --calibrate first (measured, not guessed)");
     }
@@ -586,14 +577,6 @@ fn sync(
     // pi and Hermes go through the Connector fan-out (step 3): this
     // block and the GUI's were the same logic written twice, already
     // drifted in wording.
-    let owned;
-    let models = match scanned {
-        Some(m) => m,
-        None => {
-            owned = system::scan_models(cfg, &[]);
-            &owned
-        }
-    };
     // The router's own list is the present-tense half of the fleet;
     // without it we do not know what exists and remove nothing.
     let offered: Option<Vec<String>> =

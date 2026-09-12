@@ -6141,21 +6141,17 @@ fn run_sync(
     measurements: &router::Measurements,
     scanned: Option<&[crate::core::library::ModelFile]>,
 ) -> anyhow::Result<(opencode::SyncReport, Vec<String>)> {
-    let embed = router::embedding_ids_in_preset(&system::preset_path());
-    let vision = router::vision_ids_in_preset(&system::preset_path());
-    let desired: Vec<_> = measurements
-        .iter()
-        .filter(|(id, _)| !embed.contains(id.as_str()))
-        .filter_map(|(id, m)| {
-            m.n_ctx.map(|ctx| opencode::DesiredModel {
-                id: id.clone(),
-                display_name: format!("{id} (llama.cpp)"),
-                context: ctx,
-                tool_call: m.tool_call,
-                vision: vision.contains(id.as_str()),
-            })
-        })
-        .collect();
+    // The scan is needed to resolve disabled PATHS to aliases, so it is
+    // taken first and reused for both `desired` and `known` below.
+    let owned;
+    let models = match scanned {
+        Some(m) => m,
+        None => {
+            owned = system::scan_models(cfg, &[]);
+            &owned
+        }
+    };
+    let desired = system::desired_models(cfg, measurements, models);
     anyhow::ensure!(
         !desired.is_empty(),
         "no successful measurements yet — measure a model first (measured, not guessed)"
@@ -6187,14 +6183,6 @@ fn run_sync(
     // block and the CLI's were the same logic written twice, already
     // drifted in wording.
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
-    let owned;
-    let models = match scanned {
-        Some(m) => m,
-        None => {
-            owned = system::scan_models(cfg, &[]);
-            &owned
-        }
-    };
     let known = system::fleet_known_ids(cfg, models, offered.as_deref());
     let lines = connector::sync_all(
         &connector::secondary(),

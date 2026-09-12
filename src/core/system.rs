@@ -430,6 +430,60 @@ pub fn disabled_ids(
     out
 }
 
+/// The model set every agent config should mirror: measured, servable,
+/// and NOT disabled.
+///
+/// Pure over its inputs. Built twice before — once inline in the GUI's
+/// `run_sync`, once as `desired_from_measurements` in the CLI — and
+/// NEITHER copy excluded disabled models. So a model the user had
+/// explicitly turned off was written back into opencode.json, pi and
+/// Hermes on every sync, and the removal path downstream never even ran
+/// for it because the model was still wanted. Thirteen models were
+/// disabled on the dev machine and six were still being offered to
+/// OpenCode, three of which were not in the preset and not offered by
+/// the router — unservable, and advertised anyway (2026-09-12).
+///
+/// The code's own comment in `fleet_known_ids` already said what should
+/// happen: "a disabled model SHOULD leave the agents' configs".
+pub fn desired_from(
+    measurements: &router::Measurements,
+    embed: &std::collections::HashSet<String>,
+    vision: &std::collections::HashSet<String>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<crate::core::opencode::DesiredModel> {
+    measurements
+        .iter()
+        // Embedding models serve /v1/embeddings — not the chat config.
+        .filter(|(id, _)| !embed.contains(id.as_str()))
+        // Turned off by the user: it must LEAVE, not linger.
+        .filter(|(id, _)| !disabled.contains(id.as_str()))
+        .filter_map(|(id, m)| {
+            m.n_ctx.map(|ctx| crate::core::opencode::DesiredModel {
+                id: id.clone(),
+                display_name: format!("{id} (llama.cpp)"),
+                context: ctx,
+                tool_call: m.tool_call,
+                vision: vision.contains(id.as_str()),
+            })
+        })
+        .collect()
+}
+
+/// [`desired_from`] with the preset-derived sets read for you.
+pub fn desired_models(
+    cfg: &settings::AppConfig,
+    measurements: &router::Measurements,
+    models: &[crate::core::library::ModelFile],
+) -> Vec<crate::core::opencode::DesiredModel> {
+    let preset = preset_path();
+    desired_from(
+        measurements,
+        &router::embedding_ids_in_preset(&preset),
+        &router::vision_ids_in_preset(&preset),
+        &disabled_ids(cfg, models),
+    )
+}
+
 /// Every id the fleet still holds, or `None` when we cannot tell.
 ///
 /// This set is positive evidence authorising a REMOVAL from an agent's
@@ -693,6 +747,82 @@ fn is_zombie(pid: u32) -> bool {
     stat.rsplit_once(')')
         .and_then(|(_, rest)| rest.split_whitespace().next())
         == Some("Z")
+}
+
+#[cfg(test)]
+mod tests_desired {
+    use super::*;
+    use crate::core::router::Measurement;
+    use std::collections::HashSet;
+
+    fn set(xs: &[&str]) -> HashSet<String> {
+        xs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    fn measured(pairs: &[(&str, Option<u64>)]) -> router::Measurements {
+        pairs
+            .iter()
+            .map(|(id, ctx)| {
+                (
+                    (*id).to_string(),
+                    Measurement { n_ctx: *ctx, tool_call: Some(true), ..Default::default() },
+                )
+            })
+            .collect()
+    }
+
+    /// The bug, live on the dev machine 2026-09-12: thirteen models were
+    /// disabled and six were still being written into opencode.json,
+    /// three of them not in the preset and not offered by the router —
+    /// unservable, and advertised to the agent anyway. `disabled` was
+    /// subtracted from `fleet_known_ids` but never from `desired`, so a
+    /// turned-off model stayed WANTED and the removal path downstream
+    /// never ran for it.
+    #[test]
+    fn a_disabled_model_leaves_the_agent_configs() {
+        let m = measured(&[("keep-me", Some(65_536)), ("turned-off", Some(99_072))]);
+        let got = desired_from(&m, &set(&[]), &set(&[]), &set(&["turned-off"]));
+        let ids: Vec<&str> = got.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, vec!["keep-me"], "a disabled model must not be desired");
+    }
+
+    /// Disabling must win even over a model that measured perfectly —
+    /// having a context is exactly why the old code kept offering it.
+    #[test]
+    fn a_good_measurement_does_not_rescue_a_disabled_model() {
+        let m = measured(&[("qwen3.6-27b-q5_k_m", Some(99_072))]);
+        let got = desired_from(&m, &set(&[]), &set(&[]), &set(&["qwen3.6-27b-q5_k_m"]));
+        assert!(got.is_empty(), "{got:?}");
+    }
+
+    #[test]
+    fn an_embedding_model_is_never_a_chat_model() {
+        let m = measured(&[("bge-small", Some(512)), ("chatty", Some(65_536))]);
+        let got = desired_from(&m, &set(&["bge-small"]), &set(&[]), &set(&[]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "chatty");
+    }
+
+    /// A load failure clears n_ctx. Such a model is not offered, but it
+    /// is NOT disabled either — the distinction matters downstream,
+    /// where absence from `desired` must never authorise a removal.
+    #[test]
+    fn an_unmeasured_model_is_not_offered() {
+        let m = measured(&[("never-loaded", None), ("fine", Some(4096))]);
+        let got = desired_from(&m, &set(&[]), &set(&[]), &set(&[]));
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].id, "fine");
+    }
+
+    #[test]
+    fn vision_and_context_are_carried_through() {
+        let m = measured(&[("seer", Some(64_000))]);
+        let got = desired_from(&m, &set(&[]), &set(&["seer"]), &set(&[]));
+        assert_eq!(got[0].context, 64_000);
+        assert!(got[0].vision, "the preset carries mmproj for this model");
+        assert_eq!(got[0].tool_call, Some(true));
+        assert_eq!(got[0].display_name, "seer (llama.cpp)");
+    }
 }
 
 #[cfg(test)]
