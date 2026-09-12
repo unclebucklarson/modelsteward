@@ -755,6 +755,14 @@ pub fn upsert_measurement(all: &mut Measurements, id: &str, mut m: Measurement) 
         m.eval_score = old.eval_score;
         m.tool_reliability = old.tool_reliability;
         m.loop_reliability = old.loop_reliability;
+        // The family join key. A calibrate run with warden absent or its
+        // inventory damaged resolves None for every alias, and without
+        // this line that run would wipe every recorded identity — the
+        // precise outcome warden.rs's header says must never happen
+        // (pre-tag review, 2026-09-11).
+        if m.content_id.is_none() {
+            m.content_id = old.content_id.clone();
+        }
     }
     all.insert(id.to_string(), m);
 }
@@ -1258,22 +1266,33 @@ pub fn failure_reason(log: &str) -> Option<String> {
             || low.contains("failed")
             || low.contains("unable")
             || low.contains("[error]")
-            || low.split_whitespace().any(|t| t == "E")
+            // llama.cpp's severity column, matched on the ORIGINAL line:
+            // this compared an uppercase "E" against an already
+            // lowercased string, so the branch could never fire and a
+            // bare `E srv ...` line fell through to "see router.log"
+            // (pre-tag review, 2026-09-11).
+            || l.split_whitespace().any(|t| t == "E")
     };
-    let last = log.lines().rfind(|l| is_error(l))?;
+    let errors: Vec<&str> = log.lines().filter(|l| is_error(l)).collect();
 
-    // A bind failure is the one we can put in plain language, and the
-    // one most likely to be a user's own doing.
-    if last.to_lowercase().contains("bind")
-        && let Some(port) = last
-            .rsplit_once("port:")
-            .and_then(|(_, t)| t.trim().split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty()))
-    {
-        return Some(format!(
-            "port {port} is already in use by another process — llama-server could not bind it"
-        ));
+    // Prefer the CAUSE over the consequence. llama-server reports a bind
+    // failure and then, two lines later, "exiting due to HTTP server
+    // error" — and the last error line is the one that explains nothing.
+    // So look for a bind failure anywhere among the errors before
+    // falling back to the most recent one (pre-tag review, 2026-09-11:
+    // adding the severity column made the useless line win).
+    for line in &errors {
+        if line.to_lowercase().contains("bind")
+            && let Some(port) = line.rsplit_once("port:").and_then(|(_, t)| {
+                t.trim().split(|c: char| !c.is_ascii_digit()).find(|s| !s.is_empty())
+            })
+        {
+            return Some(format!(
+                "port {port} is already in use by another process — llama-server could not bind it"
+            ));
+        }
     }
-    Some(strip_log_decoration(last))
+    errors.last().map(|l| strip_log_decoration(l))
 }
 
 /// Drop a leading `0.00.189.904`-style timestamp and a single-letter
@@ -1345,6 +1364,120 @@ pub fn kill_strays(preset: &Path) -> Result<Vec<u32>> {
         }
     }
     Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_upsert_carry {
+    use super::*;
+
+    /// The list in upsert_measurement claims "the reason this list is
+    /// tested" — and no such test existed, which is how `content_id`
+    /// came to be missing from it (pre-tag review, 2026-09-11).
+    fn fully_populated() -> Measurement {
+        Measurement {
+            n_ctx: Some(108_208),
+            tool_call: Some(true),
+            error: None,
+            args_fp: Some("A".into()),
+            env_fp: Some("E".into()),
+            pp_tps: Some(302.8),
+            tg_tps: Some(47.0),
+            tg_deep_tps: Some(35.1),
+            tg_depth: Some(16_384),
+            free_vram_mib: Some(22_900),
+            gpu_tenant: None,
+            bench_build: Some(10_775),
+            eval_score: Some(0.82),
+            tool_reliability: Some(1.0),
+            loop_reliability: Some(0.67),
+            content_id: Some("sha256:00b5a7c4".into()),
+        }
+    }
+
+    /// A re-measure under the SAME config and environment must not lose
+    /// anything the previous run established.
+    #[test]
+    fn a_re_measure_keeps_every_field_it_did_not_measure() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), fully_populated());
+
+        // What calibrate produces: context and tool-call only.
+        let fresh = Measurement {
+            n_ctx: Some(108_208),
+            tool_call: Some(true),
+            args_fp: Some("A".into()),
+            env_fp: Some("E".into()),
+            ..Default::default()
+        };
+        upsert_measurement(&mut all, "m", fresh);
+        let got = &all["m"];
+        assert_eq!(got.pp_tps, Some(302.8), "bench pp");
+        assert_eq!(got.tg_tps, Some(47.0), "bench tg");
+        assert_eq!(got.tg_deep_tps, Some(35.1), "bench tg at depth");
+        assert_eq!(got.tg_depth, Some(16_384));
+        assert_eq!(got.bench_build, Some(10_775));
+        assert_eq!(got.eval_score, Some(0.82), "quality");
+        assert_eq!(got.tool_reliability, Some(1.0));
+        assert_eq!(got.loop_reliability, Some(0.67));
+        assert_eq!(
+            got.content_id.as_deref(),
+            Some("sha256:00b5a7c4"),
+            "the family join key must survive a calibrate where warden was absent"
+        );
+    }
+
+    /// The exact live shape: warden uninstalled between runs, so the new
+    /// measurement carries no identity at all.
+    #[test]
+    fn warden_going_away_does_not_erase_recorded_identities() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), fully_populated());
+        upsert_measurement(
+            &mut all,
+            "m",
+            Measurement {
+                n_ctx: Some(108_208),
+                tool_call: Some(true),
+                args_fp: Some("A".into()),
+                env_fp: Some("E".into()),
+                content_id: None,
+                ..Default::default()
+            },
+        );
+        assert_eq!(all["m"].content_id.as_deref(), Some("sha256:00b5a7c4"));
+    }
+
+    /// But a NEW identity wins: warden finishing its hash, or a file
+    /// genuinely being replaced, must be recorded.
+    #[test]
+    fn a_freshly_resolved_identity_replaces_the_old_one() {
+        let mut all = Measurements::new();
+        all.insert("m".into(), fully_populated());
+        upsert_measurement(
+            &mut all,
+            "m",
+            Measurement {
+                n_ctx: Some(108_208),
+                tool_call: Some(true),
+                args_fp: Some("A".into()),
+                env_fp: Some("E".into()),
+                content_id: Some("sha256:ffffffff".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(all["m"].content_id.as_deref(), Some("sha256:ffffffff"));
+    }
+
+    /// The severity column alone must classify a line as an error: a
+    /// llama-server failure that uses none of our keywords still has to
+    /// reach the user instead of "see router.log".
+    #[test]
+    fn a_bare_severity_marker_is_recognised_as_a_failure() {
+        let log = "0.00.1 I srv  llama_server: starting\n\
+                   0.00.2 E srv    load: no CUDA devices detected\n";
+        let r = failure_reason(log).expect("the E column alone marks a failure");
+        assert!(r.contains("no CUDA devices"), "{r}");
+    }
 }
 
 #[cfg(test)]

@@ -83,14 +83,20 @@ pub fn write_atomic(path: &Path, contents: &str) -> Result<()> {
         return Err(e);
     }
 
-    // Widen (or narrow) to the destination's mode now that the bytes
-    // are down; a brand-new file gets the conventional 0644.
+    // Match the destination's mode now that the bytes are down. A
+    // brand-new file takes the process umask instead of a hardcoded
+    // 0644: forcing 0644 made every first write world-readable on a
+    // umask-077 machine — a regression in the very function whose B1
+    // fix was about NOT exposing file contents (pre-tag review,
+    // 2026-09-11). pi's models.json and Hermes's cache are both created
+    // through here.
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&target)
-            .map(|m| m.permissions().mode())
-            .unwrap_or(0o644);
+        let mode = match std::fs::metadata(&target) {
+            Ok(m) => m.permissions().mode(),
+            Err(_) => 0o666 & !umask(),
+        };
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(mode));
     }
 
@@ -173,6 +179,21 @@ pub enum Loaded<T> {
     Damaged(String),
 }
 
+/// The process umask, read from `/proc/self/status` so no libc
+/// dependency is needed. Falls back to the common 022 when the field is
+/// unavailable, which is the same answer a default desktop gives.
+#[cfg(unix)]
+fn umask() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find_map(|l| l.strip_prefix("Umask:"))
+                .and_then(|v| u32::from_str_radix(v.trim(), 8).ok())
+        })
+        .unwrap_or(0o022)
+}
+
 /// Read + parse JSON, distinguishing "missing" from "damaged".
 pub fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Loaded<T> {
     match std::fs::read_to_string(path) {
@@ -197,6 +218,46 @@ pub fn rescue(path: &Path) -> Option<PathBuf> {
         None => path.with_extension("corrupt"),
     };
     std::fs::rename(path, &rescue).ok().map(|_| rescue)
+}
+
+#[cfg(test)]
+mod tests_perms {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn mode_of(p: &std::path::Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    /// A brand-new file takes the umask, as `File::create` always did.
+    /// Hardcoding 0644 here made every first write world-readable on a
+    /// umask-077 machine — in the function whose B1 fix was about not
+    /// exposing contents (pre-tag review, 2026-09-11). pi's models.json
+    /// and Hermes's cache are both first created through this path.
+    #[test]
+    fn a_new_file_respects_the_umask_rather_than_forcing_0644() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("new.json");
+        write_atomic(&p, "{}").unwrap();
+        let expected = 0o666 & !super::umask();
+        assert_eq!(
+            mode_of(&p),
+            expected,
+            "new file should be 0666 & ~umask ({expected:o}), not a hardcoded mode"
+        );
+    }
+
+    /// An existing file keeps the permissions its owner chose — a user
+    /// who chmod 600'd their config must not have it widened by a sync.
+    #[test]
+    fn an_existing_files_mode_is_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("secret.json");
+        std::fs::write(&p, "{}").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&p, "{\"a\":1}").unwrap();
+        assert_eq!(mode_of(&p), 0o600, "a 0600 config stays 0600 across a write");
+    }
 }
 
 #[cfg(test)]

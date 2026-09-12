@@ -191,14 +191,17 @@ fn warden_roots_are_classified_for_our_scanner() {
 
     assert!(roots.shelves.contains(&shelf));
     assert!(
-        roots.shelves.contains(&drive),
-        "a mounted backup drive holds servable models: {roots:?}"
+        !roots.shelves.contains(&drive),
+        "warden files `removable` as a BACKUP tier: it holds copies of models \
+         already on a shelf, and walking it would add every one of them a \
+         second time under a -2 alias, then calibrate and serve the USB copy \
+         (pre-tag review, 2026-09-11): {roots:?}"
     );
     assert_eq!(roots.ollama, vec![store]);
     assert_eq!(
         roots.shelves.len(),
-        2,
-        "the unplugged drive must not reach the scanner: {roots:?}"
+        1,
+        "only the shelf: {roots:?}"
     );
 }
 

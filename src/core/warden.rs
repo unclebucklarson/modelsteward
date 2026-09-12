@@ -148,7 +148,9 @@ impl Inventory {
 /// a normal state, and handing a missing directory to the scanner would
 /// just walk nothing. `hf_hub` is deliberately not returned — this app
 /// already locates the hub cache itself, and the router serves those
-/// natively.
+/// natively. Nor are `removable` roots: warden files those as backup and
+/// archive tiers, so they hold copies of models that already live on a
+/// shelf, and serving a duplicate from USB helps nobody.
 #[derive(Debug, Default, PartialEq)]
 pub struct Roots {
     /// Directories to walk for GGUFs: warden's shelves, plus removable
@@ -168,7 +170,16 @@ pub fn servable_roots(inv: &Inventory) -> Roots {
         }
         match r.kind.as_deref() {
             Some("ollama") => out.ollama.push(r.path.clone()),
-            Some("shelf") | Some("removable") => out.shelves.push(r.path.clone()),
+            Some("shelf") => out.shelves.push(r.path.clone()),
+            // NOT `removable`. Warden classifies those as backup and
+            // archive tiers — on this machine both are literally
+            // named `model_backup` — so they hold COPIES of models
+            // already on a shelf. Walking one would add every model a
+            // second time under a `-2` alias (inode dedup cannot help:
+            // a backup is different bytes on a different device), and
+            // those duplicates would then be calibrated, benched and
+            // written into every agent config, served from USB
+            // (pre-tag review, 2026-09-11).
             // hf_hub: found by us already. Anything unknown is left
             // alone rather than guessed at — a future root kind must not
             // silently become a directory we walk.
@@ -462,8 +473,9 @@ mod tests {
         let r = servable_roots(&inv);
         assert!(r.shelves.contains(&shelf), "a shelf is ours to walk");
         assert!(
-            r.shelves.contains(&drive),
-            "a MOUNTED backup drive holds servable models: {r:?}"
+            !r.shelves.contains(&drive),
+            "a backup drive holds COPIES — walking it would duplicate the \
+             fleet under -2 aliases: {r:?}"
         );
         assert_eq!(r.ollama, vec![olla]);
         assert!(
@@ -473,13 +485,13 @@ mod tests {
         std::fs::remove_dir_all(&tmp).ok();
     }
 
-    /// An unplugged backup drive is a normal state, not an error, and
-    /// must never be handed to the scanner as a directory.
+    /// An unplugged root is a normal state, not an error, and must never
+    /// be handed to the scanner as a directory.
     #[test]
     fn an_offline_root_is_skipped() {
         let inv = roots_fixture(&[(
             "gone",
-            "removable",
+            "shelf",
             "/run/media/buck/definitely-not-mounted-xyz",
         )]);
         assert_eq!(servable_roots(&inv), Roots::default());

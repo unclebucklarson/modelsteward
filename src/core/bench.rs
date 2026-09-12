@@ -116,8 +116,16 @@ pub fn run(
     } else {
         "0".to_string()
     };
-    let output = std::process::Command::new(bench)
-        .args(["-o", "json", "-r", "3", "-p", "512", "-n", "128", "-d", &depths])
+    let mut cmd = std::process::Command::new(bench);
+    cmd.args(["-o", "json", "-r", "3", "-p", "512", "-n", "128"]);
+    // Only ask for a depth pass when there is one. Passing `-d 0`
+    // unconditionally made every bench fail outright on builds that
+    // predate the flag — builds parse_output still explicitly supports
+    // (pre-tag review, 2026-09-11).
+    if depth > 0 {
+        cmd.args(["-d", &depths]);
+    }
+    let output = cmd
         .arg("-m")
         .arg(model)
         .args(extra_args)
