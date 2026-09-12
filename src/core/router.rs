@@ -1350,8 +1350,40 @@ pub fn preset_processes(preset: &Path) -> Vec<u32> {
 /// "never touch a server we didn't start": running OUR generated preset
 /// is the ownership credential, exactly as in [`stop`]. Returns the pids
 /// signalled.
-pub fn kill_strays(preset: &Path) -> Result<Vec<u32>> {
-    let pids = preset_processes(preset);
+/// Which of the processes running our preset are actually STRAYS.
+///
+/// Everything matching the preset EXCEPT the router we own. Without the
+/// exclusion this returned the healthy router too — verified live
+/// against pid 24079 while it served Hermes — so "Clean Up Stray
+/// Servers" SIGTERMed the working server and killed the in-flight
+/// coding turn (adversarial review, 2026-09-12; shipped in v0.7.0).
+/// The router's CHILDREN are safe either way: they carry `--model`, not
+/// `--models-preset`, so they never match in the first place.
+pub fn strays_excluding(found: &[u32], ours: Option<u32>) -> Vec<u32> {
+    found.iter().copied().filter(|p| Some(*p) != ours).collect()
+}
+
+/// The router WE own on this port: the marker's process when it is live
+/// and on this port, else a preset-matched process there (the systemd
+/// case). Same two credentials [`status`] uses.
+pub fn owned_router_pid(dir: &Path, cfg: &RouterConfig) -> Option<u32> {
+    if let Some(m) = read_marker(dir)
+        && marker_is_live(&m)
+        && m.port == cfg.port
+    {
+        return Some(m.pid);
+    }
+    find_preset_process_on(&cfg.preset_path, cfg.port)
+}
+
+/// Leftover servers running our preset — what "clean up" should touch,
+/// and nothing else.
+pub fn stray_pids(dir: &Path, cfg: &RouterConfig) -> Vec<u32> {
+    strays_excluding(&preset_processes(&cfg.preset_path), owned_router_pid(dir, cfg))
+}
+
+pub fn kill_strays(dir: &Path, cfg: &RouterConfig) -> Result<Vec<u32>> {
+    let pids = stray_pids(dir, cfg);
     let mut killed = Vec::new();
     for pid in pids {
         if std::process::Command::new("kill")
@@ -1364,6 +1396,43 @@ pub fn kill_strays(preset: &Path) -> Result<Vec<u32>> {
         }
     }
     Ok(killed)
+}
+
+#[cfg(test)]
+mod tests_strays {
+    use super::strays_excluding;
+
+    /// The v0.7.0 defect, verified live on 2026-09-12: `preset_processes`
+    /// matches any process whose cmdline names llama-server and our
+    /// preset — which the HEALTHY router does by construction (checked
+    /// against pid 24079 while it served Hermes). "Clean up strays" then
+    /// SIGTERMed the working router. Its children do NOT match: they
+    /// carry `--model`, not `--models-preset`.
+    #[test]
+    fn the_router_we_own_is_never_a_stray() {
+        assert_eq!(
+            strays_excluding(&[24079], Some(24079)),
+            Vec::<u32>::new(),
+            "the healthy router alone must leave NOTHING to clean up"
+        );
+    }
+
+    #[test]
+    fn genuine_strays_are_returned_and_ours_is_held_back() {
+        assert_eq!(strays_excluding(&[100, 24079, 200], Some(24079)), vec![100, 200]);
+    }
+
+    /// No router of ours running: everything matching the preset is a
+    /// leftover, which is the case the feature was written for.
+    #[test]
+    fn with_no_router_of_ours_everything_matching_is_a_stray() {
+        assert_eq!(strays_excluding(&[100, 200], None), vec![100, 200]);
+    }
+
+    #[test]
+    fn nothing_found_is_nothing_killed() {
+        assert_eq!(strays_excluding(&[], Some(24079)), Vec::<u32>::new());
+    }
 }
 
 #[cfg(test)]

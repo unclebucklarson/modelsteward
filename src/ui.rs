@@ -243,6 +243,8 @@ enum AfterStart {
 /// router is actively serving asks first.
 #[derive(Clone)]
 enum Disrupt {
+    /// Stop leftover servers running our preset (never the live router).
+    KillStrays,
     Row(RowAction),
     Dispatch(AfterStart, bool),
     Stop,
@@ -1058,25 +1060,49 @@ impl App {
     /// Kill llama-servers running our preset that ordinary Stop cannot
     /// reach — no marker, wrong port, or a start that half-failed.
     fn action_kill_strays(&mut self) {
-        let preset = system::preset_path();
-        let found = router::preset_processes(&preset);
-        if found.is_empty() {
+        let rcfg = system::router_config(&self.cfg);
+        let dir = router::state_dir();
+        let strays = router::stray_pids(&dir, &rcfg);
+        if strays.is_empty() {
             let zombies = system::zombie_children();
-            self.log(if zombies.is_empty() {
-                "no stray llama-server processes running our preset".to_string()
-            } else {
-                format!(
+            let owned = router::owned_router_pid(&dir, &rcfg);
+            self.log(match (zombies.is_empty(), owned) {
+                (true, Some(p)) => format!(
+                    "nothing to clean up — the only server running our preset is the \
+                     router itself (pid {p}), which is not a stray"
+                ),
+                (true, None) => "no stray llama-server processes running our preset".to_string(),
+                (false, _) => format!(
                     "no LIVE strays; {} already-exited child(ren) remain ({}) — \
                      these are reaped automatically now and clear on restart",
                     zombies.len(),
                     zombies.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
-                )
+                ),
             });
             return;
         }
+        // Say WHAT will be signalled before signalling it, and go through
+        // the same disruption confirmation every other stop path uses —
+        // this had neither, and killed the working router (2026-09-12).
+        self.log(format!(
+            "found {} stray server(s) to stop: {}",
+            strays.len(),
+            strays.iter().map(u32::to_string).collect::<Vec<_>>().join(", ")
+        ));
+        if let Some(msg) = self.serving_disruption("Stopping stray servers") {
+            self.confirm_disrupt = Some((msg, Disrupt::KillStrays));
+            return;
+        }
+        self.action_kill_strays_now();
+    }
+
+    fn action_kill_strays_now(&mut self) {
+        let rcfg = system::router_config(&self.cfg);
         self.spawn("cleaning up stray servers", move |tx| {
-            let _ = tx.send(match router::kill_strays(&preset) {
-                Ok(pids) if pids.is_empty() => Msg::Error("found strays but none could be signalled".into()),
+            let _ = tx.send(match router::kill_strays(&router::state_dir(), &rcfg) {
+                Ok(pids) if pids.is_empty() => {
+                    Msg::Error("found strays but none could be signalled".into())
+                }
                 Ok(pids) => Msg::Finished(format!(
                     "SIGTERMed {} stray server(s): {}",
                     pids.len(),
@@ -2104,10 +2130,11 @@ impl App {
             if ui
                 .button("Clean Up Stray Servers…")
                 .on_hover_text(
-                    "SIGTERMs every llama-server running OUR preset file, whatever \
-                     port it is on and whether or not we have a record of starting \
-                     it. Servers you started yourself are never touched — running \
-                     our generated preset is the credential.",
+                    "Finds llama-servers running OUR preset that are NOT the router \
+                     we are currently running — a half-failed start, or one left on \
+                     an old port — lists them, asks, then SIGTERMs them. The working \
+                     router is never a stray, and a server you started yourself is \
+                     never touched: running our generated preset is the credential.",
                 )
                 .clicked()
             {
@@ -5216,6 +5243,7 @@ impl App {
                         Disrupt::Row(a) => self.run_row_action_now(a),
                         Disrupt::Dispatch(a, s) => self.dispatch_now(a, s),
                         Disrupt::Stop => self.action_stop_now(),
+                        Disrupt::KillStrays => self.action_kill_strays_now(),
                         Disrupt::ApplySettings => self.action_apply_settings_now(),
                     }
                 }
