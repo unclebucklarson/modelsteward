@@ -294,6 +294,7 @@ mod tests_partial_energy {
 }
 
 mod tests {
+    #[allow(unused_imports)]
     use super::*;
 
     #[test]
