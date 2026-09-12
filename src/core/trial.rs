@@ -372,7 +372,7 @@ pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
     // but a router that didn't re-read it keeps SERVING the trial
     // config. Keep the marker so the next start retries (review finding
     // F8, 2026-09-01).
-    if let Err(e) = router::reload(cfg.port) {
+    if let Err(e) = router::reload(&dir, &system::router_config(cfg)) {
         return Some(format!(
             "the real preset is restored on disk after an interrupted trial \
              ({model}), but the router could not be told to reload it ({e:#}) — \
@@ -1488,7 +1488,7 @@ pub fn run_slot_trial(
     // The preset must carry slot-save-path (older on-disk presets won't):
     // regenerate + reload before measuring, same rule as Measure.
     system::write_preset(cfg, &[])?;
-    router::reload(cfg.port)?;
+    router::reload(&router::state_dir(), &system::router_config(cfg))?;
     let build = system::pick_server(cfg)
         .ok()
         .as_deref()
@@ -1693,7 +1693,7 @@ pub fn run_trial(
         trial_cfg.overrides.insert(model.to_string(), ov);
         let attempt = (|| -> Result<TrialResult> {
             system::write_preset(&trial_cfg, &[])?;
-            router::reload(cfg.port)?;
+            router::reload(&router::state_dir(), &system::router_config(cfg))?;
             let t0 = std::time::Instant::now();
             let ctx = router::fetch_settled_ctx(cfg.port, model)?;
             let load_secs = t0.elapsed().as_secs_f64();
@@ -1815,7 +1815,7 @@ pub fn run_trial(
 
     // Whatever happened, put the real config's preset back.
     system::write_preset(cfg, &[])?;
-    let _ = router::reload(cfg.port);
+    let _ = router::reload(&dir, &system::router_config(cfg));
     clear_trial_marker(&dir);
     body
 }
@@ -1848,7 +1848,7 @@ pub fn keep_variant(
     }
     new_cfg.save(cfg_path)?;
     system::write_preset(&new_cfg, &[])?;
-    let _ = router::reload(new_cfg.port);
+    let _ = router::reload(&router::state_dir(), &system::router_config(&new_cfg));
     // The kept config changes what --fit settles on, and the trial already
     // measured exactly that: carry its settled ctx into the measurement
     // (fingerprints cleared -> the normal loop re-verifies next calibrate)

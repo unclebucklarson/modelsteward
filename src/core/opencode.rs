@@ -596,7 +596,6 @@ mod tests {
         jsonc::strictly_valid(&after).unwrap();
     }
 
-    #[test]
     /// A reachable router that reports ZERO models is not evidence that
     /// every model is gone, and commenting out a hand-maintained config
     /// is the most destructive thing this app does.
@@ -659,6 +658,7 @@ mod tests {
         assert_eq!(done, vec!["gone".to_string()]);
     }
 
+    #[test]
     fn commenting_many_ghosts_costs_exactly_one_backup_slot() {
         // Review finding H4 (2026-08-31): one read/rotate/write PER
         // ghost meant a sync with six ghosts rotated the backup ring six

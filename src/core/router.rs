@@ -1273,9 +1273,32 @@ fn ids_with_key_in_preset(
     out
 }
 
-/// Ask a running router to re-read its model sources (`/models?reload=1`,
-/// verified in spike 1) — how preset edits land without a restart.
-pub fn reload(port: u16) -> Result<Vec<RouterModel>> {
+/// Ask OUR running router to re-read its model sources
+/// (`/models?reload=1`, verified in spike 1) — how preset edits land
+/// without a restart.
+///
+/// Refuses when the port is not ours. This took a port and nothing else,
+/// so eight call sites each had to remember the ownership check and
+/// several did not: Reload Models and Regen Preset had none at all, and
+/// `run_or_offer_start` passed `External` straight through to a
+/// calibrate. Forcing a stranger's llama-server to re-read its preset
+/// drops its loaded instances mid-session, which is the first rule in
+/// CLAUDE.md — never touch a server we didn't start (adversarial review,
+/// 2026-09-12; review finding C8 reopened).
+///
+/// The gate lives HERE rather than at the callers for the same reason the
+/// ghost guard moved into `comment_out_ghosts`: a rule every caller must
+/// remember is a rule that will be forgotten.
+pub fn reload(dir: &Path, cfg: &RouterConfig) -> Result<Vec<RouterModel>> {
+    if owned_router_pid(dir, cfg).is_none() {
+        bail!(
+            "port {} is not a router we started — refusing to force a reload on it. \
+             A reload makes a server re-read its preset and drop loaded models; doing \
+             that to someone else's process is not ours to do.",
+            cfg.port
+        );
+    }
+    let port = cfg.port;
     let body: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{port}/models?reload=1"))
         .timeout(std::time::Duration::from_secs(10))
         .call()
@@ -1650,6 +1673,42 @@ mod tests_cancel {
         assert!(
             !msg.contains("cancelled by user"),
             "an uncancelled token must let it reach the router: {msg}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests_reload_ownership {
+    use super::*;
+
+    fn cfg_on(port: u16, preset: &Path) -> RouterConfig {
+        RouterConfig {
+            server_bin: PathBuf::from("/nonexistent/llama-server"),
+            preset_path: preset.to_path_buf(),
+            port,
+            models_max: 1,
+        }
+    }
+
+    /// The gate: with no marker and no preset-matched process on the
+    /// port, this is not our router and a reload must be refused BEFORE
+    /// any request goes out. Asserting on the message distinguishes
+    /// "refused on ownership" from "the connection failed anyway",
+    /// which is the whole point — port 1 would error either way.
+    #[test]
+    fn a_port_that_is_not_ours_is_refused_before_the_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let preset = dir.path().join("router.ini");
+        std::fs::write(&preset, "[m]\nmodel = /x.gguf\n").unwrap();
+        let err = reload(dir.path(), &cfg_on(1, &preset)).expect_err("must refuse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("not a router we started"),
+            "refused on OWNERSHIP, not on a connection error: {msg}"
+        );
+        assert!(
+            !msg.contains("reload failed"),
+            "it must not have sent the request: {msg}"
         );
     }
 }

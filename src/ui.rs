@@ -1016,7 +1016,7 @@ impl App {
             match system::write_preset(&cfg, &[]) {
                 Ok((path, n)) => {
                     let _ = tx.send(Msg::PresetWritten(path, n));
-                    if let Ok(models) = router::reload(cfg.port) {
+                    if let Ok(models) = router::reload(&router::state_dir(), &system::router_config(&cfg)) {
                         let _ = tx.send(Msg::Progress(format!(
                             "router reloaded: {} models listed",
                             models.len()
@@ -1163,6 +1163,22 @@ impl App {
     }
 
     fn run_or_offer_start(&mut self, action: AfterStart) {
+        // External is a SERVER WE DID NOT START. It used to fall through
+        // to dispatch, which drove a calibrate against it: our preset
+        // written, a forced reload on their router, every model it lists
+        // loaded, and the results recorded as our measurements. The same
+        // precondition is enforced in setup_flow and the CLI, so this was
+        // an omission rather than a policy — finding C8 reopened through
+        // a path that never consulted status() (review 2026-09-12).
+        if let Some(router::RouterState::External { detail }) = &self.router_state {
+            self.log(format!(
+                "refusing to {}: {detail}. Point Settings at a different port, or stop \
+                 that server yourself — a server we did not start is observed, never \
+                 driven.",
+                action.describe()
+            ));
+            return;
+        }
         let startable = matches!(
             self.router_state,
             Some(router::RouterState::Down) | Some(router::RouterState::Trouble { .. })
@@ -1645,7 +1661,7 @@ impl App {
                                         let _ = tx.send(Msg::Progress(format!(
                                             "preset regenerated ({n} models)"
                                         )));
-                                        if let Ok(models) = router::reload(cfg.port) {
+                                        if let Ok(models) = router::reload(&router::state_dir(), &system::router_config(&cfg)) {
                                             let _ = tx.send(Msg::Progress(format!(
                                                 "router reloaded: {} models offered",
                                                 models.len()
@@ -2010,9 +2026,11 @@ impl App {
                 ui.close();
             }
             if ui.button("Reload Models").clicked() {
-                let port = self.cfg.port;
+                // Needs the whole config now, not just the port: the
+                // ownership gate lives inside reload().
+                let rcfg = system::router_config(&self.cfg);
                 self.spawn("reloading models", move |tx| {
-                    let _ = tx.send(match router::reload(port) {
+                    let _ = tx.send(match router::reload(&router::state_dir(), &rcfg) {
                         Ok(m) => Msg::Finished(format!("reloaded: {} models", m.len())),
                         Err(e) => Msg::Error(format!("reload: {e:#}")),
                     });
@@ -2710,7 +2728,7 @@ impl App {
                     self.spawn("updating preset (disabled list changed)", move |tx| {
                         let _ = tx.send(match system::write_preset(&cfg, &[]) {
                             Ok((_, n)) => {
-                                let _ = router::reload(cfg.port);
+                                let _ = router::reload(&router::state_dir(), &system::router_config(&cfg));
                                 Msg::Finished(format!("preset regenerated ({n} models)"))
                             }
                             Err(e) => Msg::Error(format!("preset: {e:#}")),
@@ -4848,7 +4866,7 @@ impl App {
                 self.spawn("applying overrides (preset + reload)", move |tx| {
                     let _ = tx.send(match system::write_preset(&cfg, &[]) {
                         Ok((_, n)) => {
-                            let reload_note = match router::reload(cfg.port) {
+                            let reload_note = match router::reload(&router::state_dir(), &system::router_config(&cfg)) {
                                 Ok(_) => "router reloaded",
                                 Err(_) => "router not running (will apply on next start)",
                             };
@@ -6132,7 +6150,7 @@ fn run_calibration(
     let _ = tx.send(Msg::Progress(format!(
         "preset refreshed ({n} models); reloading router"
     )));
-    if let Err(e) = router::reload(cfg.port) {
+    if let Err(e) = router::reload(&router::state_dir(), &system::router_config(cfg)) {
         let _ = tx.send(Msg::Progress(format!(
             "router reload failed ({e:#}) — measuring what it currently offers"
         )));

@@ -141,7 +141,7 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&state).unwrap());
         }),
         Some("--reload") => with_port(&cfg, &args[1..])
-            .and_then(|c| router::reload(c.port))
+            .and_then(|c| router::reload(&router::state_dir(), &system::router_config(&c)))
             .map(|models| {
                 println!("{}", serde_json::to_string_pretty(&models).unwrap());
             }),
@@ -441,7 +441,7 @@ fn calibrate(cfg: &settings::AppConfig, force: bool) -> anyhow::Result<()> {
     // therefore measurable — "new" means new-on-disk, not new-to-router.
     let (_, n) = system::write_preset(cfg, &[])?;
     eprintln!("preset refreshed ({n} models); reloading router");
-    if let Err(e) = router::reload(cfg.port) {
+    if let Err(e) = router::reload(&router::state_dir(), &system::router_config(cfg)) {
         eprintln!("router reload failed ({e:#}) — measuring what it currently offers");
     }
     let embed = router::embedding_ids_in_preset(&system::preset_path());
