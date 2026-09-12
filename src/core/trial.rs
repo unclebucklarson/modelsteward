@@ -307,15 +307,57 @@ pub fn arm_trial_marker(dir: &Path, model: &str) -> Result<()> {
     // LIVE trial from a dead one (live incident 2026-08-30: a
     // `--version` from a second terminal "healed" a running campaign,
     // yanking its trial preset mid-round).
-    std::fs::write(
-        dir.join("trial-in-progress"),
-        format!("{model}\n{}", std::process::id()),
+    // ATOMIC: a plain write truncates first, leaving a window where the
+    // marker exists but is empty — and another process starting in that
+    // window used to read it as a dead trial and heal a live campaign.
+    // The verdict path treats an empty marker as unreadable now, but not
+    // creating the window is the better half of the fix.
+    crate::core::safefs::write_atomic(
+        &dir.join("trial-in-progress"),
+        &format!("{model}\n{}", std::process::id()),
     )
     .map_err(Into::into)
 }
 
 /// Parse a marker file: (model, PID of the process that armed it).
 /// Old markers (pre-PID) have no second line.
+/// What a trial marker tells us. Distinguishing "cannot read it" from
+/// "its owner is gone" is the whole point: heal rewrites the preset and
+/// reloads the router, so treating an unreadable marker as a dead trial
+/// yanks a LIVE campaign's config mid-round.
+#[derive(Debug, PartialEq)]
+pub enum MarkerVerdict {
+    /// A live process owns it — a trial is RUNNING. Leave it alone.
+    Running,
+    /// No owner: the trial died and the real preset must be restored.
+    Interrupted { model: String },
+    /// Unreadable or empty. NOT evidence of anything — keep the marker
+    /// and do nothing.
+    Unreadable,
+}
+
+pub fn marker_verdict(contents: Option<&str>, alive: &dyn Fn(u32) -> bool) -> MarkerVerdict {
+    // Unreadable is its own answer. `.unwrap_or_default()` collapsed a
+    // read failure — and the momentarily-empty file a truncating write
+    // leaves behind — into "no PID", which the old code read as "dead
+    // trial" and healed. That rewrote a running campaign's preset and
+    // reloaded the router mid-round.
+    let Some(text) = contents else {
+        return MarkerVerdict::Unreadable;
+    };
+    let (model, pid) = marker_fields(text);
+    if pid.is_some_and(alive) {
+        return MarkerVerdict::Running;
+    }
+    // A marker with no model name at all is a torn write, not a record
+    // of anything. A LEGACY marker (model, no PID line) does name its
+    // model, which is what separates the two.
+    if model.trim().is_empty() {
+        return MarkerVerdict::Unreadable;
+    }
+    MarkerVerdict::Interrupted { model }
+}
+
 pub fn marker_fields(contents: &str) -> (String, Option<u32>) {
     let mut lines = contents.lines();
     let model = lines.next().unwrap_or_default().to_string();
@@ -347,14 +389,22 @@ pub fn heal_interrupted_trial(cfg: &settings::AppConfig) -> Option<String> {
     if !trial_marker_present(&dir) {
         return None;
     }
-    let (model, pid) = marker_fields(
-        &std::fs::read_to_string(dir.join("trial-in-progress")).unwrap_or_default(),
-    );
-    // A live owner means the trial is RUNNING, not interrupted — leave
-    // its preset alone.
-    if pid.is_some_and(marker_owner_alive) {
-        return None;
-    }
+    let contents = std::fs::read_to_string(dir.join("trial-in-progress")).ok();
+    let model = match marker_verdict(contents.as_deref(), &marker_owner_alive) {
+        // A live owner means the trial is RUNNING — leave its preset alone.
+        MarkerVerdict::Running => return None,
+        // We cannot tell. Keep the marker, touch nothing: healing on no
+        // evidence is how a live campaign lost its preset.
+        MarkerVerdict::Unreadable => {
+            return Some(
+                "a trial marker exists but could not be read — leaving the preset and \
+                 router alone rather than guessing. If no campaign is running, delete \
+                 trial-in-progress in the state directory."
+                    .to_string(),
+            );
+        }
+        MarkerVerdict::Interrupted { model } => model,
+    };
     // Only claim a restoration that actually happened, and only drop
     // the breadcrumb when it did. Swallowing the error told the user the
     // preset was restored while the router kept serving the trial's
@@ -1879,6 +1929,64 @@ pub fn keep_variant(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_marker_verdict {
+    use super::{MarkerVerdict, marker_verdict};
+
+    fn alive(_: u32) -> bool { true }
+    fn dead(_: u32) -> bool { false }
+
+    #[test]
+    fn a_live_owner_means_a_trial_is_running() {
+        assert_eq!(
+            marker_verdict(Some("qwen3.8-27b\n1234"), &alive),
+            MarkerVerdict::Running
+        );
+    }
+
+    #[test]
+    fn a_dead_owner_means_the_trial_was_interrupted() {
+        assert_eq!(
+            marker_verdict(Some("qwen3.8-27b\n1234"), &dead),
+            MarkerVerdict::Interrupted { model: "qwen3.8-27b".into() }
+        );
+    }
+
+    /// The race (adversarial review, 2026-09-12): `arm_trial_marker` used
+    /// plain fs::write, which truncates before writing, so the marker is
+    /// momentarily an EMPTY file that still exists. A `--version` or a
+    /// GUI launch in that window read "", got no PID, concluded the
+    /// trial was dead, and healed a RUNNING campaign — rewriting its
+    /// preset and reloading the router mid-round, then deleting the
+    /// marker that would have healed a genuine interruption. That is the
+    /// 2026-08-30 incident the PID line was added to prevent, reached
+    /// through the read path instead.
+    #[test]
+    fn an_empty_marker_is_unreadable_not_a_dead_trial() {
+        assert_eq!(marker_verdict(Some(""), &dead), MarkerVerdict::Unreadable);
+        assert_eq!(marker_verdict(Some("\n"), &dead), MarkerVerdict::Unreadable);
+    }
+
+    /// A genuine read failure — EIO, a permission change — is equally
+    /// not evidence the trial died.
+    #[test]
+    fn an_unreadable_marker_heals_nothing() {
+        assert_eq!(marker_verdict(None, &dead), MarkerVerdict::Unreadable);
+    }
+
+    /// Legacy markers from before the PID line carry a model and no
+    /// second line. Those ARE interrupted trials and must still heal —
+    /// what distinguishes them from a truncated write is that the model
+    /// name is there.
+    #[test]
+    fn a_legacy_marker_without_a_pid_still_heals() {
+        assert_eq!(
+            marker_verdict(Some("qwen3.8-27b"), &dead),
+            MarkerVerdict::Interrupted { model: "qwen3.8-27b".into() }
+        );
+    }
 }
 
 #[cfg(test)]
