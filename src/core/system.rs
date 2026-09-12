@@ -571,39 +571,101 @@ pub fn reap_in_background(mut child: std::process::Child) {
     });
 }
 
-/// Zombie children of THIS process: pids whose parent is us and whose
-/// `/proc` state is `Z`. Should always be empty now that spawns are
-/// reaped — which is exactly why it is worth showing in the UI, as a
-/// canary for a spawn path that forgot.
+/// Zombie children of THIS process: our own spawns that exited and were
+/// never waited on. Should always be empty now that every spawn is
+/// reaped — which is exactly why it is worth showing, as a canary for a
+/// spawn path that forgot.
+///
+/// Asks the kernel for our children rather than sweeping `/proc`. The
+/// first version enumerated every process and stat'd it: 510 processes
+/// and 4.4 ms on the dev machine, called from a per-frame render
+/// function, which is 264 ms of syscalls per second from merely having
+/// the Connections tab open — in the app whose low-impact mode exists
+/// precisely to stop the GUI perturbing the inference it measures
+/// (2026-09-11). This reads one small file per thread instead.
+///
+/// Children are tracked per-THREAD: one spawned from a worker thread is
+/// listed under that thread, not the main one, so every task is read.
+/// A kernel without `CONFIG_PROC_CHILDREN` reports nothing, which
+/// degrades the canary to silence rather than to a lie.
 pub fn zombie_children() -> Vec<u32> {
-    let me = std::process::id();
-    let Ok(entries) = std::fs::read_dir("/proc") else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for e in entries.flatten() {
-        let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return out;
+    };
+    for task in tasks.flatten() {
+        let Ok(list) = std::fs::read_to_string(task.path().join("children")) else {
             continue;
         };
-        let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
-            continue;
-        };
-        // Fields after the LAST ')': a comm can contain parens and
-        // spaces, so splitting from the left is wrong. state = [0],
-        // ppid = [1].
-        let Some((_, after)) = stat.rsplit_once(')') else {
-            continue;
-        };
-        let mut f = after.split_whitespace();
-        let (Some(state), Some(ppid)) = (f.next(), f.next()) else {
-            continue;
-        };
-        if state == "Z" && ppid.parse::<u32>() == Ok(me) {
-            out.push(pid);
-        }
+        out.extend(
+            list.split_whitespace()
+                .filter_map(|s| s.parse::<u32>().ok())
+                .filter(|pid| is_zombie(*pid)),
+        );
     }
     out.sort_unstable();
+    out.dedup();
     out
+}
+
+/// Field 3 of `/proc/<pid>/stat`, read after the LAST ')' because a
+/// process name can itself contain parens and spaces.
+fn is_zombie(pid: u32) -> bool {
+    let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+        return false;
+    };
+    stat.rsplit_once(')')
+        .and_then(|(_, rest)| rest.split_whitespace().next())
+        == Some("Z")
+}
+
+#[cfg(test)]
+mod tests_zombies {
+    /// The canary has to actually see a zombie, or it is decoration.
+    /// Spawns a child, lets it exit, and deliberately does NOT reap it.
+    #[test]
+    fn an_unreaped_child_is_seen_then_disappears_when_reaped() {
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let pid = child.id();
+
+        // Wait for it to become defunct without reaping: poll /proc
+        // rather than wait(), which would reap it.
+        let mut seen = false;
+        for _ in 0..200 {
+            if super::zombie_children().contains(&pid) {
+                seen = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(seen, "pid {pid} exited but the canary never saw it");
+
+        child.wait().expect("reap");
+        assert!(
+            !super::zombie_children().contains(&pid),
+            "reaped, so it must be gone"
+        );
+    }
+
+    /// Only OUR children. The first implementation swept all of /proc —
+    /// 510 processes, 4.4 ms, which at 60 fps is 264 ms/sec of syscalls
+    /// from merely having the Connections tab open, in the app whose
+    /// low-impact mode exists to stop it perturbing inference
+    /// (2026-09-11). Reading the kernel's own children lists costs a
+    /// handful of reads instead.
+    #[test]
+    fn it_does_not_report_processes_that_are_not_ours() {
+        let me = std::process::id();
+        for pid in super::zombie_children() {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let ppid: u32 = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            assert_eq!(ppid, me, "pid {pid} is not our child");
+        }
+    }
 }
 
 #[cfg(test)]
