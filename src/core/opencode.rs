@@ -477,6 +477,20 @@ pub fn comment_out_ghosts(
     // rotations and pushed the user's pre-sync config off the end of the
     // 5-deep ring — every recovery slot holding an intermediate state of
     // the same click (review finding H4, 2026-08-31).
+    // A router that listed NOTHING is not evidence that everything is
+    // gone. This guard used to live only in the doc comment above, as a
+    // caller contract duplicated at two untested call sites — while
+    // `status()` returns `Ours { models }` with no non-empty requirement
+    // and `parse_models_response` ends in `unwrap_or_default()`, so any
+    // unrecognised `/models` shape yields `vec![]`. That turned
+    // "reachable" into "omitted everything" on the one path that edits a
+    // hand-maintained file (adversarial review, 2026-09-12).
+    //
+    // CLAUDE.md: reachable AND actually omitted them. No list, no
+    // omission, no edit.
+    if offered.is_empty() {
+        return Ok(Vec::new());
+    }
     let original = std::fs::read_to_string(path)
         .with_context(|| format!("reading {}", path.display()))?;
     let mut updated = original.clone();
@@ -583,6 +597,68 @@ mod tests {
     }
 
     #[test]
+    /// A reachable router that reports ZERO models is not evidence that
+    /// every model is gone, and commenting out a hand-maintained config
+    /// is the most destructive thing this app does.
+    ///
+    /// The only guard was prose in this function's own doc comment
+    /// ("`offered` must come from a live router"), duplicated as an
+    /// ownership check at two untested call sites — while `status()`
+    /// returns `Ours { models }` with no non-empty requirement and
+    /// `parse_models_response` ends in `unwrap_or_default()`, so any
+    /// `/models` shape it does not recognise yields `vec![]`. One
+    /// unrecognised response turned "reachable" into "omitted
+    /// everything" (adversarial review, 2026-09-12). CLAUDE.md's rule is
+    /// "reachable AND actually omitted them".
+    #[test]
+    fn an_empty_offered_list_comments_nothing_and_touches_no_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        let original = "{\n  \"provider\": {\n    \"llamacpp\": {\n      \"models\": {\n        \"a\": { \"name\": \"A\" },\n        \"b\": { \"name\": \"B\" }\n      }\n    }\n  }\n}";
+        std::fs::write(&path, original).unwrap();
+
+        let done = comment_out_ghosts(
+            &path,
+            &["a".to_string(), "b".to_string()],
+            &[], // a router that listed nothing
+            &Default::default(),
+        )
+        .unwrap();
+
+        assert!(done.is_empty(), "nothing may be commented on no evidence: {done:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "the file must be byte-identical"
+        );
+        assert!(
+            !backup_path(&path, 1).exists(),
+            "and no backup slot consumed for a no-op"
+        );
+    }
+
+    /// The guard must not block the real thing: a router that DID list
+    /// models, omitting one nothing measured backs, still gets it
+    /// commented.
+    #[test]
+    fn a_router_that_listed_models_still_gets_its_ghosts_commented() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("opencode.json");
+        std::fs::write(
+            &path,
+            "{\n  \"provider\": {\n    \"llamacpp\": {\n      \"models\": {\n        \"gone\": { \"name\": \"G\" },\n        \"here\": { \"name\": \"H\" }\n      }\n    }\n  }\n}",
+        )
+        .unwrap();
+        let done = comment_out_ghosts(
+            &path,
+            &["gone".to_string()],
+            &["here".to_string()], // the router listed something
+            &Default::default(),
+        )
+        .unwrap();
+        assert_eq!(done, vec!["gone".to_string()]);
+    }
+
     fn commenting_many_ghosts_costs_exactly_one_backup_slot() {
         // Review finding H4 (2026-08-31): one read/rotate/write PER
         // ghost meant a sync with six ghosts rotated the backup ring six
@@ -599,7 +675,16 @@ mod tests {
         );
         std::fs::write(&path, &original).unwrap();
         let orphans: Vec<String> = (0..6).map(|i| format!("ghost{i}")).collect();
-        let done = comment_out_ghosts(&path, &orphans, &[], &Default::default()).unwrap();
+        // `offered` is non-empty now that an empty list is (correctly)
+        // treated as no evidence — this test is about the backup RING,
+        // and "keeper" is what a live router would have listed.
+        let done = comment_out_ghosts(
+            &path,
+            &orphans,
+            &["keeper".to_string()],
+            &Default::default(),
+        )
+        .unwrap();
         assert_eq!(done.len(), 6, "all six commented");
         // The pre-click file must still be recoverable from slot 1.
         assert_eq!(
