@@ -36,6 +36,8 @@ pub fn run() -> eframe::Result {
 enum Msg {
     Scanned(system::ScanReport),
     RouterState(router::RouterState),
+    /// Live serving context per resident model (poller, on change).
+    LiveContexts(Vec<(String, u64)>),
     Ollama(ollama::OllamaStatus),
     Measurements(router::Measurements),
     Configured(Vec<opencode::ConfiguredModel>),
@@ -131,6 +133,13 @@ struct App {
     measurements: router::Measurements,
     configured: Vec<opencode::ConfiguredModel>,
     rows: Vec<rows::Row>,
+    /// What each agent WOULD be told, rebuilt with `rows` (never per
+    /// frame — it reads the preset).
+    desired: Vec<opencode::DesiredModel>,
+    /// What the router is actually serving for each resident model,
+    /// refreshed by the poller. Compared against `desired` so a load
+    /// that fit badly is visible without waiting for a sync.
+    live_ctx: Vec<(String, u64)>,
     ram_mib: u64,
     live_vram: Option<(u64, u64)>,
 
@@ -362,6 +371,8 @@ impl App {
             lab_why: None,
             configured: Vec::new(),
             rows: Vec::new(),
+            desired: Vec::new(),
+            live_ctx: Vec::new(),
             ram_mib: rows::read_ram_mib(),
             live_vram: None,
             edit_scan_dirs: String::new(),
@@ -501,6 +512,7 @@ impl App {
             &opencode_ids,
             self.hardware(),
         );
+        self.desired = system::desired_models(&self.cfg, &self.measurements, &models);
     }
 
     // ─── workers ─────────────────────────────────────────────────────────
@@ -583,6 +595,7 @@ impl App {
             let mut turn_in_flight = false;
             let mut last_state_sent: Option<router::RouterState> = None;
             let mut last_ollama_sent: Option<ollama::OllamaStatus> = None;
+            let mut last_live_sent: Option<Vec<(String, u64)>> = None;
             // When the router last showed generation activity. Starts at
             // \"now\": a fresh app assumes recent activity until proven quiet.
             let mut last_activity_epoch: u64 = advisor::now_epoch();
@@ -612,6 +625,17 @@ impl App {
                         return;
                     }
                     last_state_sent = Some(state.clone());
+                }
+                // What each resident model is actually serving. One
+                // localhost GET, only while the router is ours and only
+                // between turns — the same discipline the VRAM probe
+                // below keeps, for the same reason.
+                if matches!(state, router::RouterState::Ours { .. }) && !turn_in_flight {
+                    let live = router::live_contexts(cfg.port).unwrap_or_default();
+                    if last_live_sent.as_ref() != Some(&live) {
+                        let _ = tx.send(Msg::LiveContexts(live.clone()));
+                        last_live_sent = Some(live);
+                    }
                 }
                 let peer = ollama::probe(cfg.ollama_port);
                 if last_ollama_sent.as_ref() != Some(&peer) {
@@ -1856,6 +1880,7 @@ impl App {
                     self.router_state = Some(s);
                     rebuild = true;
                 }
+                Msg::LiveContexts(c) => self.live_ctx = c,
                 Msg::Ollama(o) => self.ollama = o,
                 Msg::Vram(v) => self.live_vram = v,
                 Msg::Persistence(state) => {
@@ -3375,6 +3400,15 @@ impl App {
     fn server_pane(&mut self, ui: &mut egui::Ui) {
         if let Some(warning) = self.vram_contention() {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {warning}"));
+            ui.separator();
+        }
+        // A load that fit against a busy GPU serves a fraction of what
+        // we publish, and NOTHING said so: one sat resident for sixteen
+        // hours at 4,096 tokens while every agent config advertised
+        // ~110,000 (2026-09-20). Contention's consequence, so it sits
+        // beside the contention warning.
+        for short in system::context_shortfalls(&self.desired, &self.live_ctx) {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", short.message()));
             ui.separator();
         }
         if let Some(line) = &self.meter_line {
@@ -6356,6 +6390,19 @@ fn run_sync(
             }
             _ => None,
         };
+    // What the router is ACTUALLY serving, against what we publish.
+    // `--fit` resolves at load time, so an unchanged fingerprint is no
+    // evidence the measurement still holds (2026-09-20: the same model
+    // at the same args_fp served 4,096 / 120,064 / 111,616 in one day).
+    if offered.is_some() {
+        lines.extend(
+            router::live_contexts(cfg.port)
+                .map(|live| system::context_shortfalls(&desired, &live))
+                .unwrap_or_default()
+                .iter()
+                .map(|s| format!("⚠ {}", s.message())),
+        );
+    }
     // Ghost cleanup (user decision 2026-08-26): only against a LIVE router.
     if let Some(offered) = &offered {
         let ghosts =

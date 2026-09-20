@@ -538,16 +538,37 @@ fn sync(
     if desired.is_empty() {
         anyhow::bail!("no successful measurements yet — run --calibrate first (measured, not guessed)");
     }
+    // ONE router read serves every present-tense question below. This
+    // used to be two `status` calls straddling the write, which is the
+    // duplication the GUI's copy already warns about: asking twice
+    // invites two different answers.
+    let ours: Option<Vec<String>> =
+        match router::status(&router::state_dir(), &system::router_config(cfg)) {
+            router::RouterState::Ours { models } => {
+                Some(models.into_iter().map(|m| m.id).collect())
+            }
+            _ => None,
+        };
+    // What the router is ACTUALLY serving, against what we are about to
+    // publish. `--fit` resolves at load time, so an unchanged
+    // fingerprint is no evidence the measurement still holds. A router
+    // that is down or not ours answers nothing, and silence is correct
+    // there — we cannot see a contradiction, so we must not invent one.
+    if ours.is_some() {
+        for short in router::live_contexts(cfg.port)
+            .map(|live| system::context_shortfalls(&desired, &live))
+            .unwrap_or_default()
+        {
+            println!("  ⚠ {}", short.message());
+        }
+    }
     let path = opencode::default_config_path();
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let report = opencode::sync_file(&path, &base_url, &desired)?;
     // Ghost cleanup (user decision 2026-08-26): only against a LIVE router.
-    if let router::RouterState::Ours { models } =
-        router::status(&router::state_dir(), &system::router_config(cfg))
-    {
-        let offered: Vec<String> = models.into_iter().map(|m| m.id).collect();
+    if let Some(offered) = &ours {
         for id in
-            opencode::comment_out_ghosts(&path, &report.orphans, &offered, &measurements)?
+            opencode::comment_out_ghosts(&path, &report.orphans, offered, &measurements)?
         {
             println!("  ✂ {id}: commented out (router omits it, nothing measured — a ghost)");
         }
@@ -590,14 +611,7 @@ fn sync(
     // drifted in wording.
     // The router's own list is the present-tense half of the fleet;
     // without it we do not know what exists and remove nothing.
-    let offered: Option<Vec<String>> =
-        match router::status(&router::state_dir(), &system::router_config(cfg)) {
-            router::RouterState::Ours { models } => {
-                Some(models.into_iter().map(|m| m.id).collect())
-            }
-            _ => None,
-        };
-    let known = system::fleet_known_ids(cfg, models, offered.as_deref());
+    let known = system::fleet_known_ids(cfg, models, ours.as_deref());
     for line in connector::sync_all(
         &connector::secondary(),
         &connector::SyncContext { base_url: &base_url, desired: &desired, known: known.as_ref() },

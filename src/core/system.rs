@@ -485,6 +485,63 @@ pub struct Unofferable {
     pub error: Option<String>,
 }
 
+/// A model the router is serving with a SMALLER window than the one we
+/// are publishing to agents.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ContextShortfall {
+    pub id: String,
+    /// What `/v1/models` says this load actually got.
+    pub serving: u64,
+    /// What the agents are being told, haircut included.
+    pub published: u64,
+}
+
+impl ContextShortfall {
+    pub fn message(&self) -> String {
+        format!(
+            "{}: the router is serving {} tokens but agents are being told {} — \
+             this load fit against a busy GPU. Unload and reload it, then \
+             re-measure",
+            self.id, self.serving, self.published
+        )
+    }
+}
+
+/// Models whose live window is smaller than what we publish.
+///
+/// `args_fp`/`env_fp` fingerprint the ARGUMENTS, and `--fit` is not an
+/// argument — it resolves at load time against whatever VRAM is free
+/// then. So an unchanged fingerprint is no evidence at all that the
+/// running server still honours the measurement. On 2026-09-20 the same
+/// model, at the same `args_fp`, was observed serving 4,096 / 120,064 /
+/// 111,616 in one day; the 4,096 load sat resident for sixteen hours
+/// while every agent config advertised ~110,000, and the only component
+/// that noticed was Hermes, which probed and refused it.
+///
+/// `safety_context`'s 5% haircut already absorbs the few-percent drift
+/// it was designed for, so anything that still trips this is a load
+/// that went badly wrong rather than normal variance.
+///
+/// Only RESIDENT models can be judged — an unloaded model has no window
+/// yet, and inventing one would be the same sin in the other direction.
+pub fn context_shortfalls(
+    desired: &[crate::core::opencode::DesiredModel],
+    live: &[(String, u64)],
+) -> Vec<ContextShortfall> {
+    desired
+        .iter()
+        .filter_map(|d| {
+            let serving = live.iter().find(|(id, _)| *id == d.id).map(|(_, n)| *n)?;
+            let published = crate::core::opencode::safety_context(d.context);
+            (serving < published).then(|| ContextShortfall {
+                id: d.id.clone(),
+                serving,
+                published,
+            })
+        })
+        .collect()
+}
+
 impl Unofferable {
     /// The line both the CLI and the GUI print. Shared deliberately:
     /// the ghost-cleanup wording above drifted precisely because the
@@ -965,6 +1022,74 @@ mod tests_desired {
         // An empty string is not a reason.
         let blank = Unofferable { id: "q".into(), error: Some("  ".into()) };
         assert!(blank.message().contains("re-measure"), "{}", blank.message());
+    }
+
+    fn want(id: &str, ctx: u64) -> crate::core::opencode::DesiredModel {
+        crate::core::opencode::DesiredModel {
+            id: id.to_string(),
+            display_name: format!("{id} (llama.cpp)"),
+            context: ctx,
+            tool_call: Some(true),
+            vision: false,
+        }
+    }
+
+    /// Live incident 2026-09-20. The Q4 measured 115,712 and every
+    /// agent was told safety_context(115,712) = 109,824. Meanwhile the
+    /// resident child had loaded against a busy GPU, `--fit` had fallen
+    /// to its 4,096 floor, and it stayed that way for sixteen hours.
+    /// The fingerprints were IDENTICAL either way, because `--fit` is
+    /// resolved at load time and is not an argument.
+    #[test]
+    fn a_model_serving_less_than_we_publish_is_reported() {
+        let desired = vec![want("qwen3.8-27b-ud-q4_k_xl", 115_712)];
+        let live = vec![("qwen3.8-27b-ud-q4_k_xl".to_string(), 4_096)];
+
+        let got = context_shortfalls(&desired, &live);
+
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].serving, 4_096);
+        assert_eq!(
+            got[0].published,
+            crate::core::opencode::safety_context(115_712),
+            "compare against what is PUBLISHED, not the raw measurement"
+        );
+        assert_eq!(got[0].published, 109_824, "the number actually written");
+        let m = got[0].message();
+        assert!(m.contains("4096") && m.contains("109824"), "{m}");
+        assert!(m.contains("reload"), "name the remedy: {m}");
+    }
+
+    /// The healthy reading from the same machine an hour later: a fresh
+    /// load settled at 111,616, which is ABOVE the 109,824 we publish.
+    /// The haircut exists for exactly this drift and must not warn.
+    #[test]
+    fn normal_fit_variance_is_not_a_shortfall() {
+        let desired = vec![want("qwen3.8-27b-ud-q4_k_xl", 115_712)];
+        for serving in [111_616, 120_064, 109_824] {
+            let live = vec![("qwen3.8-27b-ud-q4_k_xl".to_string(), serving)];
+            assert!(
+                context_shortfalls(&desired, &live).is_empty(),
+                "serving {serving} >= published 109824 is healthy"
+            );
+        }
+    }
+
+    /// An unloaded model has no window yet. Judging it would mean
+    /// inventing a number, which is the sin this guard exists to catch.
+    #[test]
+    fn a_model_that_is_not_resident_is_not_judged() {
+        let desired = vec![want("a", 115_712), want("b", 115_712)];
+        let live = vec![("a".to_string(), 111_616)];
+        assert!(context_shortfalls(&desired, &live).is_empty());
+    }
+
+    /// A resident model we are NOT publishing is none of this check's
+    /// business — there is no claim to contradict.
+    #[test]
+    fn a_resident_model_we_do_not_publish_is_ignored() {
+        let live = vec![("stranger".to_string(), 4_096)];
+        assert!(context_shortfalls(&[], &live).is_empty());
     }
 }
 

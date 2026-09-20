@@ -441,6 +441,48 @@ fn fetch_models(port: u16) -> Result<Vec<RouterModel>> {
     Ok(parse_models_response(&body))
 }
 
+/// The context each RESIDENT model is actually being served with, from
+/// `/v1/models`.
+///
+/// `meta` is present only while a model is loaded (an unloaded entry
+/// omits the key entirely), and its `n_ctx` is the window `--fit`
+/// settled on for THIS load. That is the number the agent will really
+/// get, and it is not derivable from the measurement: `--fit` resolves
+/// against free VRAM at load time, so the same model with the same
+/// args legitimately lands anywhere. Observed on one machine in one
+/// day: 4,096 / 120,064 / 111,616 (2026-09-20).
+///
+/// Pure over the payload; [`live_contexts`] does the I/O.
+pub fn parse_live_contexts(body: &serde_json::Value) -> Vec<(String, u64)> {
+    let Some(models) = body.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    models
+        .iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?;
+            // Absent `meta` = not resident. A zero or negative window is
+            // a bug in the report, not a window we should act on.
+            let n = m.get("meta")?.get("n_ctx")?.as_u64()?;
+            (n > 0).then(|| (id.to_string(), n))
+        })
+        .collect()
+}
+
+/// [`parse_live_contexts`] against a running router. `/v1/models` is a
+/// plain listing — deliberately NOT `/props?model=`, which the router
+/// answers for unloaded models too and which risks provoking a load
+/// under `--models-max`.
+pub fn live_contexts(port: u16) -> Result<Vec<(String, u64)>> {
+    let body: serde_json::Value = ureq::get(&format!("http://127.0.0.1:{port}/v1/models"))
+        .timeout(std::time::Duration::from_secs(5))
+        .call()
+        .context("router /v1/models not answering")?
+        .into_json()
+        .context("router /v1/models returned non-JSON")?;
+    Ok(parse_live_contexts(&body))
+}
+
 /// What is true about our configured port right now. "Ours" = the marker we
 /// wrote at spawn is live, OR some process (e.g. a systemd user unit) is
 /// running llama-server with our preset file.
@@ -2474,5 +2516,62 @@ mod tests {
             "vim /home/u/.config/app/router.ini",
             preset
         ));
+    }
+
+    /// Captured verbatim from the dev router on 2026-09-20 (trimmed to
+    /// the keys this reads). A resident entry carries `meta.n_ctx`; an
+    /// unloaded one OMITS the key — not `meta: null` — so the parser
+    /// must not rely on an explicit null.
+    const LIVE_MODELS_JSON: &str = r#"{
+      "object": "list",
+      "data": [
+        {
+          "id": "qwen3.8-27b-ud-q4_k_xl",
+          "object": "model",
+          "source": "preset",
+          "status": { "value": "loaded" },
+          "meta": {
+            "vocab_type": true, "n_vocab": 248320, "n_ctx": 111616,
+            "n_ctx_train": 262144, "n_embd": 5120, "n_params": 27320697856,
+            "size": 17912397824, "ftype": "Q4_K - Small"
+          }
+        },
+        {
+          "id": "glm-4.5-air-ud-q3_k_xl",
+          "object": "model",
+          "source": "preset",
+          "status": { "value": "unloaded" }
+        }
+      ]
+    }"#;
+
+    #[test]
+    fn only_resident_models_report_a_live_context() {
+        let body: serde_json::Value = serde_json::from_str(LIVE_MODELS_JSON).unwrap();
+        assert_eq!(
+            parse_live_contexts(&body),
+            vec![("qwen3.8-27b-ud-q4_k_xl".to_string(), 111_616)],
+            "an unloaded model has no served context to report"
+        );
+    }
+
+    /// A zero or negative window is a bug, not a measurement, and
+    /// publishing a shortfall against it would be noise.
+    #[test]
+    fn a_nonsense_live_context_is_ignored() {
+        let body: serde_json::Value = serde_json::from_str(
+            r#"{"data":[{"id":"a","meta":{"n_ctx":0}},{"id":"b","meta":{}},
+                {"id":"c","meta":{"n_ctx":-1}},{"id":"d"}]}"#,
+        )
+        .unwrap();
+        assert!(parse_live_contexts(&body).is_empty());
+    }
+
+    /// A payload we cannot read must not be mistaken for "nothing is
+    /// loaded" by a caller that would then stay silent either way.
+    #[test]
+    fn an_unexpected_payload_yields_nothing_rather_than_guessing() {
+        let body: serde_json::Value = serde_json::from_str(r#"{"error":"nope"}"#).unwrap();
+        assert!(parse_live_contexts(&body).is_empty());
     }
 }
