@@ -88,6 +88,9 @@ pub struct HermesSyncReport {
     /// the cache entries have nothing to attach to until one is
     /// registered. Not an error — the GUI offers the button.
     pub provider_unregistered: bool,
+    /// Models Hermes is configured to RUN on our router that the cache
+    /// cannot serve — the check that "N contexts written" never made.
+    pub unservable: Vec<DefaultGap>,
 }
 
 /// Parse `custom_providers` and return the NAME of the first entry
@@ -104,6 +107,114 @@ pub fn registered_provider(config_text: &str, base_url: &str) -> Option<String> 
                 .is_some_and(|b| b.trim_end_matches('/').to_lowercase() == want)
         })
         .and_then(|p| p.get("name")?.as_str().map(str::to_string))
+}
+
+/// A model Hermes is CONFIGURED TO RUN through our router, paired with
+/// what the context cache actually holds for it.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DefaultGap {
+    /// The model id Hermes will try to start.
+    pub model: String,
+    /// What the cache holds for it at our base URL, if anything.
+    pub cached: Option<u64>,
+    /// Where the setting lives, so the message can name the fix.
+    pub site: GapSite,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum GapSite {
+    /// Top-level `model.default`.
+    Default,
+    /// The `model:` of a `custom_providers` entry, named.
+    Provider(String),
+}
+
+impl DefaultGap {
+    /// The sentence a user can act on.
+    pub fn message(&self) -> String {
+        let where_ = match &self.site {
+            GapSite::Default => "Hermes's default model is".to_string(),
+            GapSite::Provider(n) => format!("Hermes provider {n:?} is set to run"),
+        };
+        match self.cached {
+            None => format!(
+                "{where_} {:?}, and no context is cached for it on this \
+                 router — Hermes will fall back to a ~4k default and refuse it. \
+                 Measure that model, then sync again",
+                self.model
+            ),
+            Some(c) => format!(
+                "{where_} {:?}, cached at {c} tokens — under Hermes's \
+                 {MINIMUM_CONTEXT} minimum, so it will refuse to start",
+                self.model
+            ),
+        }
+    }
+}
+
+/// Audit: which models does Hermes intend to run through OUR base URL,
+/// and does the cache actually carry a usable context for each?
+///
+/// A sync writes what is DESIRED; it has no opinion about what is
+/// missing. So a model that measured `n_ctx: null` for one run drops
+/// out of `desired`, never gets written, and — because the cache is
+/// append-only — the hole persists across every later sync while each
+/// one reports success. That is exactly how Hermes came to refuse
+/// `qwen3.8-27b-ud-q4_k_xl` with "context window of 4,096 tokens"
+/// after a port change: the 8181 block was born without it and no
+/// sync ever noticed (2026-09-20).
+///
+/// Pure over its inputs.
+pub fn default_model_gaps(
+    config_text: &str,
+    cached: &[(String, u64)],
+    base_url: &str,
+) -> Vec<DefaultGap> {
+    let Ok(doc) = serde_yaml::from_str::<serde_yaml::Value>(config_text) else {
+        // An unparseable config is the register path's problem, not
+        // ours; staying quiet beats guessing at its contents.
+        return Vec::new();
+    };
+    let ours = |v: Option<&serde_yaml::Value>| {
+        v.and_then(|b| b.as_str())
+            .is_some_and(|b| b.trim_end_matches('/').eq_ignore_ascii_case(base_url.trim_end_matches('/')))
+    };
+
+    // Every place Hermes records "run THIS model, THERE".
+    let mut intents: Vec<(String, GapSite)> = Vec::new();
+    if let Some(m) = doc.get("model")
+        && ours(m.get("base_url"))
+        && let Some(id) = m.get("default").and_then(|d| d.as_str())
+    {
+        intents.push((id.to_string(), GapSite::Default));
+    }
+    if let Some(ps) = doc.get("custom_providers").and_then(|p| p.as_sequence()) {
+        for p in ps {
+            if !ours(p.get("base_url")) {
+                continue;
+            }
+            let Some(id) = p.get("model").and_then(|m| m.as_str()) else {
+                continue;
+            };
+            let name = p
+                .get("name")
+                .and_then(|n| n.as_str())
+                .unwrap_or(PROVIDER_NAME);
+            intents.push((id.to_string(), GapSite::Provider(name.to_string())));
+        }
+    }
+
+    intents
+        .into_iter()
+        .filter_map(|(model, site)| {
+            let hit = cached.iter().find(|(id, _)| *id == model).map(|(_, c)| *c);
+            // Cached and adequate is the healthy case — say nothing.
+            match hit {
+                Some(c) if c >= MINIMUM_CONTEXT => None,
+                cached => Some(DefaultGap { model, cached, site }),
+            }
+        })
+        .collect()
 }
 
 /// Write measured contexts into the cache. Only our own keys are
@@ -178,6 +289,14 @@ pub fn sync(home: &Path, base_url: &str, desired: &[DesiredModel]) -> Result<Her
     let cfg = std::fs::read_to_string(config_path(home)).unwrap_or_default();
     report.provider_unregistered = registered_provider(&cfg, base_url).is_none();
     report.written = sync_context_cache(&context_cache_path(home), base_url, desired)?;
+    // AFTER the write, deliberately: the audit must judge the cache we
+    // just left behind, not the one we found — otherwise the very sync
+    // that repairs a hole still reports it.
+    report.unservable = default_model_gaps(
+        &cfg,
+        &cached_for(&context_cache_path(home), base_url),
+        base_url,
+    );
     Ok(report)
 }
 
@@ -525,5 +644,167 @@ mod tests {
         let r = sync(&home, "http://127.0.0.1:8080/v1", &[d("a", 131_072)]).unwrap();
         assert!(r.provider_unregistered);
         assert_eq!(r.written, vec!["a".to_string()]);
+    }
+
+    /// Live incident 2026-09-20. Hermes refused the user's default
+    /// model with "context window of 4,096 tokens, below the minimum
+    /// 64,000". Cause: `~/.hermes/context_length_cache.yaml` held 16
+    /// entries for port 8181 and NOT the one model Hermes was
+    /// configured to run. The 8181 block was a copy of the 8080 block
+    /// minus exactly that model — it had measured `n_ctx: null` on the
+    /// one sync that followed the port change, so `desired_from`
+    /// dropped it, and the append-only cache kept the hole while every
+    /// later sync reported success.
+    ///
+    /// Config text below is the real file's shape, including the
+    /// duplicate `modelsteward` provider left by the port change.
+    #[test]
+    fn a_default_model_with_no_cached_context_is_reported() {
+        let cfg = "\
+model:
+  default: qwen3.8-27b-ud-q4_k_xl
+  provider: custom
+  base_url: http://127.0.0.1:8181/v1
+  api_key: ollama
+custom_providers:
+  - name: Local (127.0.0.1:11434)
+    base_url: http://127.0.0.1:11434/v1
+    model: ornith:35b
+  - name: modelsteward
+    base_url: http://127.0.0.1:8080/v1
+    model: glm-4.5-air-ud-q3_k_xl
+  - name: modelsteward
+    base_url: http://127.0.0.1:8181/v1
+    model: qwen3.8-27b-ud-q4_k_xl
+";
+        // What the cache actually held at 8181 that day: everything
+        // except the model Hermes was about to start.
+        let cached = vec![
+            ("glm-4.5-air-ud-q3_k_xl".to_string(), 124_416),
+            ("gpt-oss-20b-f16".to_string(), 124_416),
+            ("qwen3.8-27b-ud-q5_k_xl".to_string(), 67_840),
+        ];
+        let gaps = default_model_gaps(cfg, &cached, "http://127.0.0.1:8181/v1");
+
+        assert_eq!(gaps.len(), 2, "default + our provider at 8181: {gaps:?}");
+        assert!(
+            gaps.iter().all(|g| g.model == "qwen3.8-27b-ud-q4_k_xl"),
+            "{gaps:?}"
+        );
+        assert!(
+            gaps.iter().all(|g| g.cached.is_none()),
+            "nothing was cached for it: {gaps:?}"
+        );
+        assert!(
+            gaps.iter().any(|g| g.site == GapSite::Default),
+            "the top-level default is the one that bit: {gaps:?}"
+        );
+        assert!(
+            gaps.iter()
+                .any(|g| g.site == GapSite::Provider("modelsteward".into())),
+            "{gaps:?}"
+        );
+        assert!(gaps[0].message().contains("4k default"), "{}", gaps[0].message());
+    }
+
+    /// The other half of the same audit: a model Hermes WILL start but
+    /// whose cached value is under its own 64,000 floor. Same user
+    /// symptom, different cause, so it must not be silent either.
+    #[test]
+    fn a_default_model_cached_below_the_minimum_is_reported() {
+        let cfg = "\
+model:
+  default: qwen3.8-27b-ud-q5_k_xl
+  base_url: http://127.0.0.1:8181/v1
+";
+        let cached = vec![("qwen3.8-27b-ud-q5_k_xl".to_string(), 40_000)];
+        let gaps = default_model_gaps(cfg, &cached, "http://127.0.0.1:8181/v1");
+        assert_eq!(gaps.len(), 1, "{gaps:?}");
+        assert_eq!(gaps[0].cached, Some(40_000));
+        assert!(gaps[0].message().contains("64000"), "{}", gaps[0].message());
+    }
+
+    /// Models pointed at SOMEONE ELSE's endpoint are not ours to
+    /// audit — we know nothing about what Ollama has cached, and a
+    /// false alarm about a provider we don't serve is noise.
+    #[test]
+    fn models_on_another_base_url_are_not_our_business() {
+        let cfg = "\
+model:
+  default: ornith:35b
+  base_url: http://127.0.0.1:11434/v1
+custom_providers:
+  - name: Local (127.0.0.1:11434)
+    base_url: http://127.0.0.1:11434/v1
+    model: ornith:35b
+";
+        let gaps = default_model_gaps(cfg, &[], "http://127.0.0.1:8181/v1");
+        assert!(gaps.is_empty(), "{gaps:?}");
+    }
+
+    /// A cache that already carries the model is the healthy case and
+    /// must stay quiet, or the warning trains the user to ignore it.
+    #[test]
+    fn a_cached_default_above_the_minimum_is_silent() {
+        let cfg = "\
+model:
+  default: qwen3.8-27b-ud-q4_k_xl
+  base_url: http://127.0.0.1:8181/v1
+";
+        // The value one --sync actually wrote to repair the incident.
+        let cached = vec![("qwen3.8-27b-ud-q4_k_xl".to_string(), 109_824)];
+        let gaps = default_model_gaps(cfg, &cached, "http://127.0.0.1:8181/v1");
+        assert!(gaps.is_empty(), "{gaps:?}");
+    }
+
+    /// The audit is worthless unless the SYNC runs it. Without this,
+    /// `default_model_gaps` is a pure function nobody calls and the
+    /// 2026-09-20 incident repeats with the report still saying
+    /// "1 context(s) written".
+    #[test]
+    fn sync_reports_a_default_model_it_could_not_serve() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.yaml"),
+            "model:\n  default: qwen3.8-27b-ud-q4_k_xl\n  \
+             base_url: http://127.0.0.1:8181/v1\ncustom_providers:\n  \
+             - name: modelsteward\n    base_url: http://127.0.0.1:8181/v1\n",
+        )
+        .unwrap();
+        // The model Hermes wants is NOT in desired — exactly the state
+        // an `n_ctx: null` measurement leaves behind.
+        let r = sync(
+            home,
+            "http://127.0.0.1:8181/v1",
+            &[d("glm-4.5-air-ud-q3_k_xl", 131_072)],
+        )
+        .unwrap();
+        assert_eq!(r.written, vec!["glm-4.5-air-ud-q3_k_xl".to_string()]);
+        assert_eq!(r.unservable.len(), 1, "{:?}", r.unservable);
+        assert_eq!(r.unservable[0].model, "qwen3.8-27b-ud-q4_k_xl");
+        assert_eq!(r.unservable[0].cached, None);
+    }
+
+    /// And it must read the cache AFTER writing it, or the sync that
+    /// repairs the hole still shouts about it.
+    #[test]
+    fn a_sync_that_fills_the_hole_does_not_then_complain_about_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.yaml"),
+            "model:\n  default: qwen3.8-27b-ud-q4_k_xl\n  \
+             base_url: http://127.0.0.1:8181/v1\n",
+        )
+        .unwrap();
+        let r = sync(
+            home,
+            "http://127.0.0.1:8181/v1",
+            &[d("qwen3.8-27b-ud-q4_k_xl", 115_712)],
+        )
+        .unwrap();
+        assert!(!r.written.is_empty());
+        assert!(r.unservable.is_empty(), "{:?}", r.unservable);
     }
 }

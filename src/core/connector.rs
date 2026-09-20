@@ -166,6 +166,12 @@ impl Connector for HermesConnector {
             return Ok(Outcome::absent(self.id()));
         }
         let mut notes = Vec::new();
+        // First, because it is the only note that describes a model
+        // the user is about to watch FAIL. "N contexts written" said
+        // nothing while Hermes refused the default (2026-09-20).
+        for gap in &r.unservable {
+            notes.push(gap.message());
+        }
         if !r.below_minimum.is_empty() {
             notes.push(format!(
                 "{} model(s) skipped — under Hermes's 64,000-token minimum: {}",
@@ -439,5 +445,45 @@ mod tests {
                 c.id()
             );
         }
+    }
+
+
+    /// Live incident 2026-09-20: Hermes refused the user's default
+    /// model ("context window of 4,096 tokens") while our sync said
+    /// "1 context(s) written" and nothing else. The summary was true
+    /// and useless. The gap must reach the user's eyes, which means
+    /// reaching the Outcome the CLI and GUI both render.
+    #[test]
+    fn hermes_says_out_loud_when_it_cannot_serve_the_default_model() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("config.yaml"),
+            "model:\n  default: qwen3.8-27b-ud-q4_k_xl\n  \
+             base_url: http://127.0.0.1:8181/v1\n",
+        )
+        .unwrap();
+        let c = HermesConnector::at(dir.path().to_path_buf());
+        let out = c
+            .sync(&SyncContext {
+                base_url: "http://127.0.0.1:8181/v1",
+                desired: &[crate::core::opencode::DesiredModel {
+                    id: "glm-4.5-air-ud-q3_k_xl".into(),
+                    display_name: "glm (llama.cpp)".into(),
+                    context: 131_072,
+                    tool_call: Some(true),
+                    vision: false,
+                }],
+                known: None,
+            })
+            .unwrap();
+        let joined = out.notes.join(" | ");
+        assert!(
+            joined.contains("qwen3.8-27b-ud-q4_k_xl"),
+            "the model Hermes will refuse must be NAMED: {joined:?}"
+        );
+        assert!(
+            joined.contains("4k default"),
+            "and the reason given: {joined:?}"
+        );
     }
 }

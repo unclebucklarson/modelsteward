@@ -3929,6 +3929,12 @@ impl App {
         }
         ui.add_space(4.0);
         let cached = hermes::cached_for(&hermes::context_cache_path(&home), &base_url);
+        // The model Hermes will actually TRY to start, checked against
+        // what we wrote. A hole here is invisible until Hermes refuses
+        // the model at startup with a 4,096-token error (2026-09-20).
+        for gap in hermes::default_model_gaps(&cfg_text, &cached, &base_url) {
+            ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", gap.message()));
+        }
         if cached.is_empty() {
             ui.small("No measured contexts written yet — press Sync all measured above.");
         } else {
