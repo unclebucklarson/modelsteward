@@ -293,8 +293,8 @@ mod tests_partial_energy {
     }
 }
 
+#[cfg(test)]
 mod tests {
-    #[allow(unused_imports)]
     use super::*;
 
     #[test]
