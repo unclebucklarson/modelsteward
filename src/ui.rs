@@ -3877,6 +3877,9 @@ impl App {
              skipped rather than offered and broken.",
         );
         ui.add_space(4.0);
+        // Entries of OURS, wherever they point. More than one means a
+        // port change made before registration learned to repoint.
+        let stale = hermes::our_provider_base_urls(&cfg_text);
         match &registered {
             Some(name) => {
                 ui.colored_label(
@@ -3885,9 +3888,6 @@ impl App {
                 );
             }
             None => {
-                // Ours, but pointing somewhere else: a port change. The
-                // button repoints rather than appending a duplicate.
-                let stale = hermes::our_provider_base_urls(&cfg_text);
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
                     if stale.is_empty() {
@@ -3956,6 +3956,40 @@ impl App {
                     }
                 }
             }
+        }
+        // Leftovers: our entries on some other endpoint. Commented
+        // out rather than deleted, the same choice opencode.json makes
+        // — the user can undo it in an editor, and registration is
+        // blocked until only one of ours remains.
+        for url in stale.iter().filter(|u| {
+            u.trim_end_matches('/').to_lowercase() != base_url.trim_end_matches('/').to_lowercase()
+        }) {
+            ui.horizontal(|ui| {
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    format!(
+                        "⚠ a second \"{}\" provider still points at {url}",
+                        hermes::PROVIDER_NAME
+                    ),
+                );
+                if ui
+                    .small_button("Comment out")
+                    .on_hover_text(
+                        "Prefixes that entry's lines with # in Hermes's config.yaml. \
+                         Commented, not deleted — undo it in an editor. The file is \
+                         backed up first and nothing else is touched.",
+                    )
+                    .clicked()
+                {
+                    match hermes::comment_out_provider(&home, url) {
+                        Ok(()) => self.log(format!(
+                            "commented out the stale Hermes provider at {url} — \
+                             restart Hermes to pick it up"
+                        )),
+                        Err(e) => self.log(format!("ERROR editing Hermes config: {e:#}")),
+                    }
+                }
+            });
         }
         ui.add_space(4.0);
         let cached = hermes::cached_for(&hermes::context_cache_path(&home), &base_url);

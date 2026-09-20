@@ -585,6 +585,65 @@ pub fn repoint_provider_text(config_text: &str, new_base_url: &str) -> Option<St
     Some(text)
 }
 
+/// Comment out one of OUR provider entries, by base URL. Returns the
+/// new file text; pure, the caller writes.
+///
+/// Comment-out rather than delete, the same choice opencode.json makes:
+/// the user can undo it with an editor and their API key is still
+/// there to read. Only an entry we named is eligible, and never the
+/// last item in the sequence — an empty `custom_providers:` parses as
+/// null and is a different thing from a list with nothing in it.
+pub fn comment_out_provider_text(config_text: &str, base_url: &str) -> Option<String> {
+    let lines: Vec<&str> = config_text.lines().collect();
+    let items = provider_items(&lines);
+    let want = base_url.trim_end_matches('/').to_lowercase();
+    let live = |it: &std::ops::Range<usize>| {
+        !lines[it.clone()].iter().all(|l| l.trim_start().starts_with('#'))
+    };
+    if items.iter().filter(|it| live(it)).count() < 2 {
+        return None;
+    }
+    let target = items.into_iter().find(|it| {
+        item_name(&lines, it).as_deref() == Some(PROVIDER_NAME)
+            && lines[it.clone()].iter().any(|l| {
+                let t = l.trim().trim_start_matches("- ").trim();
+                t.strip_prefix("base_url:")
+                    .is_some_and(|b| b.trim().trim_end_matches('/').to_lowercase() == want)
+            })
+    })?;
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    for i in target {
+        if out[i].trim().is_empty() {
+            continue;
+        }
+        let lead = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+        out[i] = format!("{lead}# {}", lines[i].trim_start());
+    }
+    let mut text = out.join("\n");
+    if config_text.ends_with('\n') {
+        text.push('\n');
+    }
+    Some(text)
+}
+
+/// [`comment_out_provider_text`] with a backup.
+pub fn comment_out_provider(home: &Path, base_url: &str) -> Result<()> {
+    let path = config_path(home);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let new = comment_out_provider_text(&text, base_url).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no {PROVIDER_NAME:?} provider at {base_url} that can be commented out \
+             here (or it is the only entry left). Edit {} by hand. Nothing was \
+             changed.",
+            path.display()
+        )
+    })?;
+    crate::core::safefs::backup_rotated(&path, "modelsteward")?;
+    crate::core::safefs::write_atomic(&path, &new)?;
+    Ok(())
+}
+
 /// Register with a backup. Refuses when an entry already points at
 /// this base URL — appending a second one would be ambiguous.
 pub fn register_provider(home: &Path, base_url: &str, default_model: &str) -> Result<()> {
@@ -1327,5 +1386,81 @@ context_lengths:
             std::fs::read_to_string(context_cache_path(home)).unwrap().contains("8080"),
             "a sync must never prune on its own"
         );
+    }
+
+    /// The residue on the dev machine, 2026-09-20: two providers both
+    /// named ours, one on a port that no longer serves. Commenting the
+    /// stale one out must leave a file Hermes can still read, with the
+    /// live entry and the user's own provider untouched.
+    #[test]
+    fn a_stale_provider_of_ours_can_be_commented_out() {
+        let cfg = "custom_providers:\n  \
+             - name: Local (127.0.0.1:11434)\n    \
+             base_url: http://127.0.0.1:11434/v1\n    \
+             api_key: ollama\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8080/v1\n    \
+             api_key: modelsteward\n    \
+             model: glm-4.5-air-ud-q3_k_xl\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8181/v1\n    \
+             api_key: modelsteward\n    \
+             model: qwen3.8-27b-ud-q4_k_xl\n";
+
+        let out = comment_out_provider_text(cfg, "http://127.0.0.1:8080/v1").unwrap();
+
+        let doc: serde_yaml::Value = serde_yaml::from_str(&out).expect("still valid YAML");
+        let ps = doc.get("custom_providers").unwrap().as_sequence().unwrap();
+        assert_eq!(ps.len(), 2, "the stale entry is gone from the parse:\n{out}");
+        assert_eq!(our_provider_base_urls(&out), vec!["http://127.0.0.1:8181/v1"]);
+        assert!(
+            out.contains("# - name: modelsteward") && out.contains("# api_key: modelsteward"),
+            "commented, not deleted — recoverable in an editor:\n{out}"
+        );
+        assert!(out.contains("- name: Local (127.0.0.1:11434)"), "{out}");
+    }
+
+    /// After that, registration works again — which is the whole point
+    /// of offering it.
+    #[test]
+    fn commenting_out_the_duplicate_unblocks_registration() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "custom_providers:\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8080/v1\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8181/v1\n",
+        )
+        .unwrap();
+        assert!(register_provider(dir.path(), "http://127.0.0.1:8182/v1", "q").is_err());
+        comment_out_provider(dir.path(), "http://127.0.0.1:8080/v1").unwrap();
+        register_provider(dir.path(), "http://127.0.0.1:8182/v1", "q").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(our_provider_base_urls(&text), vec!["http://127.0.0.1:8182/v1"]);
+    }
+
+    /// Never the last one standing: an empty `custom_providers:` is a
+    /// different thing from a list, and we would be handing the user a
+    /// config that parses to null.
+    #[test]
+    fn the_only_remaining_provider_is_never_commented_out() {
+        let cfg = "custom_providers:\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8080/v1\n";
+        assert!(comment_out_provider_text(cfg, "http://127.0.0.1:8080/v1").is_none());
+    }
+
+    /// And never someone else's entry, whatever port it is on.
+    #[test]
+    fn a_providers_we_did_not_name_is_never_commented_out() {
+        let cfg = "custom_providers:\n  \
+             - name: theirs\n    \
+             base_url: http://127.0.0.1:8080/v1\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8181/v1\n";
+        assert!(comment_out_provider_text(cfg, "http://127.0.0.1:8080/v1").is_none());
     }
 }
