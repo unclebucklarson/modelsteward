@@ -3885,10 +3885,23 @@ impl App {
                 );
             }
             None => {
+                // Ours, but pointing somewhere else: a port change. The
+                // button repoints rather than appending a duplicate.
+                let stale = hermes::our_provider_base_urls(&cfg_text);
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
-                    "No Hermes provider points at this router yet — the measured \
-                     contexts below have nothing to attach to until one exists.",
+                    if stale.is_empty() {
+                        "No Hermes provider points at this router yet — the measured \
+                         contexts below have nothing to attach to until one exists."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Hermes's \"{}\" provider still points at {} — this router \
+                             moved. Repoint it below; nothing else in the file changes.",
+                            hermes::PROVIDER_NAME,
+                            stale.join(", ")
+                        )
+                    },
                 );
                 let default_model = self
                     .measurements
@@ -3902,17 +3915,34 @@ impl App {
                     .next();
                 let can = self.busy.is_none() && default_model.is_some();
                 if ui
-                    .add_enabled(can, egui::Button::new("Register this router with Hermes"))
+                    .add_enabled(
+                        can,
+                        egui::Button::new(if stale.is_empty() {
+                            "Register this router with Hermes"
+                        } else {
+                            "Point Hermes's provider at this router"
+                        }),
+                    )
                     .on_disabled_hover_text(
                         "needs at least one measured model of 64,000+ tokens — \
                          measure one on the Library tab first",
                     )
-                    .on_hover_text(
+                    .on_hover_text(if stale.is_empty() {
                         "Appends one custom_providers entry to Hermes's config.yaml. \
                          The file is backed up first and every comment, quote, and \
                          ordering elsewhere is left exactly as it is. Restart Hermes \
-                         to pick it up.",
-                    )
+                         to pick it up."
+                            .to_string()
+                    } else {
+                        format!(
+                            "Rewrites the base_url of the existing \"{}\" entry ({}) \
+                             — one line, backed up first. A port change must MOVE our \
+                             entry, not add a second one beside it. Restart Hermes to \
+                             pick it up.",
+                            hermes::PROVIDER_NAME,
+                            stale.join(", ")
+                        )
+                    })
                     .clicked()
                     && let Some(model) = default_model
                 {

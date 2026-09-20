@@ -381,6 +381,102 @@ pub fn register_provider_text(
     Some(text)
 }
 
+/// Line ranges of the items in a block-style `custom_providers:`
+/// sequence. Line-based on purpose: this file carries comments and
+/// hand formatting that a YAML round-trip would destroy.
+fn provider_items(lines: &[&str]) -> Vec<std::ops::Range<usize>> {
+    let Some(key) = lines.iter().position(|l| l.trim_end() == "custom_providers:") else {
+        return Vec::new();
+    };
+    // The block ends at the next line at column 0 that isn't blank.
+    let end = lines
+        .iter()
+        .enumerate()
+        .skip(key + 1)
+        .find(|(_, l)| !l.trim().is_empty() && !l.starts_with([' ', '\t']))
+        .map_or(lines.len(), |(i, _)| i);
+    let indent = |l: &str| l.len() - l.trim_start().len();
+    let starts: Vec<usize> = (key + 1..end)
+        .filter(|&i| lines[i].trim_start().starts_with("- "))
+        .collect();
+    // Only top-level items of THIS sequence: the shallowest dash.
+    let Some(item_indent) = starts.iter().map(|&i| indent(lines[i])).min() else {
+        return Vec::new();
+    };
+    let tops: Vec<usize> = starts
+        .into_iter()
+        .filter(|&i| indent(lines[i]) == item_indent)
+        .collect();
+    tops.iter()
+        .enumerate()
+        .map(|(n, &start)| start..tops.get(n + 1).copied().unwrap_or(end))
+        .collect()
+}
+
+/// The `name:` an item declares, dash and quoting stripped.
+fn item_name(lines: &[&str], item: &std::ops::Range<usize>) -> Option<String> {
+    lines[item.clone()].iter().find_map(|l| {
+        let t = l.trim().trim_start_matches("- ").trim();
+        let v = t.strip_prefix("name:")?.trim();
+        Some(v.trim_matches(['"', '\'']).to_string())
+    })
+}
+
+/// Base URLs of every provider entry WE named. More than one means the
+/// file carries residue from the pre-fix duplicate bug.
+pub fn our_provider_base_urls(config_text: &str) -> Vec<String> {
+    let lines: Vec<&str> = config_text.lines().collect();
+    provider_items(&lines)
+        .into_iter()
+        .filter(|it| item_name(&lines, it).as_deref() == Some(PROVIDER_NAME))
+        .filter_map(|it| {
+            lines[it].iter().find_map(|l| {
+                let t = l.trim().trim_start_matches("- ").trim();
+                Some(t.strip_prefix("base_url:")?.trim().to_string())
+            })
+        })
+        .collect()
+}
+
+/// Point OUR existing provider entry at a new base URL by surgical
+/// line edit. Returns the new file text; pure, the caller writes.
+///
+/// Only an entry named [`PROVIDER_NAME`] is eligible — a provider the
+/// user named is theirs, and we may add beside it but never rewrite
+/// it. The entry's `model:` is deliberately left alone: changing the
+/// user's chosen model is a bigger edit than a port change justifies,
+/// and [`default_model_gaps`] now reports it if that model cannot be
+/// served here.
+pub fn repoint_provider_text(config_text: &str, new_base_url: &str) -> Option<String> {
+    let lines: Vec<&str> = config_text.lines().collect();
+    let item = provider_items(&lines)
+        .into_iter()
+        .find(|it| item_name(&lines, it).as_deref() == Some(PROVIDER_NAME))?;
+    let mut out: Vec<String> = lines.iter().map(|s| s.to_string()).collect();
+    let mut replaced = false;
+    for i in item.clone() {
+        let t = lines[i].trim().trim_start_matches("- ").trim();
+        if t.starts_with("base_url:") {
+            let lead = &lines[i][..lines[i].len() - lines[i].trim_start().len()];
+            let dash = if lines[i].trim_start().starts_with("- ") { "- " } else { "" };
+            out[i] = format!("{lead}{dash}base_url: {new_base_url}");
+            replaced = true;
+            break;
+        }
+    }
+    if !replaced {
+        // An entry of ours with no base_url at all: give it one,
+        // indented as a sibling key of the dash line.
+        let lead = &lines[item.start][..lines[item.start].len() - lines[item.start].trim_start().len()];
+        out.insert(item.start + 1, format!("{lead}  base_url: {new_base_url}"));
+    }
+    let mut text = out.join("\n");
+    if config_text.ends_with('\n') {
+        text.push('\n');
+    }
+    Some(text)
+}
+
 /// Register with a backup. Refuses when an entry already points at
 /// this base URL — appending a second one would be ambiguous.
 pub fn register_provider(home: &Path, base_url: &str, default_model: &str) -> Result<()> {
@@ -390,14 +486,38 @@ pub fn register_provider(home: &Path, base_url: &str, default_model: &str) -> Re
     if let Some(name) = registered_provider(&text, base_url) {
         anyhow::bail!("Hermes already has a provider for this router: {name:?}");
     }
-    let new = register_provider_text(&text, base_url, default_model).ok_or_else(|| {
-        anyhow::anyhow!(
-            "{} declares custom_providers in a form this editor can't extend \
-             safely (flow style?) — add the provider by hand, or reformat that \
-             key as a block list first. Nothing was changed.",
-            path.display()
-        )
-    })?;
+    // A port change must MOVE our entry, not grow a second one beside
+    // the stale one. The old code asked "is anything registered at
+    // this base_url?", which after a port change is always no — so it
+    // appended, and the user ended up with two providers both named
+    // "modelsteward", one on a dead port (logged 2026-09-08, hit
+    // 2026-09-20).
+    let ours = our_provider_base_urls(&text);
+    let new = match ours.len() {
+        0 => register_provider_text(&text, base_url, default_model).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} declares custom_providers in a form this editor can't extend \
+                 safely (flow style?) — add the provider by hand, or reformat that \
+                 key as a block list first. Nothing was changed.",
+                path.display()
+            )
+        })?,
+        1 => repoint_provider_text(&text, base_url).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} has a {PROVIDER_NAME:?} provider this editor can't rewrite \
+                 safely — repoint it by hand. Nothing was changed.",
+                path.display()
+            )
+        })?,
+        _ => anyhow::bail!(
+            "{} has {} providers named {PROVIDER_NAME:?} ({}) — residue from a \
+             port change made before this was fixed. Remove the stale one(s) by \
+             hand, then register again. Nothing was changed.",
+            path.display(),
+            ours.len(),
+            ours.join(", ")
+        ),
+    };
     crate::core::safefs::backup_rotated(&path, "modelsteward")?;
     crate::core::safefs::write_atomic(&path, &new)?;
     Ok(())
@@ -806,5 +926,99 @@ model:
         .unwrap();
         assert!(!r.written.is_empty());
         assert!(r.unservable.is_empty(), "{:?}", r.unservable);
+    }
+
+    /// Live incident 2026-09-20, and the defect logged 2026-09-08 that
+    /// caused it. `registered_provider` keys the "already registered?"
+    /// lookup on BASE_URL, so after a port change it matches nothing
+    /// and registration appends a SECOND entry beside the stale one.
+    /// The user's ~/.hermes/config.yaml ended up with two providers
+    /// both named "modelsteward", one pointing at a dead port.
+    #[test]
+    fn a_port_change_repoints_our_provider_instead_of_adding_a_second() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        std::fs::write(
+            &path,
+            "custom_providers:\n  \
+             # the user's own entry — not ours to touch\n  \
+             - name: Local (127.0.0.1:11434)\n    \
+             base_url: http://127.0.0.1:11434/v1\n    \
+             api_key: ollama\n    \
+             model: ornith:35b\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8080/v1\n    \
+             api_key: modelsteward\n    \
+             model: glm-4.5-air-ud-q3_k_xl\n",
+        )
+        .unwrap();
+
+        register_provider(dir.path(), "http://127.0.0.1:8181/v1", "qwen3.8-27b-ud-q4_k_xl")
+            .unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(
+            text.matches("name: modelsteward").count(),
+            1,
+            "exactly one entry of ours, repointed — not two:\n{text}"
+        );
+        assert!(text.contains("base_url: http://127.0.0.1:8181/v1"), "{text}");
+        assert!(!text.contains("8080"), "the dead port must be gone:\n{text}");
+        assert!(
+            text.contains("name: Local (127.0.0.1:11434)")
+                && text.contains("base_url: http://127.0.0.1:11434/v1"),
+            "the user's own provider is untouched:\n{text}"
+        );
+        assert!(text.contains("# the user's own entry"), "comments survive:\n{text}");
+    }
+
+    /// The ownership rule, same shape as "never touch a server we
+    /// didn't start": a provider the USER named is theirs. We may add
+    /// beside it, never rewrite it.
+    #[test]
+    fn a_provider_we_did_not_name_is_never_repointed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let before = "custom_providers:\n  \
+             - name: my-own-llama\n    \
+             base_url: http://127.0.0.1:8080/v1\n    \
+             model: whatever\n";
+        std::fs::write(&path, before).unwrap();
+
+        register_provider(dir.path(), "http://127.0.0.1:8181/v1", "q4").unwrap();
+
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.contains("- name: my-own-llama")
+                && text.contains("base_url: http://127.0.0.1:8080/v1"),
+            "their entry, their port, untouched:\n{text}"
+        );
+        assert!(text.contains("name: modelsteward"), "ours was added:\n{text}");
+    }
+
+    /// A file that already carries the old bug's residue. Two entries
+    /// named ours and we cannot know which the user wants; deleting a
+    /// block from an API-key-bearing file on a guess is worse than
+    /// stopping. Refuse, and name them.
+    #[test]
+    fn duplicates_from_the_old_bug_are_refused_not_compounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.yaml");
+        let before = "custom_providers:\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8080/v1\n  \
+             - name: modelsteward\n    \
+             base_url: http://127.0.0.1:8181/v1\n";
+        std::fs::write(&path, before).unwrap();
+
+        let e = register_provider(dir.path(), "http://127.0.0.1:8182/v1", "q4")
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("8080") && e.contains("8181"), "name them: {e}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "nothing changed"
+        );
     }
 }
