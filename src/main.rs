@@ -528,6 +528,13 @@ fn sync(
         }
     };
     let desired = system::desired_models(cfg, &measurements, models);
+    // Measured, wanted, and still unofferable. Saying nothing is how
+    // the 2026-09-20 Hermes failure survived days of successful syncs:
+    // the model left every agent config without a word, and the
+    // agents' own caches kept the hole.
+    for u in system::unofferable_models(cfg, &measurements, models) {
+        println!("  ⚠ {}", u.message());
+    }
     if desired.is_empty() {
         anyhow::bail!("no successful measurements yet — run --calibrate first (measured, not guessed)");
     }

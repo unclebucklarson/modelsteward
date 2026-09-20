@@ -471,6 +471,67 @@ pub fn desired_from(
         .collect()
 }
 
+/// A model we MEASURED and could not get a context for. It is excluded
+/// from `desired` — correctly, we have no honest number to write — but
+/// that exclusion is silent, and silence is how the 2026-09-20 Hermes
+/// failure lasted: the model dropped out of one sync, the agent's
+/// append-only cache kept the hole, and every later sync reported
+/// success. A model the user owns, has not disabled, and has watched us
+/// try to load is not the same as a model that was never asked about.
+#[derive(Debug, PartialEq, Eq)]
+pub struct Unofferable {
+    pub id: String,
+    /// Why the load failed, when the measurement recorded a reason.
+    pub error: Option<String>,
+}
+
+impl Unofferable {
+    /// The line both the CLI and the GUI print. Shared deliberately:
+    /// the ghost-cleanup wording above drifted precisely because the
+    /// two surfaces each wrote their own.
+    pub fn message(&self) -> String {
+        let why = self
+            .error
+            .as_deref()
+            .map(str::trim)
+            .filter(|e| !e.is_empty())
+            .and_then(|e| e.lines().next())
+            .unwrap_or("no context measured — re-measure it");
+        format!("{}: not offered to any agent — {why}", self.id)
+    }
+}
+
+/// Measured, wanted, and still not offerable to any agent. Pure over
+/// its inputs; same filters as [`desired_from`] so the two partition
+/// the same population.
+pub fn unofferable_from(
+    measurements: &router::Measurements,
+    embed: &std::collections::HashSet<String>,
+    disabled: &std::collections::HashSet<String>,
+) -> Vec<Unofferable> {
+    measurements
+        .iter()
+        .filter(|(id, _)| !embed.contains(id.as_str()))
+        // Turned off on purpose is not a failure.
+        .filter(|(id, _)| !disabled.contains(id.as_str()))
+        .filter(|(_, m)| m.n_ctx.is_none())
+        .map(|(id, m)| Unofferable { id: id.clone(), error: m.error.clone() })
+        .collect()
+}
+
+/// [`unofferable_from`] with the preset-derived sets read for you.
+pub fn unofferable_models(
+    cfg: &settings::AppConfig,
+    measurements: &router::Measurements,
+    models: &[crate::core::library::ModelFile],
+) -> Vec<Unofferable> {
+    unofferable_from(
+        measurements,
+        &router::embedding_ids_in_preset(&preset_path()),
+        &disabled_ids(cfg, models),
+    )
+}
+
 /// [`desired_from`] with the preset-derived sets read for you.
 pub fn desired_models(
     cfg: &settings::AppConfig,
@@ -824,6 +885,86 @@ mod tests_desired {
         assert!(got[0].vision, "the preset carries mmproj for this model");
         assert_eq!(got[0].tool_call, Some(true));
         assert_eq!(got[0].display_name, "seer (llama.cpp)");
+    }
+
+    /// Live incident 2026-09-20. `qwen3.8-27b-ud-q4_k_xl` measured
+    /// `n_ctx: null` (history.jsonl carries a `/models/load: status
+    /// code 400` among its attempts), so `desired_from` dropped it —
+    /// correctly, there was no honest number — and said nothing. The
+    /// Hermes cache is append-only, so the hole outlived the failure
+    /// and Hermes refused the user's default model days later.
+    #[test]
+    fn a_measured_model_with_no_context_is_named_not_silently_dropped() {
+        let mut m = measured(&[
+            ("keep-me", Some(65_536)),
+            ("qwen3.8-27b-ud-q4_k_xl", None),
+        ]);
+        m.get_mut("qwen3.8-27b-ud-q4_k_xl").unwrap().error = Some(
+            "loading qwen3.8-27b-ud-q4_k_xl: http://127.0.0.1:8080/models/load: \
+             status code 400"
+                .to_string(),
+        );
+
+        let got = unofferable_from(&m, &set(&[]), &set(&[]));
+
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].id, "qwen3.8-27b-ud-q4_k_xl");
+        assert!(
+            got[0].error.as_deref().unwrap_or_default().contains("status code 400"),
+            "the recorded reason travels with it: {got:?}"
+        );
+        // And it is exactly the complement of desired, not an overlap.
+        let want: Vec<String> = desired_from(&m, &set(&[]), &set(&[]), &set(&[]))
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(want, vec!["keep-me".to_string()]);
+    }
+
+    /// A model the user turned OFF is absent on purpose — reporting it
+    /// as a failure would train the user to ignore the message.
+    #[test]
+    fn a_disabled_model_is_not_reported_as_unofferable() {
+        let m = measured(&[("turned-off", None)]);
+        assert!(unofferable_from(&m, &set(&[]), &set(&["turned-off"])).is_empty());
+    }
+
+    /// Embedding models serve /v1/embeddings and never carried a chat
+    /// context — same reasoning as `desired_from`'s filter.
+    #[test]
+    fn an_embedding_model_is_not_reported_as_unofferable() {
+        let m = measured(&[("embedder", None)]);
+        assert!(unofferable_from(&m, &set(&["embedder"]), &set(&[])).is_empty());
+    }
+
+    /// The healthy fleet must be quiet.
+    #[test]
+    fn a_fully_measured_fleet_reports_nothing_unofferable() {
+        let m = measured(&[("a", Some(65_536)), ("b", Some(131_072))]);
+        assert!(unofferable_from(&m, &set(&[]), &set(&[])).is_empty());
+    }
+
+    /// Both surfaces print this, so its two branches are pinned here
+    /// rather than in either of them.
+    #[test]
+    fn the_unofferable_message_names_the_model_and_the_reason() {
+        let with = Unofferable {
+            id: "unsloth/DeepSeek-V4-Flash-0731-GGUF:BF16".into(),
+            error: Some(
+                "retry also failed: did not load: failed(1) (see router.log)\nline two"
+                    .into(),
+            ),
+        };
+        let m = with.message();
+        assert!(m.contains("unsloth/DeepSeek-V4-Flash-0731-GGUF:BF16"), "{m}");
+        assert!(m.contains("failed(1)"), "{m}");
+        assert!(!m.contains("line two"), "one line, not a log dump: {m}");
+
+        let without = Unofferable { id: "quiet".into(), error: None };
+        assert!(without.message().contains("re-measure"), "{}", without.message());
+        // An empty string is not a reason.
+        let blank = Unofferable { id: "q".into(), error: Some("  ".into()) };
+        assert!(blank.message().contains("re-measure"), "{}", blank.message());
     }
 }
 

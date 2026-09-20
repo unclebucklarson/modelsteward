@@ -6267,6 +6267,12 @@ fn run_sync(
         }
     };
     let desired = system::desired_models(cfg, measurements, models);
+    // Measured, wanted, and still unofferable. Computed before the
+    // bail so a fleet where NOTHING measured still says why.
+    let mut lines: Vec<String> = system::unofferable_models(cfg, measurements, models)
+        .into_iter()
+        .map(|u| format!("⚠ {}", u.message()))
+        .collect();
     anyhow::ensure!(
         !desired.is_empty(),
         "no successful measurements yet — measure a model first (measured, not guessed)"
@@ -6299,10 +6305,10 @@ fn run_sync(
     // drifted in wording.
     let base_url = format!("http://127.0.0.1:{}/v1", cfg.port);
     let known = system::fleet_known_ids(cfg, models, offered.as_deref());
-    let lines = connector::sync_all(
+    lines.extend(connector::sync_all(
         &connector::secondary(),
         &connector::SyncContext { base_url: &base_url, desired: &desired, known: known.as_ref() },
-    );
+    ));
     Ok((report, lines))
 }
 
