@@ -1367,7 +1367,7 @@ independent direction and opened one whole category we had missed.
   So the fleet was serving a 4,096-token window while every agent config
   advertised ~110,000, and the only component that noticed was Hermes.
 
-- **NEW, open: we advertise a context the running server may not be
+- **DONE (fc1ded4): we advertise a context the running server may not be
   serving.** `args_fp`/`env_fp` fingerprint the ARGUMENTS, and the
   arguments were unchanged — but `--fit` is resolved at load time
   against whatever VRAM is free then, so the same args legitimately
@@ -1385,9 +1385,31 @@ independent direction and opened one whole category we had missed.
   costs both context and speed. This is the same family as the four
   above: something absent or contradicted, reported as fine.
 
-  Related: `--reload` did not drop the badly-fit child; it took an
-  explicit `/models/unload`. Worth checking whether reload is supposed
-  to recycle residents.
+  Shipped as `router::parse_live_contexts` + `system::context_shortfalls`,
+  compared against the PUBLISHED (haircut) value so normal fit drift
+  stays silent, warning rather than refusing, and shown on the Server
+  tab as well as in both syncs. Verified live at 111,616-vs-109,824
+  (silent) and against the incident payload (warns).
+
+  **What it does not do.** It DETECTS a bad fit; nothing prevents one.
+  A model can still load against a busy GPU and serve a fraction of its
+  measurement — the guard just means you find out in seconds instead of
+  sixteen hours. Two follow-ups worth considering:
+
+  - **Offer the remedy, don't just name it.** The warning says "unload
+    and reload it"; a button that does so (and re-measures) would close
+    the loop. Careful: reloading is destructive to an in-flight session,
+    so it must be a click, never automatic.
+  - **Refuse to load into contention in the first place.** We already
+    sample free VRAM before a measurement and refuse to record a
+    contended one ("a contended measurement is a wrong measurement").
+    A load for SERVING gets no such check, which is why this happened.
+    The same precondition would have prevented it.
+
+  Related, still open: `--reload` did not drop the badly-fit child; it
+  took an explicit `/models/unload`. Worth checking whether reload is
+  supposed to recycle residents, because if it is, that is a second bug
+  and it is what kept the bad load alive for sixteen hours.
 
 ## Parked / ideas
 
