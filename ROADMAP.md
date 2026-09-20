@@ -1319,10 +1319,9 @@ independent direction and opened one whole category we had missed.
   things that are absent, reported as fine.
 
   - `4b10ffa` — a sync that cannot serve Hermes's own default model now
-    says so. The cause of the incident: the model measured `n_ctx:
-    null` on the one sync that followed the port change, so it dropped
-    out of `desired`; the context cache is append-only, so the hole
-    outlived the failure while every later sync reported success.
+    says so. (My first reading of WHY the entry was missing was wrong;
+    see the correction below. The check still earns its place — it is
+    what surfaces the symptom either way.)
   - `cdfc727` — a model that measures nothing no longer leaves every
     agent config silently. Named one on the dev machine immediately.
   - `233111f` — cache rows Hermes can no longer reach are named, and
@@ -1337,6 +1336,58 @@ independent direction and opened one whole category we had missed.
   shape as the one the user reported, and none of them would have been
   found by asking only "why did Hermes fail?". An append-only cache
   plus a silent exclusion is a hole that reports success.
+
+### Correction, same day: the cache was not the cause, and Hermes was right
+
+  I reported that the 8181 cache block was "born without" the Q4 and
+  that the append-only cache kept the hole. Our own rotated backups
+  disprove it: `context_length_cache.yaml.modelsteward.bak.{2,3,4,5}`
+  (Sep 11-12) all CONTAIN `qwen3.8-27b-ud-q4_k_xl@...:8181`. The entry
+  existed and was later removed. I inferred the history from one
+  snapshot when five earlier ones were sitting in the same directory.
+
+  What actually removes it, from Hermes's own source
+  (`agent/model_metadata.py::_reconcile_local_cached_context_length`):
+  Hermes live-probes a local endpoint, and if the probe disagrees with
+  the cache it calls `_invalidate_cached_context_length` — deleting our
+  row — and only re-persists the live value when it clears the 64,000
+  minimum. Below that it deletes and refuses. Reproduced live: the
+  gateway restarted at 11:56:41 and the row we had written at 10:38 was
+  gone by 11:56:45.
+
+  And the probe was telling the truth. `/props?model=qwen3.8-27b-ud-q4_k_xl`
+  answered **4,096**. The resident child (PID 32257, started 2026-09-19
+  19:23) held only 2,518 MiB of a 24 GiB card: `--fit` had run against a
+  contended GPU, fallen to its `--fit-ctx` floor of 4096, offloaded
+  almost nothing, and then sat there for sixteen hours. Its `args_fp`
+  was `4b7f46c8c63635d1` — IDENTICAL to the measurement that recorded
+  115,712. Unloading and reloading it on a free card gave 120,064 and
+  22,951 MiB.
+
+  So the fleet was serving a 4,096-token window while every agent config
+  advertised ~110,000, and the only component that noticed was Hermes.
+
+- **NEW, open: we advertise a context the running server may not be
+  serving.** `args_fp`/`env_fp` fingerprint the ARGUMENTS, and the
+  arguments were unchanged — but `--fit` is resolved at load time
+  against whatever VRAM is free then, so the same args legitimately
+  produce 115,712 or 4,096. CLAUDE.md already says this ("it moves with
+  whatever else holds the GPU"); nothing in the code acts on it. Nothing
+  compares what the router is serving NOW against what we measured and
+  published.
+
+  Proposed: before writing contexts to any agent, read the live value
+  for each RESIDENT model (`/props?model=` — the router answers it even
+  pre-load, per Hermes's own comment) and refuse to publish, or loudly
+  flag, a measurement that the running server contradicts. A resident
+  child that fit badly is also worth naming on its own ("serving 4,096
+  of a measured 115,712 — reload it"), since it is invisible today and
+  costs both context and speed. This is the same family as the four
+  above: something absent or contradicted, reported as fine.
+
+  Related: `--reload` did not drop the badly-fit child; it took an
+  explicit `/models/unload`. Worth checking whether reload is supposed
+  to recycle residents.
 
 ## Parked / ideas
 
