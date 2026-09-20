@@ -91,6 +91,9 @@ pub struct HermesSyncReport {
     /// Models Hermes is configured to RUN on our router that the cache
     /// cannot serve — the check that "N contexts written" never made.
     pub unservable: Vec<DefaultGap>,
+    /// Cache blocks for endpoints Hermes no longer points at. Reported
+    /// only; removing them is an explicit action on the user's file.
+    pub stale: Vec<StaleBlock>,
 }
 
 /// Parse `custom_providers` and return the NAME of the first entry
@@ -297,6 +300,10 @@ pub fn sync(home: &Path, base_url: &str, desired: &[DesiredModel]) -> Result<Her
         &cached_for(&context_cache_path(home), base_url),
         base_url,
     );
+    report.stale = unreferenced_base_urls(
+        &cfg,
+        &std::fs::read_to_string(context_cache_path(home)).unwrap_or_default(),
+    );
     Ok(report)
 }
 
@@ -379,6 +386,107 @@ pub fn register_provider_text(
         text.push('\n');
     }
     Some(text)
+}
+
+/// A base URL the context cache still carries entries for that no
+/// provider in Hermes's own config points at any more — dead weight
+/// left by a port change, or by a router that no longer exists.
+#[derive(Debug, PartialEq, Eq)]
+pub struct StaleBlock {
+    pub base_url: String,
+    pub entries: usize,
+}
+
+/// Cache entries Hermes can no longer reach, by base URL.
+///
+/// Judged against HERMES's config, not our own notion of which ports
+/// we have used — we keep no such history, and guessing would mean
+/// deleting someone else's rows. Narrowed to loopback for the same
+/// reason: a cloud provider's base URL may be configured somewhere we
+/// cannot see, and its cached contexts are none of our business.
+///
+/// Reported, never pruned as a side effect: this is the user's file.
+pub fn unreferenced_base_urls(config_text: &str, cache_text: &str) -> Vec<StaleBlock> {
+    let doc: serde_yaml::Value = match serde_yaml::from_str(cache_text) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    let Some(ctxs) = doc.get("context_lengths").and_then(|c| c.as_mapping()) else {
+        return Vec::new();
+    };
+    let cfg: Option<serde_yaml::Value> = serde_yaml::from_str(config_text).ok();
+    let norm = |u: &str| u.trim_end_matches('/').to_lowercase();
+    let mut referenced: std::collections::HashSet<String> = Default::default();
+    if let Some(c) = &cfg {
+        if let Some(b) = c.get("model").and_then(|m| m.get("base_url")).and_then(|b| b.as_str()) {
+            referenced.insert(norm(b));
+        }
+        if let Some(ps) = c.get("custom_providers").and_then(|p| p.as_sequence()) {
+            for b in ps.iter().filter_map(|p| p.get("base_url")?.as_str()) {
+                referenced.insert(norm(b));
+            }
+        }
+    }
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+    for k in ctxs.keys().filter_map(|k| k.as_str()) {
+        // `model@base_url`; a model id may itself contain '@', so take
+        // the LAST '@' — the same split Hermes's own key format implies.
+        let Some((_, url)) = k.rsplit_once('@') else { continue };
+        let url = norm(url);
+        let loopback = url.contains("//127.0.0.1")
+            || url.contains("//localhost")
+            || url.contains("//[::1]");
+        if loopback && !referenced.contains(&url) {
+            *counts.entry(url).or_default() += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .map(|(base_url, entries)| StaleBlock { base_url, entries })
+        .collect()
+}
+
+/// Delete every cache entry for one base URL, backing the file up
+/// first. Returns how many were removed.
+///
+/// Explicit only — never a side effect of a sync. The entries are
+/// recomputable (a sync rewrites them) but the file is the user's,
+/// and [`unreferenced_base_urls`] is the only thing that should ever
+/// nominate a URL for this.
+pub fn prune_base_url(path: &Path, base_url: &str) -> Result<usize> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let mut doc: serde_yaml::Value = serde_yaml::from_str(&text).with_context(|| {
+        format!(
+            "{} is not valid YAML — refusing to rewrite it, because doing so \
+             would discard every context it holds. Fix or remove the file, \
+             then try again",
+            path.display()
+        )
+    })?;
+    let suffix = format!("@{}", base_url.trim_end_matches('/'));
+    let Some(ctxs) = doc
+        .as_mapping_mut()
+        .and_then(|m| m.get_mut("context_lengths"))
+        .and_then(|c| c.as_mapping_mut())
+    else {
+        return Ok(0);
+    };
+    let doomed: Vec<serde_yaml::Value> = ctxs
+        .keys()
+        .filter(|k| k.as_str().is_some_and(|k| k.ends_with(&suffix)))
+        .cloned()
+        .collect();
+    if doomed.is_empty() {
+        // Nothing to do is not a reason to rewrite the user's file.
+        return Ok(0);
+    }
+    for k in &doomed {
+        ctxs.remove(k);
+    }
+    crate::core::safefs::backup_rotated(path, "modelsteward")?;
+    crate::core::safefs::write_atomic(path, &serde_yaml::to_string(&doc)?)?;
+    Ok(doomed.len())
 }
 
 /// Line ranges of the items in a block-style `custom_providers:`
@@ -1019,6 +1127,205 @@ model:
             std::fs::read_to_string(&path).unwrap(),
             before,
             "nothing changed"
+        );
+    }
+
+    /// The real ~/.hermes state on 2026-09-20: the cache carried three
+    /// localhost blocks — 8080 (the port before the change), 8181 (the
+    /// live one) and 8182 (a router started during an ownership test) —
+    /// plus the user's Ollama entries. Only two of those are reachable
+    /// by Hermes at all.
+    #[test]
+    fn cache_blocks_hermes_can_no_longer_reach_are_named() {
+        let cfg = "\
+model:
+  default: qwen3.8-27b-ud-q4_k_xl
+  base_url: http://127.0.0.1:8181/v1
+custom_providers:
+  - name: Local (127.0.0.1:11434)
+    base_url: http://127.0.0.1:11434/v1
+  - name: modelsteward
+    base_url: http://127.0.0.1:8181/v1
+";
+        let cache = "\
+context_lengths:
+  ornith:35b@http://127.0.0.1:11434/v1: 131328
+  glm@http://127.0.0.1:8080/v1: 124416
+  gpt-oss-20b-f16@http://127.0.0.1:8080/v1: 124416
+  glm@http://127.0.0.1:8181/v1: 124416
+  glm@http://127.0.0.1:8182/v1: 124416
+";
+        let stale = unreferenced_base_urls(cfg, cache);
+        assert_eq!(
+            stale,
+            vec![
+                StaleBlock { base_url: "http://127.0.0.1:8080/v1".into(), entries: 2 },
+                StaleBlock { base_url: "http://127.0.0.1:8182/v1".into(), entries: 1 },
+            ],
+            "only the unreachable loopback blocks, with their counts"
+        );
+    }
+
+    /// A cloud provider's cached contexts are not ours to judge: its
+    /// base URL may be configured somewhere we cannot see, and offering
+    /// to delete a stranger's rows on that guess is how a hygiene
+    /// feature becomes a data-loss feature.
+    #[test]
+    fn a_cloud_providers_entries_are_never_called_stale() {
+        let cache = "\
+context_lengths:
+  gpt-5@https://api.openai.com/v1: 400000
+  claude-x@https://api.anthropic.com/v1: 200000
+";
+        assert!(unreferenced_base_urls("model:\n  default: x\n", cache).is_empty());
+    }
+
+    /// A model id containing '@' must not be mistaken for the split
+    /// point — the base URL is after the LAST one.
+    #[test]
+    fn an_at_sign_in_the_model_id_does_not_confuse_the_split() {
+        let cache = "context_lengths:\n  org@repo:tag@http://127.0.0.1:9999/v1: 4096\n";
+        let stale = unreferenced_base_urls("", cache);
+        assert_eq!(stale.len(), 1, "{stale:?}");
+        assert_eq!(stale[0].base_url, "http://127.0.0.1:9999/v1");
+    }
+
+    /// An unparseable cache is the sync path's problem, and guessing at
+    /// its contents to propose deletions would be worse than silence.
+    #[test]
+    fn a_damaged_cache_proposes_no_deletions() {
+        assert!(unreferenced_base_urls("", "context_lengths:\n\tbad: 1\n").is_empty());
+    }
+
+    /// Mutation check, 2026-09-20: deleting the top-level
+    /// `model.base_url` branch broke nothing, because the fixture
+    /// above happens to name 8181 in BOTH places. A Hermes config may
+    /// point its default at an endpoint with no custom_providers entry
+    /// — and then the block we would offer to delete is the LIVE one.
+    #[test]
+    fn the_endpoint_the_default_model_uses_is_never_called_stale() {
+        let cfg = "model:\n  default: q4\n  base_url: http://127.0.0.1:8181/v1\n";
+        let cache = "context_lengths:\n  q4@http://127.0.0.1:8181/v1: 109824\n";
+        assert!(
+            unreferenced_base_urls(cfg, cache).is_empty(),
+            "the live endpoint is reachable even with no custom_providers entry"
+        );
+    }
+
+    /// Pruning removes one block and nothing else — the Ollama and
+    /// cloud rows in this file belong to other tools, and a hygiene
+    /// action that touches them is a data-loss action.
+    #[test]
+    fn pruning_removes_one_block_and_leaves_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        std::fs::write(
+            &path,
+            "context_lengths:\n  \
+             ornith:35b@http://127.0.0.1:11434/v1: 131328\n  \
+             glm@http://127.0.0.1:8080/v1: 124416\n  \
+             gpt-oss@http://127.0.0.1:8080/v1: 124416\n  \
+             glm@http://127.0.0.1:8181/v1: 124416\n\
+             some_other_key: keep-me\n",
+        )
+        .unwrap();
+
+        let n = prune_base_url(&path, "http://127.0.0.1:8080/v1").unwrap();
+        assert_eq!(n, 2);
+
+        let after: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let ctxs = after.get("context_lengths").unwrap().as_mapping().unwrap();
+        let keys: Vec<&str> = ctxs.keys().filter_map(|k| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["ornith:35b@http://127.0.0.1:11434/v1", "glm@http://127.0.0.1:8181/v1"]
+        );
+        assert_eq!(
+            after.get("some_other_key").and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "unrelated top-level keys survive"
+        );
+    }
+
+    /// Same rule as the sync path: a cache we cannot parse is never
+    /// rewritten, because rewriting it would discard every context
+    /// Hermes holds.
+    #[test]
+    fn pruning_refuses_a_damaged_cache() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        let broken = "context_lengths:\n  good@http://a: 131072\n\tbad: 1\n";
+        std::fs::write(&path, broken).unwrap();
+        assert!(prune_base_url(&path, "http://a").is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    /// Nothing to remove must not rewrite the file. Byte-equality is
+    /// too weak to prove that — a YAML round-trip of this file
+    /// reproduces it exactly — so the backup is the witness: a rewrite
+    /// always makes one, and burning a rotation slot on a no-op would
+    /// push a real earlier backup off the end (mutation check M20,
+    /// 2026-09-20).
+    #[test]
+    fn pruning_a_url_with_no_entries_does_not_even_back_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        let before = "context_lengths:\n  glm@http://127.0.0.1:8181/v1: 124416\n";
+        std::fs::write(&path, before).unwrap();
+        assert_eq!(prune_base_url(&path, "http://127.0.0.1:8080/v1").unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+        assert!(
+            !path.with_file_name("context_length_cache.yaml.modelsteward.bak.1").exists(),
+            "a no-op must not consume a backup slot"
+        );
+    }
+
+    /// The key must end with `@<base_url>`, not merely contain it: a
+    /// base URL given without its `/v1` is a PREFIX of every cached
+    /// key for that host, and a `contains` match would delete them all
+    /// (mutation check M19, 2026-09-20).
+    #[test]
+    fn a_base_url_that_is_only_a_prefix_prunes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("context_length_cache.yaml");
+        let before = "context_lengths:\n  \
+             glm@http://127.0.0.1:8080/v1: 124416\n  \
+             gpt@http://127.0.0.1:8080/v1: 124416\n";
+        std::fs::write(&path, before).unwrap();
+        assert_eq!(prune_base_url(&path, "http://127.0.0.1:8080").unwrap(), 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+    }
+
+    /// The dev machine on 2026-09-20 carried 15 cache entries for the
+    /// port before a change and 15 more for a router started during an
+    /// ownership test — 30 rows Hermes could not reach, invisible.
+    #[test]
+    fn sync_reports_cache_blocks_hermes_cannot_reach() {
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path();
+        std::fs::write(
+            home.join("config.yaml"),
+            "model:\n  default: a\n  base_url: http://127.0.0.1:8181/v1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            context_cache_path(home),
+            "context_lengths:\n  \
+             a@http://127.0.0.1:8181/v1: 131072\n  \
+             b@http://127.0.0.1:8080/v1: 124416\n  \
+             c@http://127.0.0.1:8080/v1: 124416\n",
+        )
+        .unwrap();
+        let r = sync(home, "http://127.0.0.1:8181/v1", &[d("a", 131_072)]).unwrap();
+        assert_eq!(
+            r.stale,
+            vec![StaleBlock { base_url: "http://127.0.0.1:8080/v1".into(), entries: 2 }]
+        );
+        // Reported, not acted on: the rows are still there.
+        assert!(
+            std::fs::read_to_string(context_cache_path(home)).unwrap().contains("8080"),
+            "a sync must never prune on its own"
         );
     }
 }

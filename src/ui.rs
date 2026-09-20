@@ -3965,6 +3965,35 @@ impl App {
         for gap in hermes::default_model_gaps(&cfg_text, &cached, &base_url) {
             ui.colored_label(ui.visuals().warn_fg_color, format!("⚠ {}", gap.message()));
         }
+        // Rows Hermes can no longer reach — a port change leaves the
+        // whole previous block behind, and the cache never removes.
+        // Named with a button each; never pruned as a side effect.
+        let cache_path = hermes::context_cache_path(&home);
+        let cache_text = std::fs::read_to_string(&cache_path).unwrap_or_default();
+        for st in hermes::unreferenced_base_urls(&cfg_text, &cache_text) {
+            ui.horizontal(|ui| {
+                ui.small(format!(
+                    "{} cached context(s) for {} — no Hermes provider points there.",
+                    st.entries, st.base_url
+                ));
+                if ui
+                    .small_button("Remove")
+                    .on_hover_text(
+                        "Deletes only this endpoint's rows from Hermes's context \
+                         cache. The file is backed up first; every other entry, \
+                         including other tools', is left alone. A sync rewrites \
+                         anything still live.",
+                    )
+                    .clicked()
+                {
+                    match hermes::prune_base_url(&cache_path, &st.base_url) {
+                        Ok(n) => self
+                            .log(format!("removed {n} stale Hermes context(s) for {}", st.base_url)),
+                        Err(e) => self.log(format!("ERROR pruning Hermes cache: {e:#}")),
+                    }
+                }
+            });
+        }
         if cached.is_empty() {
             ui.small("No measured contexts written yet — press Sync all measured above.");
         } else {

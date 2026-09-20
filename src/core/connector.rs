@@ -179,6 +179,13 @@ impl Connector for HermesConnector {
                 r.below_minimum.join(", ")
             ));
         }
+        for st in &r.stale {
+            notes.push(format!(
+                "{} cached context(s) for {} — no Hermes provider points there any \
+                 more; the Connections tab, Hermes section, removes them",
+                st.entries, st.base_url
+            ));
+        }
         if r.provider_unregistered {
             // Registration edits a live, hand-maintained config, so it
             // stays an explicit click rather than a side effect of sync.
