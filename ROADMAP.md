@@ -1306,6 +1306,38 @@ independent direction and opened one whole category we had missed.
   here. The fix is the same shape as opencode's: find our block by
   provider NAME, then repoint its `base_url`.
 
+  **FIXED 2026-09-20 (b977fe6), after it bit.** "Lower stakes" was
+  wrong. The duplicate was created on the dev machine, and while it sat
+  there Hermes refused the user's default model outright:
+
+      Model qwen3.8-27b-ud-q4_k_xl has a context window of 4,096
+      tokens, which is below the minimum 64,000 required by Hermes
+
+  The duplicate provider was not itself the cause — the top-level
+  `model.base_url` pointed at the live port — but investigating it
+  surfaced the real one, and three further defects of the same family:
+  things that are absent, reported as fine.
+
+  - `4b10ffa` — a sync that cannot serve Hermes's own default model now
+    says so. The cause of the incident: the model measured `n_ctx:
+    null` on the one sync that followed the port change, so it dropped
+    out of `desired`; the context cache is append-only, so the hole
+    outlived the failure while every later sync reported success.
+  - `cdfc727` — a model that measures nothing no longer leaves every
+    agent config silently. Named one on the dev machine immediately.
+  - `233111f` — cache rows Hermes can no longer reach are named, and
+    removable. 30 of them were sitting there (a dead port, and a router
+    started during an ownership test).
+  - `a81b14d` — the duplicate a port change already left can be
+    commented out, since registration now refuses while it exists.
+  - `07a46b8` — found in passing: `mod tests` in energy.rs was missing
+    `#[cfg(test)]` and had been shipping in the binary.
+
+  Lesson worth keeping: the three follow-on bugs were all the same
+  shape as the one the user reported, and none of them would have been
+  found by asking only "why did Hermes fail?". An append-only cache
+  plus a silent exclusion is a hole that reports success.
+
 ## Parked / ideas
 
 - ✔ SHIPPED 2026-08-27/28 (see M8 #5 + Managed llama.cpp in the Build
