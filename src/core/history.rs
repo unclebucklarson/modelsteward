@@ -24,7 +24,16 @@ pub struct Entry {
     pub args_fp: Option<String>,
     pub n_ctx: Option<u64>,
     pub pp_tps: Option<f64>,
+    /// Generation from an EMPTY KV cache (llama-bench's default).
     pub tg_tps: Option<f64>,
+    /// Generation with `tg_depth` tokens already resident — what a user
+    /// actually gets mid-session, and 20-30% lower than `tg_tps` per
+    /// CLAUDE.md's "two speed numbers" rule. The journal carried only
+    /// the empty-cache figure, so the build-over-build scorecard could
+    /// not see a regression in the number that matters (review findings
+    /// H1/M10, 2026-09-21).
+    pub tg_deep_tps: Option<f64>,
+    pub tg_depth: Option<u64>,
     pub eval_score: Option<f64>,
     pub tool_reliability: Option<f64>,
     pub loop_reliability: Option<f64>,

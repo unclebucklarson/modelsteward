@@ -158,6 +158,33 @@ pub fn run(
 /// baseline is missing or from another build. Returns (benched, failed);
 /// per-model failures are narrated and skipped, not fatal — callers
 /// decide whether a partial run counts as success (usability review C5).
+/// The journal row for one bench result.
+///
+/// Extracted so the mapping can be TESTED. It was inline, and dropping
+/// the deep-speed fields from it broke nothing — which is how the
+/// journal came to carry only the empty-cache figure in the first place
+/// (review findings H1/M10, 2026-09-21; the omission survived a
+/// mutation check here on 2026-09-23 until this existed).
+pub fn journal_entry(
+    id: &str,
+    b: &Baseline,
+    when: u64,
+) -> crate::core::history::Entry {
+    crate::core::history::Entry {
+        when,
+        model: id.to_string(),
+        build: b.build,
+        pp_tps: b.pp_tps,
+        tg_tps: b.tg_tps,
+        // The number a user actually feels, and 20-30% below tg_tps.
+        // Without it the rebuild scorecard cannot see a regression in
+        // the speed that matters.
+        tg_deep_tps: b.tg_deep_tps,
+        tg_depth: b.tg_depth,
+        ..Default::default()
+    }
+}
+
 pub fn run_baselines(
     cfg: &crate::core::settings::AppConfig,
     target: Option<String>,
@@ -335,14 +362,7 @@ pub fn run_baselines(
                 router::write_measurements(&dir, &measurements)?; // persist per model
                 let _ = crate::core::history::record(
                     &dir,
-                    &crate::core::history::Entry {
-                        when: crate::core::advisor::now_epoch(),
-                        model: id.clone(),
-                        build: b.build,
-                        pp_tps: b.pp_tps,
-                        tg_tps: b.tg_tps,
-                        ..Default::default()
-                    },
+                    &journal_entry(id, &b, crate::core::advisor::now_epoch()),
                 );
                 benched += 1;
             }
@@ -472,5 +492,47 @@ mod tests {
             bench_bin(Path::new("/opt/llama.cpp/bin/llama-server")),
             PathBuf::from("/opt/llama.cpp/bin/llama-bench")
         );
+    }
+}
+
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    /// Every speed a bench measured must reach the journal, or the
+    /// build-over-build scorecard is comparing a subset of what it
+    /// says it compares. Real numbers: the dev machine's Q4 on b10985.
+    #[test]
+    fn a_bench_result_carries_both_speeds_into_the_journal() {
+        let b = Baseline {
+            pp_tps: Some(1513.8),
+            tg_tps: Some(38.8),
+            tg_deep_tps: Some(33.8),
+            tg_depth: Some(32_768),
+            build: Some(10_985),
+        };
+        let e = journal_entry("qwen3.8-27b-ud-q4_k_xl", &b, 1_787_700_000);
+        assert_eq!(e.model, "qwen3.8-27b-ud-q4_k_xl");
+        assert_eq!(e.when, 1_787_700_000);
+        assert_eq!(e.build, Some(10_985));
+        assert_eq!(e.pp_tps, Some(1513.8));
+        assert_eq!(e.tg_tps, Some(38.8), "empty-cache speed");
+        assert_eq!(e.tg_deep_tps, Some(33.8), "the number a user feels");
+        assert_eq!(e.tg_depth, Some(32_768), "useless without its depth");
+    }
+
+    /// A bench that produced no deep figure records none — absent is
+    /// not zero.
+    #[test]
+    fn a_missing_deep_measurement_is_not_invented() {
+        let b = Baseline {
+            pp_tps: Some(100.0),
+            tg_tps: Some(20.0),
+            tg_deep_tps: None,
+            tg_depth: None,
+            build: Some(11_064),
+        };
+        let e = journal_entry("m", &b, 1);
+        assert_eq!((e.tg_deep_tps, e.tg_depth), (None, None));
     }
 }

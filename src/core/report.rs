@@ -201,12 +201,17 @@ pub fn render(i: &ReportInputs) -> String {
         // Latest ctx and tg per build, oldest build first.
         let mut ctx_by_build: std::collections::BTreeMap<u64, u64> = Default::default();
         let mut tg_by_build: std::collections::BTreeMap<u64, f64> = Default::default();
+        let mut deep_by_build: std::collections::BTreeMap<u64, (f64, Option<u64>)> =
+            Default::default();
         for e in entries {
             if let (Some(b), Some(c)) = (e.build, e.n_ctx) {
                 ctx_by_build.entry(b).or_insert(c);
             }
             if let (Some(b), Some(t)) = (e.build, e.tg_tps) {
                 tg_by_build.entry(b).or_insert(t);
+            }
+            if let (Some(b), Some(t)) = (e.build, e.tg_deep_tps) {
+                deep_by_build.entry(b).or_insert((t, e.tg_depth));
             }
         }
         if ctx_by_build.len() > 1 {
@@ -223,7 +228,32 @@ pub fn render(i: &ReportInputs) -> String {
                 .iter()
                 .map(|(b, t)| format!("b{b}: {t:.0} t/s"))
                 .collect();
-            push(&mut out, format!("- {model} generation — {}", line.join(" -> ")));
+            push(
+                &mut out,
+                format!("- {model} generation, empty cache — {}", line.join(" -> ")),
+            );
+        }
+        // The number a user actually feels. Reported beside the
+        // empty-cache figure and never in place of it — they answer
+        // different questions and run 20-30% apart (CLAUDE.md, "two
+        // speed numbers"). Until now only the empty-cache figure
+        // reached the journal, so a rebuild could lose deep speed
+        // without the scorecard noticing (H1/M10, 2026-09-21).
+        if deep_by_build.len() > 1 {
+            any = true;
+            let depth = deep_by_build.values().find_map(|(_, d)| *d);
+            let line: Vec<String> = deep_by_build
+                .iter()
+                .map(|(b, (t, _))| format!("b{b}: {t:.1} t/s"))
+                .collect();
+            push(
+                &mut out,
+                format!(
+                    "- {model} generation at depth{} — {}",
+                    depth.map(|d| format!(" {d}")).unwrap_or_default(),
+                    line.join(" -> ")
+                ),
+            );
         }
     }
     if !any {
@@ -454,5 +484,63 @@ mod tests {
         assert_eq!(date_from_epoch(0), "1970-01-01");
         assert_eq!(date_from_epoch(86_400), "1970-01-02");
         assert_eq!(date_from_epoch(1_787_659_200), "2026-08-25");
+    }
+
+    /// Review findings H1/M10 (2026-09-21). The journal stored only the
+    /// empty-cache speed, so the build-over-build section could not
+    /// report a regression in the deep-cache figure — the one that
+    /// describes what a user experiences mid-session. A rebuild that
+    /// held tg_tps flat while losing 15% of deep speed read as "no
+    /// change".
+    #[test]
+    fn a_deep_speed_regression_shows_in_the_build_over_build_section() {
+        let hist = vec![
+            history::Entry {
+                when: 1,
+                model: "qwen3.8-27b-ud-q4_k_xl".into(),
+                build: Some(10_985),
+                tg_tps: Some(38.8),
+                tg_deep_tps: Some(33.8),
+                tg_depth: Some(32_768),
+                ..Default::default()
+            },
+            history::Entry {
+                when: 2,
+                model: "qwen3.8-27b-ud-q4_k_xl".into(),
+                build: Some(11_064),
+                // Empty-cache speed is unchanged...
+                tg_tps: Some(38.9),
+                // ...while what the user actually feels fell 15%.
+                tg_deep_tps: Some(28.7),
+                tg_depth: Some(32_768),
+                ..Default::default()
+            },
+        ];
+        let measurements = Measurements::new();
+        let trials = Trials::new();
+        let text = render(&ReportInputs {
+            date: date_from_epoch(1_787_700_000),
+            os: "linux".into(),
+            ram_mib: 64_000,
+            gpus: vec![],
+            build: Some(11_064),
+            upstream: None,
+            measurements: &measurements,
+            trials: &trials,
+            history: &hist,
+            home: None,
+        });
+        assert!(
+            text.contains("33.8") || text.contains("34"),
+            "the old deep figure must appear:\n{text}"
+        );
+        assert!(
+            text.contains("28.7") || text.contains("29"),
+            "and the new one:\n{text}"
+        );
+        assert!(
+            text.to_lowercase().contains("depth") || text.contains("at depth"),
+            "labelled as the deep number, not confusable with empty-cache:\n{text}"
+        );
     }
 }
