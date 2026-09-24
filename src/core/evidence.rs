@@ -200,6 +200,14 @@ pub struct Coverage {
     pub finished: usize,
     /// Turns we successfully attributed and credited.
     pub credited: usize,
+    /// Turns whose prompt was served ENTIRELY from cache, so llama.cpp
+    /// omitted the prompt-eval line and there is nothing to credit.
+    ///
+    /// Expected, not drift — but it was being counted against the
+    /// parser, so a workload with more than 25% fully-cached turns
+    /// (a retrying client, a health-check loop) tripped the canary for
+    /// doing its job (review finding M7, 2026-09-21).
+    pub cached: usize,
     /// Turn-completion lines counted WITHOUT passing the `port_prefix` /
     /// `task_id` gates — the independent witness. `finished` and
     /// `credited` both sit behind those gates, so a drift in the line's
@@ -227,7 +235,11 @@ impl Coverage {
     /// line for a fully cached prompt, so a healthy log credits slightly
     /// fewer turns than it finishes.
     pub fn drifting(&self) -> bool {
-        let inner_dialect_moved = self.finished >= 10 && self.credited * 4 < self.finished * 3;
+        // Fully-cached turns are creditable-in-principle but have
+        // nothing to credit, so they are neither evidence of drift nor
+        // of health: take them out of the denominator entirely.
+        let explicable = self.finished.saturating_sub(self.cached);
+        let inner_dialect_moved = explicable >= 10 && self.credited * 4 < explicable * 3;
         let gates_stopped_matching = self.seen >= 10 && self.finished * 4 < self.seen * 3;
         inner_dialect_moved || gates_stopped_matching
     }
@@ -409,6 +421,12 @@ impl LogMiner {
             continue;
         };
         let (Some(prompt), Some(generated), Some(release)) = (t.prompt, t.generated, t.release) else {
+            // A finished turn with no prompt-eval line is a fully
+            // cached prompt, not a parse failure. Name it so the
+            // canary can subtract it instead of blaming itself.
+            if t.generated.is_some() && t.release.is_some() && t.prompt.is_none() {
+                coverage.cached += 1;
+            }
             continue;
         };
         coverage.credited += 1;
@@ -834,5 +852,85 @@ mod tests {
         let (_, cov) = cache_effectiveness_with_coverage(&few);
         assert_eq!(cov.seen, 3);
         assert!(!cov.drifting(), "three lines is noise, not a dialect change");
+    }
+
+    /// Review finding M7 (2026-09-21). llama.cpp omits the prompt-eval
+    /// line when a prompt is served entirely from cache, so those turns
+    /// finish without being credited. They were counted against the
+    /// parser, and a workload where more than a quarter of turns are
+    /// fully cached — a retrying client, a health check — tripped the
+    /// drift canary for working correctly.
+    #[test]
+    fn a_heavily_cached_workload_is_not_mistaken_for_drift() {
+        let mut log = String::from(
+            "1.0 I srv load: spawning server instance with name=coder on port 40001\n",
+        );
+        for i in 0..40 {
+            // Only 10 of 40 turns do any prompt work; 30 are full hits.
+            if i < 10 {
+                log.push_str(&format!(
+                    "[40001] 0.05 I slot print_timing: id  0 | task {i} | prompt processing, n_tokens = 1000, progress = 1.00\n"
+                ));
+            }
+            log.push_str(&format!(
+                "[40001] 0.09 I slot print_timing: id  0 | task {i} | n_gen = 100, tg = 40.00 t/s\n"
+            ));
+            log.push_str(&format!(
+                "[40001] 0.10 I slot release: id  0 | task {i} | stop processing: n_tokens = 1100, truncated = 0\n"
+            ));
+        }
+        let (_, cov) = cache_effectiveness_with_coverage(&log);
+        assert_eq!(cov.finished, 40);
+        assert_eq!(cov.credited, 10, "only the ten that did prompt work");
+        assert_eq!(cov.cached, 30, "the rest were cache hits, not failures");
+        assert!(
+            !cov.drifting(),
+            "75% cache hits is a GOOD log, not a broken parser: {cov:?}"
+        );
+        assert!(cov.note().is_none());
+    }
+
+    /// And subtracting them must not blind the canary: a real dialect
+    /// change still shows, cache hits or no.
+    #[test]
+    fn subtracting_cache_hits_does_not_hide_real_drift() {
+        let mut log = String::new();
+        for i in 0..40 {
+            log.push_str(&format!(
+                "[40001] 0.10 I slot release: id 0 | task {i} | stop processing: n_tokens = 100, truncated = 0\n"
+            ));
+        }
+        let (_, cov) = cache_effectiveness_with_coverage(&log);
+        assert_eq!(cov.cached, 0, "no generation line: not a cache hit");
+        assert!(cov.drifting(), "{cov:?}");
+    }
+
+    /// The guard on what counts as a cache hit. A turn that finished
+    /// with no GENERATION line is a dialect we stopped reading, not a
+    /// cached prompt — and calling it cached would subtract it from the
+    /// denominator and hide the very drift the canary exists to find
+    /// (mutation check M62, 2026-09-23).
+    #[test]
+    fn a_turn_missing_its_generation_line_is_not_a_cache_hit() {
+        let mut log = String::from(
+            "1.0 I srv load: spawning server instance with name=coder on port 40001\n",
+        );
+        for i in 0..40 {
+            // Prompt and release survive; the n_gen line is gone.
+            log.push_str(&format!(
+                "[40001] 0.05 I slot print_timing: id  0 | task {i} | prompt processing, n_tokens = 1000, progress = 1.00\n"
+            ));
+            log.push_str(&format!(
+                "[40001] 0.10 I slot release: id  0 | task {i} | stop processing: n_tokens = 1100, truncated = 0\n"
+            ));
+        }
+        let (_, cov) = cache_effectiveness_with_coverage(&log);
+        assert_eq!(cov.finished, 40);
+        assert_eq!(cov.credited, 0);
+        assert_eq!(
+            cov.cached, 0,
+            "a missing generation line is drift, not a cache hit: {cov:?}"
+        );
+        assert!(cov.drifting(), "and it must still be reported: {cov:?}");
     }
 }

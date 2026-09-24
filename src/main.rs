@@ -255,9 +255,21 @@ fn meter_cmd(cfg: &settings::AppConfig, range: Option<&str>) -> anyhow::Result<(
 /// M7 baselines: run llama-bench (pp512 + tg128) per model and store the
 /// tokens/sec beside the context measurements. The logic lives in
 /// core::bench::run_baselines, shared with the GUI's Server → Bench items.
+/// `--bench [id] [force]`: which model, if any, was asked for.
+///
+/// `all` means "every model", which is what an empty target already
+/// means — but it used to be taken as a model id named `all`, so
+/// `--bench force all` benched one nonexistent model and reported
+/// success (review finding L3, 2026-09-21).
+pub fn bench_target(rest: &[String]) -> Option<String> {
+    rest.iter()
+        .find(|a| *a != "force" && *a != "all")
+        .cloned()
+}
+
 fn bench_baselines(cfg: &settings::AppConfig, rest: &[String]) -> anyhow::Result<()> {
     let force = rest.iter().any(|a| a == "force");
-    let target = rest.iter().find(|a| *a != "force").cloned();
+    let target = bench_target(rest);
     let (n, failed) =
         bench::run_baselines(cfg, target, force, &cancel::CancelToken::default(), &mut |line| {
             eprintln!("{line}")
@@ -705,4 +717,31 @@ fn verify_rebuild(cfg: &settings::AppConfig) -> anyhow::Result<()> {
         println!("{line}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod arg_tests {
+    use super::bench_target;
+
+    fn args(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    /// Review finding L3 (2026-09-21).
+    #[test]
+    fn all_means_every_model_not_a_model_named_all() {
+        assert_eq!(bench_target(&args(&["force", "all"])), None);
+        assert_eq!(bench_target(&args(&["all"])), None);
+        assert_eq!(bench_target(&args(&["all", "force"])), None);
+    }
+
+    #[test]
+    fn an_explicit_model_still_wins() {
+        assert_eq!(
+            bench_target(&args(&["qwen3.8-27b-ud-q4_k_xl", "force"])),
+            Some("qwen3.8-27b-ud-q4_k_xl".into())
+        );
+        assert_eq!(bench_target(&args(&["force"])), None);
+        assert_eq!(bench_target(&args(&[])), None);
+    }
 }
