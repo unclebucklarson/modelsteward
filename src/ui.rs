@@ -38,6 +38,8 @@ enum Msg {
     RouterState(router::RouterState),
     /// Live serving context per resident model (poller, on change).
     LiveContexts(Vec<(String, u64)>),
+    /// Per-model failure explanations mined from router.log (poller).
+    MinedFailures(std::collections::BTreeMap<String, String>),
     Ollama(ollama::OllamaStatus),
     Measurements(router::Measurements),
     Configured(Vec<opencode::ConfiguredModel>),
@@ -107,6 +109,33 @@ enum Pane {
     Settings,
 }
 
+/// A file re-read only when its mtime changes.
+///
+/// The Connections tab read Hermes's config.yaml and its context cache
+/// — and re-parsed the YAML — on EVERY repaint, which at 60fps is a
+/// hundred pointless reads a second while that tab is open. Both were
+/// added on 2026-09-20 and the adversarial review caught them three
+/// days later (finding M6). A stat is not free either, but it is three
+/// orders of magnitude cheaper than read + parse.
+#[derive(Default)]
+struct CachedFile {
+    mtime: Option<std::time::SystemTime>,
+    text: String,
+    read_once: bool,
+}
+
+impl CachedFile {
+    fn get(&mut self, path: &std::path::Path) -> &str {
+        let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+        if !self.read_once || mtime != self.mtime {
+            self.mtime = mtime;
+            self.read_once = true;
+            self.text = std::fs::read_to_string(path).unwrap_or_default();
+        }
+        &self.text
+    }
+}
+
 /// A deferred row action, collected during rendering and executed after
 /// (so table closures never need `&mut self`).
 #[derive(Clone)]
@@ -140,6 +169,12 @@ struct App {
     /// refreshed by the poller. Compared against `desired` so a load
     /// that fit badly is visible without waiting for a sync.
     live_ctx: Vec<(String, u64)>,
+    /// Failure explanations mined from router.log by the poller, so the
+    /// render path never opens that file.
+    mined_failures: std::collections::BTreeMap<String, String>,
+    /// Hermes's two files, re-read only when they change on disk.
+    hermes_cfg_file: CachedFile,
+    hermes_cache_file: CachedFile,
     ram_mib: u64,
     live_vram: Option<(u64, u64)>,
 
@@ -373,6 +408,9 @@ impl App {
             rows: Vec::new(),
             desired: Vec::new(),
             live_ctx: Vec::new(),
+            mined_failures: Default::default(),
+            hermes_cfg_file: Default::default(),
+            hermes_cache_file: Default::default(),
             ram_mib: rows::read_ram_mib(),
             live_vram: None,
             edit_scan_dirs: String::new(),
@@ -596,6 +634,8 @@ impl App {
             let mut last_state_sent: Option<router::RouterState> = None;
             let mut last_ollama_sent: Option<ollama::OllamaStatus> = None;
             let mut last_live_sent: Option<Vec<(String, u64)>> = None;
+            let mut mined_failures: std::collections::BTreeMap<String, String> =
+                Default::default();
             // When the router last showed generation activity. Starts at
             // \"now\": a fresh app assumes recent activity until proven quiet.
             let mut last_activity_epoch: u64 = advisor::now_epoch();
@@ -728,22 +768,36 @@ impl App {
                         // Truncated/rotated (router restart): start over.
                         miner = evidence::LogMiner::default();
                         mined_offset = 0;
+                        mined_failures.clear();
                     }
                     // Read ONLY the new bytes, consume up to the last
                     // complete line (a chunk boundary must not split a
                     // line — or a UTF-8 character — in half).
-                    let fed = (|| -> Option<()> {
+                    let chunk = (|| -> Option<String> {
                         use std::io::{Read, Seek, SeekFrom};
                         let mut f = std::fs::File::open(&log_path).ok()?;
                         f.seek(SeekFrom::Start(mined_offset)).ok()?;
                         let mut new_bytes = Vec::new();
                         f.read_to_end(&mut new_bytes).ok()?;
                         let cut = new_bytes.iter().rposition(|b| *b == b'\n')? + 1;
-                        miner.feed(&String::from_utf8_lossy(&new_bytes[..cut]));
+                        let text = String::from_utf8_lossy(&new_bytes[..cut]).into_owned();
+                        miner.feed(&text);
                         mined_offset += cut as u64;
-                        Some(())
-                    })()
-                    .is_some();
+                        Some(text)
+                    })();
+                    // Failure explanations, mined from the SAME chunk.
+                    // The Library rows used to read the whole router.log
+                    // and mine it per row, per repaint — 5.2 MB on this
+                    // machine (review finding M6, 2026-09-21; the review
+                    // named the category but not this instance).
+                    if let Some(text) = &chunk {
+                        let found = advisor::mine_failures(text);
+                        if !found.is_empty() {
+                            mined_failures.extend(found);
+                            let _ = tx.send(Msg::MinedFailures(mined_failures.clone()));
+                        }
+                    }
+                    let fed = chunk.is_some();
                     if fed {
                         // Fingerprints only need the head of the file.
                         let head = system::read_head(&log_path, 8192).unwrap_or_default();
@@ -1900,6 +1954,10 @@ impl App {
                     rebuild = true;
                 }
                 Msg::LiveContexts(c) => self.live_ctx = c,
+                Msg::MinedFailures(m) => {
+                    self.mined_failures = m;
+                    rebuild = true;
+                }
                 Msg::Ollama(o) => self.ollama = o,
                 Msg::Vram(v) => self.live_vram = v,
                 Msg::Persistence(state) => {
@@ -2344,6 +2402,10 @@ impl App {
         let mut pending: Option<RowAction> = None;
         let mut why: Option<DiagnosisView> = None;
         let rows = self.rows.clone();
+        // Cloned like `rows`, for the same reason (the table closure
+        // cannot borrow &mut self). A handful of entries; the thing it
+        // replaces was a 5.2 MB file read per row, per repaint.
+        let mined_failures = self.mined_failures.clone();
         let is_disabled = |r: &rows::Row| {
             rows::ignore_key(r.path.as_deref(), r.router_id.as_deref())
                 .is_some_and(|k| self.cfg.disabled.contains(&k))
@@ -2691,9 +2753,7 @@ impl App {
                 let mut failure = r.failure.clone();
                 if let (Some(f), Some(id)) = (&failure, &r.router_id)
                     && diagnose::classify(f) == diagnose::Cause::Unknown
-                    && let Ok(log) =
-                        std::fs::read_to_string(router::state_dir().join("router.log"))
-                    && let Some(mined) = advisor::mine_failures(&log).get(id)
+                    && let Some(mined) = mined_failures.get(id)
                 {
                     failure = Some(format!("{f} — {mined}"));
                 }
@@ -3917,7 +3977,7 @@ impl App {
             return;
         }
         let base_url = format!("http://127.0.0.1:{}/v1", self.cfg.port);
-        let cfg_text = std::fs::read_to_string(hermes::config_path(&home)).unwrap_or_default();
+        let cfg_text = self.hermes_cfg_file.get(&hermes::config_path(&home)).to_string();
         let registered = hermes::registered_provider(&cfg_text, &base_url);
         ui.label(format!("Config: {}", hermes::config_path(&home).display()));
         ui.small(
@@ -4054,7 +4114,7 @@ impl App {
         // whole previous block behind, and the cache never removes.
         // Named with a button each; never pruned as a side effect.
         let cache_path = hermes::context_cache_path(&home);
-        let cache_text = std::fs::read_to_string(&cache_path).unwrap_or_default();
+        let cache_text = self.hermes_cache_file.get(&cache_path).to_string();
         for st in hermes::unreferenced_base_urls(&cfg_text, &cache_text) {
             ui.horizontal(|ui| {
                 ui.small(format!(
@@ -7089,5 +7149,49 @@ mod tofu_tests {
             }
         }
         out
+    }
+}
+
+#[cfg(test)]
+mod cached_file_tests {
+    use super::CachedFile;
+
+    /// Review finding M6 (2026-09-21). Both halves matter: a changed
+    /// file must be picked up, and an UNCHANGED one must not be read
+    /// again — a cache that re-reads anyway is just a slower read.
+    #[test]
+    fn a_cached_file_refreshes_on_change_and_not_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.yaml");
+        std::fs::write(&p, "one").unwrap();
+
+        let mut c = CachedFile::default();
+        assert_eq!(c.get(&p), "one");
+
+        // Changed content AND a newer mtime: must be re-read.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(&p, "two").unwrap();
+        assert_eq!(c.get(&p), "two");
+
+        // Changed content, mtime rolled BACK to what we already saw.
+        // A cache that reads every time would return "three"; ours must
+        // still say "two", which is what proves it is a cache at all.
+        let before = std::fs::metadata(&p).unwrap().modified().unwrap();
+        std::fs::write(&p, "three").unwrap();
+        let f = std::fs::File::options().write(true).open(&p).unwrap();
+        f.set_times(std::fs::FileTimes::new().set_modified(before)).unwrap();
+        assert_eq!(c.get(&p), "two", "unchanged mtime must not trigger a read");
+    }
+
+    /// A missing file reads as empty rather than panicking, and starts
+    /// working the moment it appears.
+    #[test]
+    fn a_missing_file_is_empty_until_it_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("absent.yaml");
+        let mut c = CachedFile::default();
+        assert_eq!(c.get(&p), "");
+        std::fs::write(&p, "now here").unwrap();
+        assert_eq!(c.get(&p), "now here");
     }
 }
