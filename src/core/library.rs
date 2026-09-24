@@ -306,7 +306,14 @@ fn walk_gguf(dir: &Path, depth: usize, out: &mut Vec<ModelFile>) {
             .extension()
             .is_some_and(|x| x.eq_ignore_ascii_case("gguf"))
         {
-            let file_size = e.metadata().map(|m| m.len()).unwrap_or(0);
+            // `std::fs::metadata`, NOT `e.metadata()`: the latter is
+            // lstat, so a symlinked .gguf was listed with the length of
+            // the link's own target string — tens of bytes instead of
+            // tens of gigabytes. CLAUDE.md documents that a symlink
+            // .gguf -> blob satisfies --models-dir, and the dedupe key
+            // below already follows the link; only the displayed size
+            // did not (review finding M3, 2026-09-21).
+            let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             out.push(ModelFile {
                 meta: gguf::read_meta(&path).ok(),
                 path,
@@ -741,5 +748,38 @@ mod tests {
             mmproj: None,
         };
         assert_eq!(alias_suggestion(&ollama), "rafw007-qwen36-coder-q4_k_m");
+    }
+
+    /// Review finding M3 (2026-09-21). `DirEntry::metadata()` does not
+    /// follow symlinks, so a symlinked model was sized by its link —
+    /// a few dozen bytes — while the dedupe key (which uses
+    /// `std::fs::metadata`) saw the real file. The Library showed
+    /// "0.0 GB" for a 17 GB model.
+    #[test]
+    fn a_symlinked_model_reports_the_real_files_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("blobs");
+        let shelf = dir.path().join("shelf");
+        std::fs::create_dir_all(&store).unwrap();
+        std::fs::create_dir_all(&shelf).unwrap();
+
+        let real = store.join("sha256-abc");
+        std::fs::write(&real, vec![0u8; 4096]).unwrap();
+        std::os::unix::fs::symlink(&real, shelf.join("linked.gguf")).unwrap();
+        std::fs::write(shelf.join("plain.gguf"), vec![0u8; 2048]).unwrap();
+
+        let models = scan(std::slice::from_ref(&shelf), &[], None);
+        let by = |n: &str| {
+            models
+                .iter()
+                .find(|m| m.path.file_name().unwrap() == n)
+                .unwrap_or_else(|| panic!("{n} not scanned: {models:?}"))
+        };
+        assert_eq!(by("plain.gguf").file_size, 2048);
+        assert_eq!(
+            by("linked.gguf").file_size,
+            4096,
+            "the model's size, not the symlink's"
+        );
     }
 }
