@@ -29,6 +29,37 @@ pub struct Bucket {
     pub prompt: u64,
     pub generated: u64,
     pub reused: u64,
+    /// This model's CUMULATIVE turn count once this row is counted —
+    /// the row's identity, not a quantity to sum.
+    ///
+    /// The ledger is appended before the cursor advances, so a crash
+    /// between the two writes re-credits the same lines on the next
+    /// tick and `compact` (which folds by ADDITION) absorbs the
+    /// duplicate into a plausible total (review finding M9,
+    /// 2026-09-21).
+    ///
+    /// The review's fix — advance the cursor first — trades
+    /// over-counting for under-counting. This codebase has already
+    /// ruled on that trade: "a silently under-reported number is the
+    /// worst outcome for a product whose thesis is 'measured, not
+    /// guessed'". So instead the append is made IDEMPOTENT: `through`
+    /// strictly increases per model, a replay carries one we already
+    /// hold, and it is skipped.
+    ///
+    /// 0 means "written before this existed" and is never deduped —
+    /// legacy rows all share it and folding them would delete history.
+    #[serde(default)]
+    pub through: u64,
+    /// Which log instance `through` counts within.
+    ///
+    /// `through` resets when the router restarts, because the cursor
+    /// does: a new instance legitimately credits its own first turn as
+    /// 1 again. Without this the second instance's row looked like a
+    /// replay of the first's and was silently dropped — caught by
+    /// `harvest_is_idempotent_and_ledger_accumulates_across_instances`
+    /// while fixing M9, 2026-09-23. Empty = a legacy row, never deduped.
+    #[serde(default)]
+    pub instance: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -241,7 +272,18 @@ pub fn harvest_stats(
                 prompt: d.prompt,
                 generated: d.generated,
                 reused: d.reused,
+                // Where this model stands AFTER the row — the identity
+                // a replay would repeat.
+                through: totals.get(model).map(|t| t.turns).unwrap_or(d.turns),
+                instance: fp.clone(),
             })
+            .collect();
+        // Skip anything the ledger already holds: the previous tick
+        // appended and then died before its cursor landed.
+        let held = already_recorded(dir);
+        let buckets: Vec<Bucket> = buckets
+            .into_iter()
+            .filter(|b| !held.contains(&(b.model.clone(), b.instance.clone(), b.through)))
             .collect();
         crate::core::history::append_jsonl(&ledger_path(dir), &buckets)?;
         // C2 (efficiency review, closed 2026-09-01): appends land one
@@ -282,6 +324,11 @@ pub fn read_all(dir: &Path) -> Vec<Bucket> {
 }
 
 /// Fold same-(hour, model) rows into one. Lossless: buckets are sums.
+///
+/// `through` is the exception — it is an identity, not a quantity, so
+/// the fold keeps the HIGHEST. That is the only one a replay can
+/// carry (the cursor never goes backwards), so dedup survives
+/// compaction.
 pub fn compact(buckets: Vec<Bucket>) -> Vec<Bucket> {
     let mut by_key: std::collections::BTreeMap<(u64, String), Bucket> = Default::default();
     for b in buckets {
@@ -292,17 +339,38 @@ pub fn compact(buckets: Vec<Bucket>) -> Vec<Bucket> {
             prompt: 0,
             generated: 0,
             reused: 0,
+            through: 0,
+            instance: b.instance.clone(),
         });
         e.turns += b.turns;
         e.prompt += b.prompt;
         e.generated += b.generated;
         e.reused += b.reused;
+        // Identity, not quantity: keep the latest, which is the only
+        // one a replay can carry.
+        if b.through >= e.through {
+            e.through = b.through;
+            e.instance = b.instance.clone();
+        }
     }
     by_key.into_values().collect()
 }
 
 /// Rewrite the ledger compacted when it holds ~2x more rows than its
 /// compacted form would. Cheap check (line count vs distinct keys).
+/// Identities the ledger already carries: `(model, instance, through)`.
+///
+/// Legacy rows need no special case — they carry an empty instance, so
+/// their identity can never equal a new row's. (A `!is_empty()` filter
+/// here was unreachable, and removed rather than kept as code no test
+/// could reach.)
+fn already_recorded(dir: &Path) -> std::collections::HashSet<(String, String, u64)> {
+    read_all(dir)
+        .into_iter()
+        .map(|b| (b.model, b.instance, b.through))
+        .collect()
+}
+
 fn maybe_compact(dir: &Path) -> anyhow::Result<()> {
     let all = read_all(dir);
     if all.len() < 500 {
@@ -641,6 +709,8 @@ mod tests {
             prompt: p,
             generated: g,
             reused: r,
+            through: 0,
+            instance: String::new(),
         };
         let raw = vec![
             b(3600, "qwen", 1, 1000, 100, 300),
@@ -798,6 +868,8 @@ mod tests {
             prompt: 0,
             generated,
             reused: 0,
+            through: 0,
+            instance: String::new(),
         };
         let buckets = vec![b("fast", 1_000_000), b("mystery", 500_000)];
         let r = report(&buckets, None, None);
@@ -826,6 +898,8 @@ mod tests {
             prompt,
             generated,
             reused: 0,
+            through: 0,
+            instance: String::new(),
         };
         let buckets = vec![
             b(0, "a", 900, 100),
@@ -842,5 +916,121 @@ mod tests {
         // Range excludes day two.
         let r = report(&buckets, None, Some(86_400));
         assert!(!r.per_model.contains_key("b"));
+    }
+}
+
+#[cfg(test)]
+mod crash_tests {
+    use super::*;
+    use crate::core::evidence::ModelCacheStats;
+
+    fn stats(model: &str, turns: u32, prompt: u64, generated: u64) -> Vec<ModelCacheStats> {
+        vec![ModelCacheStats {
+            model: model.into(),
+            turns,
+            prompt_tokens: prompt,
+            generated_tokens: generated,
+            reused_tokens: 0,
+            reuse_disabled: false,
+            reuse_unsupported_context: false,
+        }]
+    }
+
+    /// Review finding M9 (2026-09-21): the ledger row is appended
+    /// BEFORE the cursor advances, so a crash between the two writes
+    /// re-credits the same lines on the next tick — and `compact` folds
+    /// by addition, so the duplicate disappears into a plausible total.
+    ///
+    /// Simulated exactly: harvest, then roll the cursor back to what it
+    /// was (a crash before its write landed), then harvest the same
+    /// evidence again.
+    #[test]
+    fn a_crash_between_the_two_writes_does_not_double_the_ledger() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        let log = "[41001] fingerprint material for this run\n";
+        let before = std::fs::read_to_string(cursor_path(d)).unwrap_or_default();
+
+        let (credited, damage) = harvest_stats(d, &stats("m", 10, 1000, 200), log, 3600).unwrap();
+        assert_eq!(credited, 1, "first harvest credits the model");
+        assert!(damage.is_none());
+
+        // The crash: the append landed, the cursor write did not.
+        if before.is_empty() {
+            let _ = std::fs::remove_file(cursor_path(d));
+        } else {
+            std::fs::write(cursor_path(d), &before).unwrap();
+        }
+
+        let (_again, _) = harvest_stats(d, &stats("m", 10, 1000, 200), log, 3600).unwrap();
+
+        let rows = read_all(d);
+        assert_eq!(
+            rows.len(),
+            1,
+            "the replayed row must be recognised, not appended again: {rows:?}"
+        );
+        let report = report(&rows, None, None);
+        assert_eq!(
+            report.fleet.generated, 200,
+            "and the totals must not have doubled: {report:?}"
+        );
+    }
+
+    /// Rows written before `through` existed carry 0. They are not
+    /// identities and must never be folded away — that would delete
+    /// real history on the first harvest after an upgrade.
+    #[test]
+    fn legacy_rows_are_never_deduped() {
+        let a = Bucket { when: 0, model: "m".into(), turns: 1, prompt: 1, generated: 1, reused: 0, through: 0, instance: String::new() };
+        let b = Bucket { when: 0, model: "m".into(), turns: 2, prompt: 2, generated: 2, reused: 0, through: 0, instance: String::new() };
+        let folded = compact(vec![a, b]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].generated, 3, "legacy rows still SUM");
+    }
+
+    /// Compaction must not destroy the identity, or a replay after a
+    /// fold would be credited twice.
+    #[test]
+    fn compaction_keeps_the_latest_identity() {
+        let mk = |turns, through| Bucket {
+            when: 0, model: "m".into(), turns, prompt: 0, generated: 0, reused: 0, through, instance: String::new() };
+        let folded = compact(vec![mk(10, 10), mk(15, 25)]);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].turns, 25, "quantities sum");
+        assert_eq!(folded[0].through, 25, "identity keeps the highest");
+    }
+
+    /// Rows written before this stamp existed carry no instance. They
+    /// are not identities, so they must never make a real credit look
+    /// like a replay — that would silently delete the first harvest
+    /// after an upgrade.
+    #[test]
+    fn a_legacy_ledger_does_not_swallow_the_next_credit() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        std::fs::create_dir_all(d).unwrap();
+        // A ledger as an older build left it: no instance, no through.
+        crate::core::history::append_jsonl(
+            &ledger_path(d),
+            &[Bucket {
+                when: 0,
+                model: "m".into(),
+                turns: 10,
+                prompt: 1000,
+                generated: 200,
+                reused: 0,
+                through: 0,
+                instance: String::new(),
+            }],
+        )
+        .unwrap();
+
+        let (credited, _) =
+            harvest_stats(d, &stats("m", 10, 1000, 200), "fresh log\n", 3600).unwrap();
+        assert_eq!(credited, 1, "the new credit must land");
+        let rows = read_all(d);
+        assert_eq!(rows.len(), 2, "beside the legacy row, not instead of it: {rows:?}");
+        assert_eq!(report(&rows, None, None).fleet.generated, 400);
     }
 }
