@@ -66,13 +66,41 @@ fn is_shared_memory_gpu(name: &str) -> bool {
 }
 
 /// Group backend device views into physical GPUs by name, first-seen order.
+/// The backend half of a device id: `CUDA0` -> "CUDA", `Vulkan11` -> "Vulkan".
+fn device_backend(id: &str) -> &str {
+    id.trim_end_matches(|c: char| c.is_ascii_digit())
+}
+
 pub fn physical_gpus(devices: &[Device]) -> Vec<PhysicalGpu> {
-    let mut out: Vec<PhysicalGpu> = Vec::new();
+    // Which card THIS one is, independent of backend: the nth device
+    // of that name within its own backend.
+    //
+    // Deduping on the name alone merged two identical cards into one
+    // (review finding M1, 2026-09-21) — a 2x RTX 3090 Ti rig reported
+    // `len() == 1`. Deduping on the id's ordinal instead breaks the
+    // case the dedupe exists for, because backends enumerate DIFFERENT
+    // device sets: with an iGPU present, CUDA0 and Vulkan1 are one
+    // card (found by a mutation check, 2026-09-23). Counting per
+    // (backend, name) handles both: the nth "RTX 4090" CUDA reports is
+    // the nth "RTX 4090" Vulkan reports, whatever their ordinals.
+    let mut seen: std::collections::HashMap<(&str, &str), usize> = Default::default();
+    let mut key_of: Vec<(String, usize)> = Vec::with_capacity(devices.len());
     for d in devices {
-        if let Some(g) = out.iter_mut().find(|g| g.name == d.name) {
-            g.ids.push(d.id.clone());
-            g.vram_mib = g.vram_mib.min(d.total_mib);
+        let n = seen
+            .entry((device_backend(&d.id), d.name.as_str()))
+            .or_insert(0);
+        key_of.push((d.name.clone(), *n));
+        *n += 1;
+    }
+
+    let mut out: Vec<PhysicalGpu> = Vec::new();
+    let mut keys: Vec<(String, usize)> = Vec::new();
+    for (d, key) in devices.iter().zip(key_of) {
+        if let Some(i) = keys.iter().position(|k| *k == key) {
+            out[i].ids.push(d.id.clone());
+            out[i].vram_mib = out[i].vram_mib.min(d.total_mib);
         } else {
+            keys.push(key);
             out.push(PhysicalGpu {
                 name: d.name.clone(),
                 vram_mib: d.total_mib,
@@ -272,20 +300,52 @@ pub fn build_of(server: &Path) -> Option<u64> {
 /// Live VRAM (free, total) in MiB for the primary NVIDIA card, via
 /// nvidia-smi — cheap enough for a 2s poll, and unlike `--list-devices`
 /// it doesn't initialize CUDA. `None` when nvidia-smi is absent/fails.
-pub fn nvidia_vram_mib() -> Option<(u64, u64)> {
-    let out = Command::new("nvidia-smi")
+/// `(free, total)` MiB for EVERY card nvidia-smi reports, in its order.
+///
+/// This used to take `.lines().next()` and answer for card 0 alone —
+/// the one place in core that modelled "the GPU" as a scalar, against
+/// the house rule that GPU state is always a `Vec` (review finding H5,
+/// 2026-09-21). On a multi-GPU box every VRAM-keyed figure described
+/// one card and silently ignored the rest.
+pub fn nvidia_vram_per_card() -> Vec<(u64, u64)> {
+    let Ok(out) = Command::new("nvidia-smi")
         .args([
             "--query-gpu=memory.used,memory.total",
             "--format=csv,noheader,nounits",
         ])
         .output()
-        .ok()?;
-    let line = String::from_utf8_lossy(&out.stdout);
-    let line = line.lines().next()?;
-    let (used, total) = line.split_once(',')?;
-    let used: u64 = used.trim().parse().ok()?;
-    let total: u64 = total.trim().parse().ok()?;
-    Some((total.saturating_sub(used), total))
+    else {
+        return Vec::new();
+    };
+    parse_vram_csv(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Pure half of [`nvidia_vram_per_card`].
+pub fn parse_vram_csv(stdout: &str) -> Vec<(u64, u64)> {
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let (used, total) = line.split_once(',')?;
+            let used: u64 = used.trim().parse().ok()?;
+            let total: u64 = total.trim().parse().ok()?;
+            Some((total.saturating_sub(used), total))
+        })
+        .collect()
+}
+
+/// Fleet totals: free and total summed across cards.
+///
+/// Summing is the right aggregate for "is there room to load" — that
+/// is what `--fit` distributes across — but it is NOT a description of
+/// any one card, so anything reasoning about a single device must use
+/// [`nvidia_vram_per_card`].
+pub fn nvidia_vram_mib() -> Option<(u64, u64)> {
+    let cards = nvidia_vram_per_card();
+    (!cards.is_empty()).then(|| {
+        cards
+            .iter()
+            .fold((0, 0), |(f, t), (cf, ct)| (f + cf, t + ct))
+    })
 }
 
 /// Ask an install what devices it can see. Errors (bad binary, no devices)
@@ -385,6 +445,94 @@ mod tests {
         assert_eq!(advice_vram_mib(&igpu_only), 48_012);
     }
 
+    /// Review finding M1 (2026-09-21). Two identical cards report the
+    /// same name, so a name-only dedupe merged them and
+    /// `physical_gpus().len()` said 1 for a dual-GPU box — while
+    /// `advice_vram_mib` reported one card's worth of VRAM.
+    #[test]
+    fn two_identical_cards_stay_two_cards() {
+        let d = |id: &str, name: &str, mib: u64| Device {
+            id: id.into(),
+            name: name.into(),
+            total_mib: mib,
+            free_mib: mib,
+        };
+        // A 2x RTX 3090 Ti rig, each card seen by two backends.
+        let devices = vec![
+            d("CUDA0", "NVIDIA GeForce RTX 3090 Ti", 24_564),
+            d("CUDA1", "NVIDIA GeForce RTX 3090 Ti", 24_564),
+            d("Vulkan0", "NVIDIA GeForce RTX 3090 Ti", 24_576),
+            d("Vulkan1", "NVIDIA GeForce RTX 3090 Ti", 24_576),
+        ];
+        let gpus = physical_gpus(&devices);
+        assert_eq!(gpus.len(), 2, "two cards, not one: {gpus:?}");
+        assert_eq!(gpus[0].ids, vec!["CUDA0", "Vulkan0"], "same card, two views");
+        assert_eq!(gpus[1].ids, vec!["CUDA1", "Vulkan1"]);
+        assert!(gpus.iter().all(|g| g.vram_mib == 24_564), "{gpus:?}");
+    }
+
+    /// And the case the dedupe exists for still works: ONE card seen
+    /// through two backends is one card.
+    #[test]
+    fn one_card_through_two_backends_is_still_one_card() {
+        let devices = vec![
+            Device { id: "CUDA0".into(), name: "RTX 4090".into(), total_mib: 24_564, free_mib: 0 },
+            Device { id: "Vulkan0".into(), name: "RTX 4090".into(), total_mib: 24_576, free_mib: 0 },
+        ];
+        let gpus = physical_gpus(&devices);
+        assert_eq!(gpus.len(), 1);
+        assert_eq!(gpus[0].ids, vec!["CUDA0", "Vulkan0"]);
+    }
+
+    #[test]
+    fn a_device_backend_is_the_id_without_its_ordinal() {
+        assert_eq!(device_backend("CUDA0"), "CUDA");
+        assert_eq!(device_backend("Vulkan11"), "Vulkan");
+        assert_eq!(device_backend("CPU"), "CPU");
+    }
+
+    /// The dev machine, verbatim from `--scan` on 2026-09-23: one
+    /// dedicated card seen by both backends, plus an iGPU that Vulkan
+    /// enumerates SECOND. Real shapes beat invented ones — my first
+    /// fix passed an invented fixture with the iGPU at Vulkan0 and was
+    /// still wrong.
+    #[test]
+    fn the_dev_machines_real_device_list_resolves_to_two_gpus() {
+        let devices = vec![
+            Device { id: "CUDA0".into(), name: "NVIDIA GeForce RTX 3090 Ti".into(), total_mib: 24_111, free_mib: 0 },
+            Device { id: "Vulkan0".into(), name: "NVIDIA GeForce RTX 3090 Ti".into(), total_mib: 24_564, free_mib: 0 },
+            Device { id: "Vulkan1".into(), name: "Intel(R) UHD Graphics 770 (ADL-S GT1)".into(), total_mib: 48_012, free_mib: 0 },
+        ];
+        let gpus = physical_gpus(&devices);
+        assert_eq!(gpus.len(), 2, "{gpus:?}");
+        assert_eq!(gpus[0].ids, vec!["CUDA0", "Vulkan0"], "one card, two views");
+        assert_eq!(gpus[0].vram_mib, 24_111, "the conservative of the two views");
+        assert!(!gpus[0].shared_memory);
+        assert!(gpus[1].shared_memory, "the iGPU's 48 GB is borrowed system RAM");
+        assert_eq!(advice_vram_mib(&devices), 24_111, "advice uses the real card");
+    }
+
+    /// Backends enumerate DIFFERENT device sets, so the same ordinal is
+    /// not the same card: CUDA sees only NVIDIA, while Vulkan sees the
+    /// iGPU first. Ordinal alone would merge a 4090 with an integrated
+    /// chip and report one GPU with the iGPU's borrowed memory
+    /// (mutation check M54, 2026-09-23).
+    #[test]
+    fn the_same_ordinal_on_two_backends_is_not_the_same_card() {
+        let devices = vec![
+            Device { id: "CUDA0".into(), name: "NVIDIA GeForce RTX 4090".into(), total_mib: 24_564, free_mib: 0 },
+            Device { id: "Vulkan0".into(), name: "Intel(R) UHD Graphics 770".into(), total_mib: 31_000, free_mib: 0 },
+            Device { id: "Vulkan1".into(), name: "NVIDIA GeForce RTX 4090".into(), total_mib: 24_576, free_mib: 0 },
+        ];
+        let gpus = physical_gpus(&devices);
+        assert_eq!(gpus.len(), 2, "a 4090 and an iGPU, not one merged thing: {gpus:?}");
+        let nv = gpus.iter().find(|g| g.name.contains("4090")).unwrap();
+        assert_eq!(nv.ids, vec!["CUDA0", "Vulkan1"], "the card, across both backends");
+        assert!(!nv.shared_memory);
+        let igpu = gpus.iter().find(|g| g.name.contains("Intel")).unwrap();
+        assert!(igpu.shared_memory, "borrowed system memory, not VRAM");
+    }
+
     #[test]
     fn parses_version_output() {
         let out = "version: 10216 (876a43211)\nbuilt with GNU 15.2.0 for Linux x86_64\n";
@@ -439,5 +587,48 @@ Available devices:
     #[test]
     fn device_prose_lines_are_ignored() {
         assert!(parse_device_list("Available devices:\nno devices found\n").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod vram_tests {
+    use super::*;
+
+    /// Review finding H5 (2026-09-21): `.lines().next()` answered for
+    /// card 0 and dropped the rest — the one scalar "the GPU" in core.
+    /// Real nvidia-smi output shape, two cards.
+    #[test]
+    fn every_card_is_reported_not_just_the_first() {
+        let out = "3098, 24564\n11020, 24564\n";
+        assert_eq!(
+            parse_vram_csv(out),
+            vec![(21_466, 24_564), (13_544, 24_564)],
+            "free = total - used, per card, in nvidia-smi order"
+        );
+    }
+
+    /// The dev machine: one card. `len() == 1` is the single-GPU case,
+    /// not a special case.
+    #[test]
+    fn a_single_card_is_just_a_one_element_list() {
+        assert_eq!(parse_vram_csv("3098, 24564\n"), vec![(21_466, 24_564)]);
+    }
+
+    /// Summing is what "is there room to load" means across cards, and
+    /// it must not silently answer for one of them.
+    #[test]
+    fn the_fleet_total_sums_every_card() {
+        let cards = parse_vram_csv("3098, 24564\n11020, 24564\n");
+        let total = cards.iter().fold((0u64, 0u64), |(f, t), (cf, ct)| (f + cf, t + ct));
+        assert_eq!(total, (35_010, 49_128));
+    }
+
+    /// No driver, no cards, junk output: an empty list, never a zero
+    /// that reads as "no memory free".
+    #[test]
+    fn unreadable_output_yields_no_cards() {
+        assert!(parse_vram_csv("").is_empty());
+        assert!(parse_vram_csv("no devices found\n").is_empty());
+        assert!(parse_vram_csv("abc, def\n").is_empty());
     }
 }

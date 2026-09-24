@@ -6312,7 +6312,7 @@ impl App {
                      during inference slows YOUR tokens (measured 2026-09-01). \
                      Resumes when the turn ends."
                 } else {
-                    "Live from nvidia-smi, whole card (all processes), ~2s refresh."
+                    "Live from nvidia-smi, summed across all cards (all processes), ~2s refresh."
                 });
                 ui.separator();
             }
