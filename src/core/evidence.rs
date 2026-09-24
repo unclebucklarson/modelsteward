@@ -200,23 +200,49 @@ pub struct Coverage {
     pub finished: usize,
     /// Turns we successfully attributed and credited.
     pub credited: usize,
+    /// Turn-completion lines counted WITHOUT passing the `port_prefix` /
+    /// `task_id` gates — the independent witness. `finished` and
+    /// `credited` both sit behind those gates, so a drift in the line's
+    /// common prefix silences both at once and the old canary can never
+    /// fire (review finding H2, 2026-09-21).
+    pub seen: usize,
 }
 
 impl Coverage {
-    /// Materially more finished turns than credited ones: our parser is
-    /// probably behind the log's dialect. Small gaps are normal —
-    /// llama.cpp omits the prompt-eval line for a fully cached prompt.
+    /// Two independent ways the parser can fall behind the log, and it
+    /// takes both questions to cover the space:
+    ///
+    /// - the INNER dialect moved: we still recognise the line and its
+    ///   task id, but no longer the fields inside it. `finished` climbs
+    ///   while `credited` does not. This is the drift we have actually
+    ///   had (b10630 -> b10672).
+    /// - the GATES stopped matching: the line prefix or the task field
+    ///   changed, so `port_prefix`/`task_id` reject everything and
+    ///   `finished` and `credited` fall silent TOGETHER. The first
+    ///   question cannot see this — `finished >= 10` never holds — which
+    ///   is why `seen` is counted before any gate (finding H2,
+    ///   2026-09-21).
+    ///
+    /// Small gaps are normal in both: llama.cpp omits the prompt-eval
+    /// line for a fully cached prompt, so a healthy log credits slightly
+    /// fewer turns than it finishes.
     pub fn drifting(&self) -> bool {
-        self.finished >= 10 && self.credited * 4 < self.finished * 3
+        let inner_dialect_moved = self.finished >= 10 && self.credited * 4 < self.finished * 3;
+        let gates_stopped_matching = self.seen >= 10 && self.finished * 4 < self.seen * 3;
+        inner_dialect_moved || gates_stopped_matching
     }
 
     pub fn note(&self) -> Option<String> {
         self.drifting().then(|| {
+            // Report against whichever total is larger. When the gates
+            // fail, `finished` is 0 and "0 of 0" would say nothing;
+            // `seen` is then the only honest denominator.
+            let total = self.finished.max(self.seen);
             format!(
                 "only {} of {} finished turns in router.log could be read — the \
                  log format has probably changed (llama.cpp dialects drift). \
                  Token counts below are UNDER-reported; please report this.",
-                self.credited, self.finished
+                self.credited, total
             )
         })
     }
@@ -303,6 +329,11 @@ impl LogMiner {
 
     fn feed_line(&mut self, line: &str) {
         let coverage = &mut self.coverage;
+        // BEFORE every gate, deliberately: this is the only counter that
+        // survives a change to the line's prefix or field names.
+        if line.contains("stop processing") {
+            coverage.seen += 1;
+        }
         let port_model = &mut self.port_model;
         let port_gen = &mut self.port_gen;
         let disabled_ports = &mut self.disabled_ports;
@@ -725,5 +756,80 @@ mod tests {
         assert_eq!(child_port(log, "alpha"), Some(40007));
         assert_eq!(child_port(log, "beta"), Some(40002));
         assert_eq!(child_port(log, "gamma"), None);
+    }
+
+    /// Review finding H2 (2026-09-21). `finished` and `credited` both
+    /// increment behind `port_prefix` + `task_id`. If llama.cpp ever
+    /// prefixes the line (a timestamp, a reflowed bracket) or renames
+    /// the task field, BOTH stop together: `finished >= 10` is never
+    /// reached, the canary stays silent, and the meter credits zero
+    /// while tokens flow — the exact scenario CLAUDE.md tells us to
+    /// suspect first ("log grammars drift").
+    ///
+    /// The pre-existing drift test passes because it only drifts the
+    /// INNER dialect; the gates still match. That made the canary look
+    /// proven against a class it cannot see.
+    #[test]
+    fn drift_in_the_line_prefix_is_still_caught() {
+        let mut prefixed = String::new();
+        for i in 0..40 {
+            // A leading timestamp — port_prefix's strip_prefix('[') fails.
+            prefixed.push_str(&format!(
+                "2026-09-23T10:00:00 [40001] 0.10 I slot release: id 0 | task {i} | \
+                 stop processing: n_tokens = 100, truncated = 0\n"
+            ));
+        }
+        let (stats, cov) = cache_effectiveness_with_coverage(&prefixed);
+        assert!(stats.is_empty(), "nothing creditable");
+        assert_eq!(cov.finished, 0, "the gate swallowed every line");
+        assert_eq!(cov.credited, 0);
+        assert_eq!(cov.seen, 40, "but the log plainly finished 40 turns");
+        assert!(
+            cov.drifting(),
+            "a parser that sees NOTHING while the log finishes 40 turns is the \
+             loudest possible drift signal: {cov:?}"
+        );
+        let note = cov.note().expect("must produce a note");
+        assert!(note.contains("40"), "{note}");
+    }
+
+    /// The independent counter must not cry wolf on a healthy log, or
+    /// it is worse than the blind spot it replaces.
+    #[test]
+    fn the_independent_witness_agrees_on_a_healthy_log() {
+        let mut healthy = String::from(
+            "1.0 I srv load: spawning server instance with name=coder on port 40001\n",
+        );
+        for i in 0..40 {
+            healthy.push_str(&format!(
+                "[40001] 0.05 I slot print_timing: id 0 | task {i} | prompt processing, n_tokens = 1000, progress = 1.00\n"
+            ));
+            healthy.push_str(&format!(
+                "[40001] 0.09 I slot print_timing: id 0 | task {i} | n_gen = 100, tg = 40.00 t/s\n"
+            ));
+            healthy.push_str(&format!(
+                "[40001] 0.10 I slot release: id 0 | task {i} | stop processing: n_tokens = 1100, truncated = 0\n"
+            ));
+        }
+        let (_, cov) = cache_effectiveness_with_coverage(&healthy);
+        assert_eq!((cov.seen, cov.finished, cov.credited), (40, 40, 40));
+        assert!(!cov.drifting(), "{cov:?}");
+        assert!(cov.note().is_none());
+    }
+
+    /// A quiet log must stay quiet: the new counter needs the same
+    /// "enough evidence" floor as the old one.
+    #[test]
+    fn a_handful_of_unparsed_lines_is_not_yet_drift() {
+        let mut few = String::new();
+        for i in 0..3 {
+            few.push_str(&format!(
+                "2026-09-23T10:00:00 [40001] 0.10 I slot release: id 0 | task {i} | \
+                 stop processing: n_tokens = 100, truncated = 0\n"
+            ));
+        }
+        let (_, cov) = cache_effectiveness_with_coverage(&few);
+        assert_eq!(cov.seen, 3);
+        assert!(!cov.drifting(), "three lines is noise, not a dialect change");
     }
 }
