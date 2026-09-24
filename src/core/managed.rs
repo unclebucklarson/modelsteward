@@ -185,6 +185,25 @@ pub struct Archive {
     pub server: PathBuf,
 }
 
+/// Build number from an archive directory name.
+///
+/// `build_release` archives same-number variants under a
+/// backend-suffixed label (`b10672-cuda`) so both stay pinnable. The
+/// parse was `strip_prefix('b').parse::<u64>()`, which fails on those
+/// and left `build: None` — and `prune_candidates` skips anything
+/// without a build, so every variant archive was exempt from the
+/// keep-N policy and accumulated forever (review finding M2,
+/// 2026-09-21).
+pub fn label_build(label: &str) -> Option<u64> {
+    let rest = label.strip_prefix('b')?;
+    // `b10672` or `b10672-cuda-vulkan`: the number ends at the first '-'.
+    let digits = rest.split('-').next()?;
+    // A free-form label that merely starts with 'b' must stay unnumbered.
+    (!digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit()))
+        .then(|| digits.parse().ok())
+        .flatten()
+}
+
 /// Which archives auto-prune may delete (design session 2026-08-30,
 /// Scott chose keep-5-configurable): among BUILD-NUMBERED archives,
 /// newest-first, everything past `keep` — except the one currently
@@ -246,7 +265,7 @@ pub fn list_archives_in(dir: &Path) -> Vec<Archive> {
                     let label = e.file_name().to_str()?.to_string();
                     let server = e.path().join("llama-server");
                     server.is_file().then(|| Archive {
-                        build: label.strip_prefix('b').and_then(|b| b.parse().ok()),
+                        build: label_build(&label),
                         label,
                         server,
                     })
@@ -526,5 +545,56 @@ mod build_marker_tests {
         let m = dir.path().join("build.running");
         std::fs::write(&m, "not-a-pid\n").unwrap();
         assert!(!build_running_at(&m));
+    }
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    /// Review finding M2 (2026-09-21). Variant builds archive as
+    /// `b10672-cuda`; the old parse returned None for those, and
+    /// `prune_candidates` filters `build.is_some()`, so they were
+    /// exempt from retention and piled up forever.
+    #[test]
+    fn a_backend_suffixed_archive_still_carries_its_build_number() {
+        assert_eq!(label_build("b10672"), Some(10_672));
+        assert_eq!(label_build("b10672-cuda"), Some(10_672));
+        assert_eq!(label_build("b10672-cuda-vulkan"), Some(10_672));
+        assert_eq!(label_build("b11064-cpu"), Some(11_064));
+    }
+
+    /// A hand-made label keeps its exemption — that is the point of
+    /// keeping one, and pruning someone's pinned build would be worse
+    /// than keeping too many.
+    #[test]
+    fn a_free_label_is_still_unnumbered() {
+        assert_eq!(label_build("known-good"), None);
+        assert_eq!(label_build("baseline"), None, "starts with b, not a build");
+        assert_eq!(label_build("b"), None);
+        assert_eq!(label_build("b-cuda"), None);
+        assert_eq!(label_build("10672"), None, "no b prefix");
+        // Rust's u64 parse ACCEPTS a leading '+', so `parse()` alone
+        // would turn this into build 10672. The digit check is what
+        // stops it (mutation check M48, 2026-09-23).
+        assert_eq!(label_build("b+10672"), None);
+    }
+
+    /// And the consequence the finding names: a suffixed archive is now
+    /// eligible for the keep-N policy.
+    #[test]
+    fn variant_archives_are_prunable_again() {
+        let a = |label: &str| Archive {
+            label: label.to_string(),
+            build: label_build(label),
+            server: PathBuf::from("/tmp").join(label).join("llama-server"),
+        };
+        let archives = vec![a("b11064"), a("b11064-cuda"), a("b10985"), a("b10672-cuda")];
+        let doomed = prune_candidates(&archives, 2, None);
+        assert_eq!(
+            doomed,
+            vec!["b10985".to_string(), "b10672-cuda".to_string()],
+            "keep 2, prune the rest — including the suffixed one"
+        );
     }
 }
