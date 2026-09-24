@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 /// One journal event. Context measurements carry `n_ctx`/`error`; bench
 /// results carry `pp_tps`/`tg_tps`. `build` is the llama.cpp build that
 /// produced the numbers — the axis most comparisons care about.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Entry {
     pub when: u64,
@@ -29,24 +29,6 @@ pub struct Entry {
     pub tool_reliability: Option<f64>,
     pub loop_reliability: Option<f64>,
     pub error: Option<String>,
-}
-
-impl Default for Entry {
-    fn default() -> Self {
-        Self {
-            when: 0,
-            model: String::new(),
-            build: None,
-            args_fp: None,
-            n_ctx: None,
-            pp_tps: None,
-            tg_tps: None,
-            eval_score: None,
-            tool_reliability: None,
-            loop_reliability: None,
-            error: None,
-        }
-    }
 }
 
 /// Newest entries kept per model when pruning.

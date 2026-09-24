@@ -836,7 +836,7 @@ pub fn run_steps(
                 n += 1;
                 // Builds emit thousands of lines; narrate the interesting
                 // ones and a heartbeat for the rest.
-                if line.contains('%') || line.contains("Building") || n % 50 == 0 {
+                if line.contains('%') || line.contains("Building") || n.is_multiple_of(50) {
                     progress(line);
                 }
             }

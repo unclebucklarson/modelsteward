@@ -343,15 +343,14 @@ impl LogMiner {
         {
         if let Some(idx) = line.find("spawning server instance with name=") {
             let rest = &line[idx + "spawning server instance with name=".len()..];
-            if let Some((name, port_part)) = rest.split_once(" on port ") {
-                if let Ok(port) = port_part.trim().parse::<u32>() {
+            if let Some((name, port_part)) = rest.split_once(" on port ")
+                && let Ok(port) = port_part.trim().parse::<u32>() {
                     let name = name.trim().to_string();
                     port_model.insert(port, name.clone());
                     let generation = port_gen.entry(port).or_default();
                     *generation += 1;
                     gen_model.insert((port, *generation), name);
                 }
-            }
             return;
         }
         let Some((port, body)) = port_prefix(line) else {
@@ -683,7 +682,11 @@ mod tests {
         let s = &stats[0];
         assert_eq!((s.turns, s.generated_tokens), (1, 70));
         assert_eq!(s.prompt_tokens, 285, "release 355 - generated 70");
-        assert_eq!(s.reused_tokens, 285 - 286_u64.min(285), "processed 286 >= prompt: no reuse credit");
+        // 286 processed against a 285-token prompt: the whole prompt
+        // was re-read, so nothing was reused. (Was written as
+        // `285 - 286.min(285)`, which is just 0 dressed up as
+        // arithmetic — clippy was right to call it.)
+        assert_eq!(s.reused_tokens, 0, "processed 286 >= prompt 285: no reuse credit");
     }
 
     #[test]

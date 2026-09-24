@@ -61,7 +61,7 @@ pub fn split_part(path: &Path) -> Option<(PathBuf, u32, u32)> {
     let (base, part) = rest.rsplit_once('-')?;
     let part: u32 = part.parse().ok()?;
     (part >= 1 && total >= 2 && rest.len() > 6).then(|| {
-        (path.with_file_name(base.to_string()), part, total)
+        (path.with_file_name(base), part, total)
     })
 }
 
@@ -681,8 +681,10 @@ mod tests {
 
     #[test]
     fn embedding_architectures_are_recognized() {
-        let mut meta = crate::core::gguf::GgufMeta::default();
-        meta.architecture = Some("nomic-bert".into());
+        let mut meta = crate::core::gguf::GgufMeta {
+            architecture: Some("nomic-bert".into()),
+            ..Default::default()
+        };
         assert!(is_embedding(Some(&meta)));
         meta.architecture = Some("qwen3".into());
         assert!(!is_embedding(Some(&meta)));

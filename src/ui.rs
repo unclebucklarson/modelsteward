@@ -2612,7 +2612,7 @@ impl App {
                         pending = Some(RowAction::Unload(id.clone()));
                     }
                 }
-                (Some(id), Some("unloaded")) => {
+                (Some(id), Some("unloaded"))
                     // Loading is the app ACTING on a model, so a disabled
                     // one is refused (Scott, 2026-08-31). It would fail
                     // anyway now that disabled models leave the preset —
@@ -2629,10 +2629,9 @@ impl App {
                              OpenCode automatically.",
                         )
                         .clicked()
-                    {
+                    => {
                         pending = Some(RowAction::Load(id.clone()));
                     }
-                }
                 _ => {}
             }
             if let Some(id) = &r.router_id
@@ -3233,8 +3232,8 @@ impl App {
                                 // Applying mid-campaign would race the
                                 // worker for the preset and GPU — buttons
                                 // sit out until the run finishes.
-                                if let Some(w) = &report.verdict.winner {
-                                    if ui
+                                if let Some(w) = &report.verdict.winner
+                                    && ui
                                         .add_enabled(
                                             idle,
                                             egui::Button::new(format!("Apply {w}")),
@@ -3248,7 +3247,6 @@ impl App {
                                     {
                                         apply = Some((menu_name.to_string(), w.clone()));
                                     }
-                                }
                                 if !applied.is_empty()
                                     && ui
                                         .add_enabled(
