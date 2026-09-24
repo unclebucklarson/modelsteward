@@ -273,11 +273,53 @@ static BUILD_LOCK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool
 pub struct BuildGuard;
 impl Drop for BuildGuard {
     fn drop(&mut self) {
+        let _ = std::fs::remove_file(build_marker_path());
         BUILD_LOCK.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
+/// Cross-process marker for "a managed build is running here".
+///
+/// [`BUILD_LOCK`] is an `AtomicBool`, so it only ever saw builds inside
+/// ONE process — the GUI's auto-build and its Advisor button. The
+/// scenario that actually costs a measurement crosses processes: a
+/// 03:00 auto-build in the GUI while `modelsteward --bench` runs in a
+/// terminal. An atomic cannot see that (review finding M12, 2026-09-21;
+/// the review named the cross-process case but not that the primitive
+/// could not detect it).
+pub fn build_marker_path() -> PathBuf {
+    crate::core::router::state_dir().join("build.running")
+}
+
+/// Is a managed build running anywhere on this machine?
+///
+/// Pid liveness is checked the same way router ownership is: read
+/// `/proc/<pid>/cmdline` and require it to still be US. A bare
+/// "does the pid exist" test would answer yes for whatever process
+/// recycled the number after a crash left the marker behind.
+pub fn build_running_at(marker: &Path) -> bool {
+    let Ok(text) = std::fs::read_to_string(marker) else {
+        return false;
+    };
+    let Ok(pid) = text.trim().parse::<u32>() else {
+        return false;
+    };
+    let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) else {
+        return false;
+    };
+    String::from_utf8_lossy(&cmdline).contains("modelsteward")
+}
+
+pub fn build_running() -> bool {
+    build_running_at(&build_marker_path())
+}
+
 pub fn try_lock_build() -> Option<BuildGuard> {
+    // Another PROCESS building is just as disqualifying as another
+    // thread: they share one checkout.
+    if build_running() {
+        return None;
+    }
     BUILD_LOCK
         .compare_exchange(
             false,
@@ -286,7 +328,17 @@ pub fn try_lock_build() -> Option<BuildGuard> {
             std::sync::atomic::Ordering::SeqCst,
         )
         .is_ok()
-        .then_some(BuildGuard)
+        .then(|| {
+            // Publish for everyone else. Best-effort: failing to write
+            // the marker must not block a build the in-process lock has
+            // already granted.
+            let path = build_marker_path();
+            if let Some(dir) = path.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&path, std::process::id().to_string());
+            BuildGuard
+        })
 }
 
 /// The whole release pipeline in one place — clone if needed, fetch
@@ -428,5 +480,51 @@ mod tests {
         assert_eq!(got[0].build, Some(10_630));
         assert!(got[0].server.ends_with("b10630/llama-server"));
         assert_eq!(got[2].build, None, "labeled variant carries no number");
+    }
+}
+
+#[cfg(test)]
+mod build_marker_tests {
+    use super::*;
+
+    /// Review finding M12 (2026-09-21): no measurement path refuses
+    /// while a managed build is hammering every core. The lock it named
+    /// was an AtomicBool, which cannot see another PROCESS building —
+    /// which is the case the finding describes.
+    #[test]
+    fn a_missing_marker_is_not_a_running_build() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!build_running_at(&dir.path().join("build.running")));
+    }
+
+    #[test]
+    fn our_own_live_pid_counts_as_a_running_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("build.running");
+        std::fs::write(&m, std::process::id().to_string()).unwrap();
+        assert!(build_running_at(&m));
+    }
+
+    /// A crash leaves the marker behind and the pid is recycled. The
+    /// number being alive is not evidence OUR build is alive — the same
+    /// reasoning as router marker ownership. pid 1 is always running and
+    /// is never us.
+    #[test]
+    fn a_live_pid_that_is_not_us_is_not_a_running_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("build.running");
+        std::fs::write(&m, "1").unwrap();
+        assert!(
+            !build_running_at(&m),
+            "pid reuse must not read as our build still running"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_marker_is_not_a_running_build() {
+        let dir = tempfile::tempdir().unwrap();
+        let m = dir.path().join("build.running");
+        std::fs::write(&m, "not-a-pid\n").unwrap();
+        assert!(!build_running_at(&m));
     }
 }

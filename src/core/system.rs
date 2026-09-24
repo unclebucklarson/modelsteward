@@ -705,6 +705,60 @@ pub fn gpu_conditions(cfg: &settings::AppConfig) -> (Option<u64>, Option<String>
     (free, tenant)
 }
 
+/// A reason a number recorded RIGHT NOW would be wrong — or a model
+/// loaded right now would fit badly.
+///
+/// One type for one rule, because the codebase kept restating it and
+/// kept missing places: bench checked the GPU once before its loop,
+/// calibrate checked per model, quality checked nothing, and no path at
+/// all checked whether a managed build was saturating the cores
+/// (review findings H4/M12/M14, 2026-09-21).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Contention {
+    /// Another process holds the GPU.
+    Gpu(String),
+    /// A managed llama.cpp build is running. It takes every core, and
+    /// pp/tg, load times and agent-loop timings all schedule on those —
+    /// invisible to any GPU check.
+    Build,
+}
+
+impl Contention {
+    pub fn message(&self) -> String {
+        match self {
+            Self::Gpu(who) => format!(
+                "{who} is holding the GPU — a number measured against that would \
+                 record the contention, not the model. Free the card (e.g. \
+                 `ollama stop <model>`, or wait for its keep-alive to expire)"
+            ),
+            Self::Build => "a managed llama.cpp build is running — it takes every \
+                 core, and speed, load-time and agent-loop numbers all schedule on \
+                 those. Let the build finish"
+                .to_string(),
+        }
+    }
+}
+
+/// The one precondition every measurement shares. `None` = idle.
+pub fn contention(cfg: &settings::AppConfig) -> Option<Contention> {
+    if crate::core::managed::build_running() {
+        return Some(Contention::Build);
+    }
+    gpu_conditions(cfg).1.map(Contention::Gpu)
+}
+
+/// Refuse rather than record. "A contended measurement is a wrong
+/// measurement, not a slow one" — so this bails, it does not warn.
+/// Serving-side callers want [`contention`] directly: refusing to LOAD
+/// a model the user asked for would be worse than loading it badly, as
+/// long as they are told.
+pub fn refuse_if_contended(cfg: &settings::AppConfig) -> anyhow::Result<()> {
+    match contention(cfg) {
+        Some(c) => anyhow::bail!("{}, then try again.", c.message()),
+        None => Ok(()),
+    }
+}
+
 pub fn write_preset(
     cfg: &settings::AppConfig,
     extra_dirs: &[PathBuf],
