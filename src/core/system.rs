@@ -300,9 +300,33 @@ pub fn scan_models_reported(
             let n = added_dirs.len() + added_ollama.len();
             scan_dirs.extend(added_dirs);
             ollama.extend(added_ollama);
-            (n > 0).then(|| {
+            // We refuse to serve warden's OWN removable roots, but the
+            // user can configure the same drive by hand and we would
+            // walk it as a shelf — duplicating the fleet under `-2`
+            // aliases, from a disk that can be unplugged (review
+            // finding M5, 2026-09-21). Said out loud, never filtered:
+            // they typed that path.
+            let risky = warden::removable_scan_dirs(&inv, &scan_dirs);
+            let warning = (!risky.is_empty()).then(|| {
+                format!(
+                    "scanning {} on removable storage that modelwarden files as BACKUP: {}. \
+                     Models served from there duplicate your fleet and vanish when the \
+                     drive is unplugged",
+                    if risky.len() == 1 { "a directory" } else { "directories" },
+                    risky
+                        .iter()
+                        .map(|p| p.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            });
+            let contributed = (n > 0).then(|| {
                 format!("modelwarden contributed {n} model store(s) beyond those configured here")
-            })
+            });
+            match (contributed, warning) {
+                (Some(c), Some(w)) => Some(format!("{c}; {w}")),
+                (some, None) | (None, some) => some,
+            }
         }
         Loaded::Missing => None,
         Loaded::Damaged(why) => Some(format!(

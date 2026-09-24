@@ -160,6 +160,32 @@ pub struct Roots {
     pub ollama: Vec<PathBuf>,
 }
 
+/// Configured scan dirs that sit on a store warden classifies as
+/// REMOVABLE — a backup tier, not a shelf.
+///
+/// `servable_roots` deliberately drops warden's own removable roots:
+/// serving from a backup duplicates the whole fleet under `-2` aliases
+/// and points every agent config at a drive that can be unplugged. But
+/// nothing stopped the user configuring that same path as one of their
+/// own `scan_dirs`, and then it was walked as an ordinary shelf
+/// (review finding M5, 2026-09-21).
+///
+/// Reported, never filtered: the user typed that path, and silently
+/// ignoring a configured directory would be its own bug.
+pub fn removable_scan_dirs(inv: &Inventory, scan_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    let removable: Vec<&PathBuf> = inv
+        .roots
+        .iter()
+        .filter(|r| r.kind.as_deref() == Some("removable"))
+        .map(|r| &r.path)
+        .collect();
+    scan_dirs
+        .iter()
+        .filter(|d| removable.iter().any(|r| d.starts_with(r)))
+        .cloned()
+        .collect()
+}
+
 pub fn servable_roots(inv: &Inventory) -> Roots {
     let mut out = Roots::default();
     for r in &inv.roots {
@@ -513,4 +539,56 @@ mod tests {
         assert_eq!(servable_roots(&Inventory::default()), Roots::default());
     }
 
+    /// Review finding M5 (2026-09-21). `servable_roots` drops warden's
+    /// removable roots because serving from a backup tier duplicates
+    /// the whole fleet under `-2` aliases and points agent configs at
+    /// a drive that can be unplugged. Nothing stopped the user
+    /// configuring that same path in `scan_dirs`, where it was walked
+    /// as an ordinary shelf. Path from warden's own live inventory.
+    #[test]
+    fn a_scan_dir_on_a_removable_root_is_reported() {
+        let inv = roots_fixture(&[
+            ("a", "shelf", "/home/buck/models"),
+            ("ext-53b9be4e", "removable", "/run/media/buck/disk/model_backup"),
+        ]);
+        let dirs = vec![
+            PathBuf::from("/home/buck/models"),
+            PathBuf::from("/run/media/buck/disk/model_backup"),
+            // Nested under the removable root: same drive, same problem.
+            PathBuf::from("/run/media/buck/disk/model_backup/Qwen3.8-27B-GGUF"),
+        ];
+        assert_eq!(
+            removable_scan_dirs(&inv, &dirs),
+            vec![
+                PathBuf::from("/run/media/buck/disk/model_backup"),
+                PathBuf::from("/run/media/buck/disk/model_backup/Qwen3.8-27B-GGUF"),
+            ],
+            "the shelf is fine; both removable paths are not"
+        );
+    }
+
+    /// An ordinary setup must stay quiet, and a path that merely looks
+    /// similar is not on the drive.
+    #[test]
+    fn ordinary_scan_dirs_are_not_reported() {
+        let inv = roots_fixture(&[
+            ("a", "shelf", "/home/buck/models"),
+            ("b", "removable", "/run/media/buck/disk"),
+        ]);
+        let dirs = vec![
+            PathBuf::from("/home/buck/models"),
+            // Prefix-similar but a different directory entirely.
+            PathBuf::from("/run/media/buck/disk2/models"),
+        ];
+        assert!(removable_scan_dirs(&inv, &dirs).is_empty());
+    }
+
+    /// No warden, no inventory, no opinion.
+    #[test]
+    fn without_warden_roots_nothing_is_reported() {
+        let inv = roots_fixture(&[]);
+        assert!(
+            removable_scan_dirs(&inv, &[PathBuf::from("/run/media/buck/disk")]).is_empty()
+        );
+    }
 }
