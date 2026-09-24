@@ -380,7 +380,63 @@ NOT unblocked by the laptop: multi-GPU work (it is still one GPU).
   automation; measured a solid negative on b10630, watch upstream.
 - **Community dataset (Tier 2)** — needs a home to exist first.
 
-## Where things stand (2026-09-11, v0.7.0 — 266 unit + 15 integration tests green)
+## Where things stand (2026-09-24, v0.8.0 — 397 unit + 15 integration tests green, clippy zero)
+
+**v0.8.0** closes 39 commits since v0.7.0. Two arcs.
+
+**The Hermes incident, and the class of bug behind it.** Hermes refused
+the user's default model with "context window of 4,096 tokens". The
+first diagnosis — a hole in an append-only cache — was WRONG, and our
+own rotated backups disproved it. The server really was serving 4,096:
+the resident child had loaded against a busy GPU, `--fit` had fallen to
+its floor, and it stayed that way for sixteen hours while every agent
+config advertised ~110,000. Hermes was the only component that noticed.
+
+That produced the release's biggest idea: **`args_fp` fingerprints the
+arguments, and `--fit` is not an argument.** It resolves at load time
+against whatever VRAM is free then, so an unchanged fingerprint is no
+evidence a measurement still holds. The same model at the same
+`args_fp` was observed serving 4,096 / 120,064 / 111,616 in one day.
+The app now reads what the router is actually serving and says so when
+it contradicts what we publish.
+
+Alongside it: a port change moves our Hermes provider instead of
+cloning it (logged 2026-09-08 as "lower stakes", which was wrong), the
+duplicate it already left can be commented out, unreachable cache rows
+are named and removable, and a model that measures nothing no longer
+leaves every agent config silently.
+
+**An adversarial review by a local 27B, and its findings.** Qwen 3.8 27B
+running under Hermes reviewed the whole diff (`qwen-hermes-codereview/`).
+Of the findings verified against source, twelve were real and one was
+wrong. Fixed here: the drift canary was structurally blind to a change
+in the log line's PREFIX (both its counters sat behind the same gates);
+`AppConfig` silently deleted settings a newer binary had written; the
+journal carried only empty-cache speed, so the rebuild scorecard could
+not see a regression in the number a user feels; GPU state was a scalar
+in one place and deduped two identical cards into one in another;
+variant build archives were exempt from retention forever; the token
+ledger double-credited on a crash between its two writes; a symlinked
+model was sized by its link; a backup drive configured as a shelf was
+walked silently; and the Library read a 5.2 MB router.log per row, per
+repaint.
+
+The review also caught a process failure: nine clippy warnings against
+a rule that says zero. Now zero.
+
+**One rule instead of four copies.** `system::contention` is the
+precondition every measurement shares — bench checked the GPU once
+before its loop, calibrate per model, quality not at all, and nothing
+anywhere checked whether a managed build was saturating the cores.
+Measurement paths refuse; the serving-load path warns, because
+refusing to load a model the user asked for is worse than loading it
+badly as long as they are told.
+
+**Known limitation.** The live-vs-measured guard DETECTS a bad fit;
+nothing prevents one. The natural next step is the precondition that
+already exists for measurement, applied to the serving load itself.
+
+### Older status (2026-09-11, v0.7.0 — 266 unit + 15 integration tests green)
 
 **v0.7.0** closes 26 commits since v0.6.75. User-visible: the router port
 is changeable and actually takes effect, reaching opencode.json (both
