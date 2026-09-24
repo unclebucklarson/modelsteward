@@ -4748,6 +4748,11 @@ impl App {
             archives_keep: self.cfg.archives_keep,
             persistence_prompt_dismissed: self.cfg.persistence_prompt_dismissed,
             overrides: self.cfg.overrides.clone(),
+            // Carried, NOT defaulted: this form rebuilds the config
+            // field by field, so defaulting here would drop unknown
+            // keys on every Settings save — the H3 bug reintroduced at
+            // the one place a user changes settings most.
+            unknown: self.cfg.unknown.clone(),
         })
     }
 

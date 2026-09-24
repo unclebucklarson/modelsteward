@@ -120,6 +120,22 @@ pub struct AppConfig {
     /// still reports the state either way.
     #[serde(default)]
     pub persistence_prompt_dismissed: bool,
+    /// Every key in the file this binary does not recognise, kept
+    /// verbatim and written back unchanged.
+    ///
+    /// `#[serde(default)]` means an unknown field deserialises to
+    /// nothing and `save` re-serialises the struct — so an older binary
+    /// reading a newer config used to delete the settings it could not
+    /// represent, permanently, the moment anything called `save`
+    /// (review finding H3, 2026-09-21). A downgrade, or a restored
+    /// snapshot, is enough.
+    ///
+    /// The review proposed refusing to load a newer file. That trades
+    /// silent loss for a dead app and still leaves the user unable to
+    /// change a setting. Carrying the keys costs one field and loses
+    /// nothing.
+    #[serde(flatten)]
+    pub unknown: serde_json::Map<String, serde_json::Value>,
 }
 
 fn default_archives_keep() -> u32 {
@@ -146,6 +162,7 @@ impl Default for AppConfig {
             managed_auto_build: false,
             archives_keep: default_archives_keep(),
             persistence_prompt_dismissed: false,
+            unknown: Default::default(),
         }
     }
 }
@@ -363,5 +380,62 @@ mod tests {
         // Garbage file -> defaults, not a crash.
         std::fs::write(&path, "not json").unwrap();
         assert_eq!(AppConfig::load(&path), AppConfig::default());
+    }
+}
+
+#[cfg(test)]
+mod tests_schema {
+    use super::*;
+
+    /// Review finding H3 (2026-09-21): `AppConfig` derives
+    /// `#[serde(default)]` and knows nothing about fields it has never
+    /// heard of. A newer binary (or a hand edit) adds one; an older
+    /// binary loads the file, drops it, and `save` writes the reduced
+    /// struct back — the setting is gone from disk for good.
+    ///
+    /// The review proposed a `schema_version` that refuses to load a
+    /// newer file. That stops the truncation by stopping the app, and
+    /// the user still cannot change a setting until they upgrade.
+    /// Keeping the unknown keys and writing them back costs less and
+    /// loses nothing.
+    #[test]
+    fn a_field_this_binary_does_not_know_survives_a_load_and_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        std::fs::write(
+            &path,
+            r#"{"port":8181,"advisor_model":"future-thing","future":{"nested":[1,2]}}"#,
+        )
+        .unwrap();
+
+        let (cfg, err) = AppConfig::load_checked(&path);
+        assert!(err.is_none(), "a newer file is not a damaged one: {err:?}");
+        assert_eq!(cfg.port, 8181, "known fields still load");
+
+        cfg.save(&path).unwrap();
+
+        let back: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back["port"], 8181);
+        assert_eq!(
+            back["advisor_model"], "future-thing",
+            "a downgrade must not eat a setting it cannot represent"
+        );
+        assert_eq!(back["future"]["nested"], serde_json::json!([1, 2]));
+    }
+
+    /// And the ordinary case must be untouched: no stray key, no
+    /// surprise in a file the user may read.
+    #[test]
+    fn an_ordinary_config_round_trips_without_gaining_anything() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        let cfg = AppConfig { port: 9999, ..Default::default() };
+        cfg.save(&path).unwrap();
+        let (back, err) = AppConfig::load_checked(&path);
+        assert!(err.is_none());
+        assert_eq!(back, cfg);
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("unknown"), "no internal field leaks into the file:\n{raw}");
     }
 }
