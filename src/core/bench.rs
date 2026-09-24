@@ -224,6 +224,11 @@ pub fn run_baselines(
         return Ok((0, 0));
     }
 
+    // BEFORE evicting anything. Refusing after the unload cost the user
+    // their resident model and then did no work — found live while
+    // verifying this change, 2026-09-23.
+    system::refuse_if_contended(cfg)?;
+
     // Only now, with real work ahead, free the GPU: our router's resident
     // models get unloaded; a server we didn't start is never touched.
     match router::status(&dir, &system::router_config(cfg)) {
@@ -255,15 +260,6 @@ pub fn run_baselines(
     // (modellab handoff 2026-09-02, issue 4). A contended baseline is
     // not a slower number, it is a WRONG one, and it gets written into
     // measurements.json as if it were the model's speed. Refuse.
-    let (_free_vram_mib, tenant) = system::gpu_conditions(cfg);
-    if let Some(t) = &tenant {
-        anyhow::bail!(
-            "{t} is holding the GPU — a baseline measured against that would \
-             record the contention, not the model. Free the card (e.g. `ollama \
-             stop <model>`, or wait for its keep-alive to expire) and bench again."
-        );
-    }
-
     let total = targets.len();
     let mut benched = 0;
     let mut failed = 0;
@@ -303,6 +299,12 @@ pub fn run_baselines(
                 " — a 27B takes about a minute".to_string()
             }
         ));
+        // PER MODEL, not once before the loop. A fleet bench runs for
+        // minutes; an Ollama model loaded — or a managed build started —
+        // after the opening check used to be recorded as this model's
+        // speed (review finding H4, 2026-09-21). Calibrate already
+        // sampled per model; bench did not.
+        system::refuse_if_contended(cfg)?;
         match run(&bin, &file.path, &extra, depth) {
             Ok(b) => {
                 let fmt = |v: Option<f64>| v.map(|t| format!("{t:.1}")).unwrap_or("?".into());

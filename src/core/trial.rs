@@ -1732,6 +1732,13 @@ pub fn run_trial(
                  no_mmproj: Option<bool>,
                  progress: &mut dyn FnMut(String)|
      -> Result<TrialResult> {
+        // EVERY round, not just the first. An A/B spans minutes; an
+        // Ollama model loaded — or a managed build started — between
+        // baseline and variant made the comparison measure the
+        // contention, and the verdict was recorded as if clean (review
+        // finding M8, 2026-09-21). The existing `loaded_other` check
+        // only fired on a round that had already FAILED.
+        system::refuse_if_contended(cfg)?;
         progress(format!("[{n}/{total}] {model} · {label}: applying config + loading…"));
         let mut trial_cfg = cfg.clone();
         let mut ov = base_ov.clone();

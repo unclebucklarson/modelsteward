@@ -404,6 +404,14 @@ pub fn run_and_record(
     progress: &mut dyn FnMut(String),
 ) -> Result<QualityScore> {
     use crate::core::{discover, history, system};
+    // The one write path that established no precondition at all, while
+    // bench and calibrate both did (review finding M14, 2026-09-21).
+    // The review argued this is milder than it looks — a too-slow turn
+    // hits the 600 s timeout and aborts as an honest inconclusive rather
+    // than recording a low score — and that is right. It is still the
+    // rule applied unevenly, and an abort wastes a battery that takes
+    // minutes. Refuse up front instead.
+    system::refuse_if_contended(cfg)?;
     progress(format!("quality {model}: loading…"));
     router::fetch_settled_ctx(cfg.port, model)?;
     // Unload BEFORE propagating a failure. `?` here used to return past

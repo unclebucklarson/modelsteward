@@ -954,7 +954,12 @@ impl App {
     /// begin(): Set Up Everything and the Load/measure flows go through
     /// bare spawn (review finding F9, 2026-09-01).
     fn refuse_while_building(&mut self) -> bool {
-        if self.build_flag.load(std::sync::atomic::Ordering::Relaxed) {
+        // `build_flag` only knows about builds THIS GUI started. A CLI
+        // build, or a second instance, was invisible to it — so the
+        // marker is consulted too (review finding M12, 2026-09-21).
+        if self.build_flag.load(std::sync::atomic::Ordering::Relaxed)
+            || crate::core::managed::build_running()
+        {
             self.log(
                 "a managed llama.cpp build is running — measurements taken beside a \
                  full-core compile are not honest; try again when it finishes"
@@ -1468,6 +1473,20 @@ impl App {
             RowAction::Load(id) => {
                 if self.refuse_while_building() {
                     return;
+                }
+                // A load into a contended card is not refused — the user
+                // asked for this model — but it must not be silent.
+                // `--fit` sizes against free VRAM at load time, so this
+                // is the moment a model quietly gets a fraction of its
+                // measured window (live incident 2026-09-20: 4,096 of a
+                // measured 115,712, resident for sixteen hours).
+                if let Some(c) = system::contention(&self.cfg) {
+                    self.log(format!(
+                        "heads up — {}. Loading anyway; the context this load \
+                         settles on will be smaller than the measured one, and \
+                         the Server tab will say so",
+                        c.message()
+                    ));
                 }
                 // Load = measure = make available to OpenCode, and keep it
                 // warm for immediate use.

@@ -5,7 +5,7 @@
 use crate::core::{discover, library, router, settings};
 use anyhow::Result;
 use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ScanReport {
@@ -741,10 +741,29 @@ impl Contention {
 
 /// The one precondition every measurement shares. `None` = idle.
 pub fn contention(cfg: &settings::AppConfig) -> Option<Contention> {
-    if crate::core::managed::build_running() {
+    contention_at(&crate::core::managed::build_marker_path(), cfg)
+}
+
+/// [`contention`] with the build marker injectable, so the rule can be
+/// tested without a build actually running.
+pub fn contention_at(marker: &Path, cfg: &settings::AppConfig) -> Option<Contention> {
+    worst_of(
+        crate::core::managed::build_running_at(marker),
+        gpu_conditions(cfg).1,
+    )
+}
+
+/// Which condition to report when more than one holds. Pure, so the
+/// precedence is pinned by a test rather than by a comment.
+///
+/// Build wins: it is the condition a GPU check cannot see, so reporting
+/// the visible one would send the user to free a card that is not the
+/// problem while the real cause keeps running.
+pub fn worst_of(build_running: bool, gpu_tenant: Option<String>) -> Option<Contention> {
+    if build_running {
         return Some(Contention::Build);
     }
-    gpu_conditions(cfg).1.map(Contention::Gpu)
+    gpu_tenant.map(Contention::Gpu)
 }
 
 /// Refuse rather than record. "A contended measurement is a wrong
@@ -1432,5 +1451,74 @@ mod tests {
         assert_eq!(a, env_fingerprint(&mk(10216, 24111)), "stable");
         assert_ne!(a, env_fingerprint(&mk(10360, 24111)), "build matters");
         assert_ne!(a, env_fingerprint(&mk(10216, 48000)), "devices matter");
+    }
+}
+
+#[cfg(test)]
+mod tests_contention {
+    use super::*;
+
+    /// A config that cannot find an Ollama peer, so the GPU arm is
+    /// quiet and the build arm is what is under test. Port 1 is
+    /// reserved and never answers.
+    fn quiet_cfg() -> settings::AppConfig {
+        settings::AppConfig { ollama_port: 1, ..Default::default() }
+    }
+
+    #[test]
+    fn an_idle_machine_has_no_contention() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(contention_at(&dir.path().join("none"), &quiet_cfg()), None);
+    }
+
+    /// Review finding M12 (2026-09-21): every measurement path ran
+    /// happily while a managed build took every core. pp/tg, load times
+    /// and agent-loop timings all schedule on those, and no GPU check
+    /// can see it.
+    #[test]
+    fn a_running_build_is_contention_even_with_a_free_gpu() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("build.running");
+        std::fs::write(&marker, std::process::id().to_string()).unwrap();
+        assert_eq!(contention_at(&marker, &quiet_cfg()), Some(Contention::Build));
+    }
+
+    #[test]
+    fn refusing_names_the_reason_and_the_remedy() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("build.running");
+        std::fs::write(&marker, std::process::id().to_string()).unwrap();
+        let msg = contention_at(&marker, &quiet_cfg()).unwrap().message();
+        assert!(msg.contains("build is running"), "{msg}");
+        assert!(msg.contains("Let the build finish"), "name the remedy: {msg}");
+
+        let gpu = Contention::Gpu("ollama: qwen3".into()).message();
+        assert!(gpu.contains("ollama: qwen3"), "{gpu}");
+        assert!(gpu.contains("ollama stop"), "name the remedy: {gpu}");
+    }
+
+    /// A stale marker must not wedge every measurement path forever.
+    #[test]
+    fn a_dead_builds_marker_does_not_block_measurement() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("build.running");
+        std::fs::write(&marker, "1").unwrap(); // alive, but not us
+        assert_eq!(contention_at(&marker, &quiet_cfg()), None);
+    }
+
+    /// Both at once. Build must win: a user told "free the GPU" would
+    /// stop Ollama, see the number still wrong, and have no idea a
+    /// build was eating every core.
+    #[test]
+    fn a_build_outranks_a_gpu_tenant_in_the_report() {
+        assert_eq!(
+            worst_of(true, Some("ollama: qwen3".into())),
+            Some(Contention::Build)
+        );
+        assert_eq!(
+            worst_of(false, Some("ollama: qwen3".into())),
+            Some(Contention::Gpu("ollama: qwen3".into()))
+        );
+        assert_eq!(worst_of(false, None), None);
     }
 }
